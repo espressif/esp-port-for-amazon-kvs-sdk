@@ -1,0 +1,10 @@
+description: "Simple video server - direct V4L2 or media_stream capture"
+dependencies:
+  espressif/esp_video:
+    version: ">=2.0.1,<2.3.0"   # 2.3.0 pulls broken esp_ipa 2.2.0; see components/media_stream
+  media_stream:
+    path: "../../../components/media_stream"
+  protocol_examples_common:
+    path: ${IDF_PATH}/examples/common_components/protocol_examples_common
+  espressif/mdns:
+    version: "^1.0.3"

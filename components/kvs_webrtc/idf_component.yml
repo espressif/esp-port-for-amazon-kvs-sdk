@@ -1,0 +1,38 @@
+dependencies:
+  esp_webrtc_utils:
+    path: ../esp_webrtc_utils
+    version: "*"
+
+  espressif/libsrtp: "2.8.*"
+
+  esp_usrsctp:
+    path: ../esp_usrsctp
+    version: "*"
+
+  kvs_utils:
+    path: ../kvs_utils
+    version: "*"
+    public: true
+
+  credential:
+    path: ../credential
+    version: "*"
+
+  state_machine:
+    path: ../state_machine
+    version: "*"
+
+  libwebsockets:
+    path: ../libwebsockets
+    version: "*"
+
+  media_stream:
+    path: ../media_stream
+    version: "*"
+
+  app_webrtc:
+    path: ../app_webrtc
+    version: "*"
+
+  espressif/esp_websocket_client:
+    version: "*"

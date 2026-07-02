@@ -1,0 +1,174 @@
+name: Build Examples & Docs
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build_idf_v5_4:
+    name: "v5.4 | ${{ matrix.example }} | ${{ matrix.target }}"
+    runs-on: ubuntu-22.04
+    container: espressif/idf:release-v5.4
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # webrtc_classic: esp32, esp32s3, esp32p4
+          - { example: webrtc_classic, target: esp32 }
+          - { example: webrtc_classic, target: esp32s3 }
+          - { example: webrtc_classic, target: esp32p4 }
+          # esp_camera: esp32, esp32s3, esp32p4
+          - { example: esp_camera, target: esp32 }
+          - { example: esp_camera, target: esp32s3 }
+          - { example: esp_camera, target: esp32p4 }
+          # signaling_only: esp32c6
+          - { example: signaling_only, target: esp32c6 }
+          # streaming_only: esp32p4
+          - { example: streaming_only, target: esp32p4 }
+          # network_adapter: esp32c6
+          - { example: network_adapter, target: esp32c6 }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply SDK patches
+        shell: bash
+        run: |
+          git config --global --add safe.directory "*"
+          cd amazon-kinesis-video-streams-webrtc-sdk-c
+          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+
+      - name: Build ${{ matrix.example }} for ${{ matrix.target }}
+        env:
+          IDF_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd examples/${{ matrix.example }}
+          idf.py set-target ${IDF_TARGET}
+          idf.py build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ matrix.example }}-${{ matrix.target }}-idf5.4"
+          path: |
+            examples/${{ matrix.example }}/build/*.bin
+            examples/${{ matrix.example }}/build/*.elf
+            examples/${{ matrix.example }}/build/*.map
+          retention-days: 30
+
+  build_idf_v5_5:
+    name: "v5.5 | ${{ matrix.example }} | ${{ matrix.target }}"
+    runs-on: ubuntu-22.04
+    container: espressif/idf:release-v5.5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # webrtc_classic: esp32, esp32s3, esp32p4
+          - { example: webrtc_classic, target: esp32 }
+          - { example: webrtc_classic, target: esp32s3 }
+          - { example: webrtc_classic, target: esp32p4 }
+          # esp_camera: esp32, esp32s3, esp32p4
+          - { example: esp_camera, target: esp32 }
+          - { example: esp_camera, target: esp32s3 }
+          - { example: esp_camera, target: esp32p4 }
+          # signaling_only: esp32c6, esp32c5
+          - { example: signaling_only, target: esp32c6 }
+          - { example: signaling_only, target: esp32c5 }
+          # streaming_only: esp32p4
+          - { example: streaming_only, target: esp32p4 }
+          # network_adapter: esp32c6, esp32c5
+          - { example: network_adapter, target: esp32c6 }
+          - { example: network_adapter, target: esp32c5 }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply SDK patches
+        shell: bash
+        run: |
+          git config --global --add safe.directory "*"
+          cd amazon-kinesis-video-streams-webrtc-sdk-c
+          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+
+      - name: Build ${{ matrix.example }} for ${{ matrix.target }}
+        env:
+          IDF_TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd examples/${{ matrix.example }}
+          idf.py set-target ${IDF_TARGET}
+          idf.py build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ matrix.example }}-${{ matrix.target }}-idf5.5"
+          path: |
+            examples/${{ matrix.example }}/build/*.bin
+            examples/${{ matrix.example }}/build/*.elf
+            examples/${{ matrix.example }}/build/*.map
+          retention-days: 30
+
+  test_linux:
+    name: "Unit Tests | Linux host"
+    runs-on: ubuntu-22.04
+    container: espressif/idf:release-v5.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply SDK patches
+        shell: bash
+        run: |
+          git config --global --add safe.directory "*"
+          cd amazon-kinesis-video-streams-webrtc-sdk-c
+          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+
+      - name: Build and run tests on Linux target
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          pip install pytest-embedded pytest-embedded-idf
+          cd test_app
+          cp sdkconfig.ci.linux sdkconfig.defaults
+          idf.py --preview set-target linux
+          idf.py build
+          pytest --embedded-services idf --target linux -k test_all -s
+
+  build_docs:
+    name: "Build Documentation"
+    runs-on: ubuntu-22.04
+    container: python:3.11
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          git config --global --add safe.directory "*"
+          apt-get update && apt-get install -y doxygen default-jre-headless plantuml
+          pip install -r docs/requirements.txt
+
+      - name: Build docs
+        shell: bash
+        run: |
+          cd docs
+          build-docs -l en -t esp32
+
+      - name: Upload docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs
+          path: docs/_build/
+          retention-days: 30

@@ -1,0 +1,88 @@
+dependencies:
+  # esp32-camera supports esp32 + esp32s3 (Wrover-Kit and ESP-S3-EYE
+  # board pinouts). H264FrameGrabber.c and MJPEGFrameGrabber.c both have
+  # an explicit `#if CONFIG_IDF_TARGET_ESP32S3` arm that uses esp_camera_*.
+  espressif/esp32-camera:
+    version: ^2.0.2
+    rules:
+      - if: "target in [esp32, esp32s3]"
+
+  # Require esp_video >= 2.0.1: ships the AWB subwindow zero-init fix
+  # (upstream MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon (EV
+  # Board v1.6 and later). Without it the ISP AWB hardware check on
+  # rev >= 3.0 reads stack garbage and ISP init fails -> camera does not
+  # start. Tightening here also auto-climbs the EV-board BSP version via
+  # the dep solver (BSP 5.2.1/5.2.2 pin esp_video ~1.4 and get rejected;
+  # 5.2.3 pins ~2.0 and resolves), so consumers don't need explicit BSP
+  # pins. media_stream does not use the V4L2 pixel format macros that
+  # were renamed/split in the 2.0.0 breaking change.
+  #
+  # Cap below 2.3.0: esp_video 2.3.0 pulls esp_ipa 2.2.0, whose
+  # CMakeLists lists itself in the prebuilt's PRIV_REQUIRES
+  # (add_prebuilt_library ... PRIV_REQUIRES esp_timer esp_ipa), which
+  # the build system cannot resolve -> "Failed to resolve component
+  # 'esp_ipa'" on every P4 camera build. esp_video 2.2.0 pulls the
+  # working esp_ipa 2.1.0. Lift the cap once the esp_ipa self-dep fix
+  # ships upstream:
+  # https://github.com/espressif/esp-video-components/issues/89
+  espressif/esp_video:
+    version: ">=2.0.1,<2.3.0"
+    rules:
+      - if: "target not in [esp32]"
+
+  espressif/esp_h264:
+    public: true
+    version: "*"
+    rules:
+      - if: "target in [esp32p4, esp32s3]"
+
+  espressif/esp_audio_codec:
+    version: "*"
+    matches:
+      # esp_audio_codec 2.6.0's P4 opus_xcorr_kernel_4_opt uses instructions that
+      # fault on P4 rev < 3 silicon (not runtime-guarded upstream). Cap below 2.6.0
+      # for rev < 3; the else clause keeps the latest everywhere else.
+      - if: 'target == "esp32p4" && $CONFIG{ESP32P4_REV_MIN_FULL} < 300'
+        version: "<2.6.0"
+      - if: 'target != "esp32p4" || $CONFIG{ESP32P4_REV_MIN_FULL} >= 300'
+
+  espressif/esp_codec_dev:
+    version: "*"
+
+  # BSP component from component manager
+  espressif/bsp_selector:
+    version: "^1.0.0"
+    rules:
+      - if: "target not in [esp32c5, esp32c6]"
+
+  espressif/esp_image_effects:
+    version: "^1.0.1"
+    rules:
+      - if: "target in [esp32p4]"
+
+  # LVGL is required when the video player receive path is enabled;
+  # the render backend targets an LVGL canvas on the BSP's display.
+  # Co-processor targets (C5/C6) have no display and skip the render
+  # backend entirely — exclude these dependencies there.
+  lvgl/lvgl:
+    version: "^8"
+    rules:
+      - if: "target not in [esp32c5, esp32c6]"
+
+  # esp_lvgl_port 2.8.0 carries the upstream lvgl8 DMA+SPIRAM gate
+  # (esp-bsp PR #783, merged 2026-05-15). Without it the BSP's loose
+  # transitive pin can bring an older esp_lvgl_port that rejects
+  # MALLOC_CAP_DMA|MALLOC_CAP_SPIRAM on PSRAM-DMA-capable SoCs (e.g.
+  # ESP32-P4) — the render backend then fails to allocate its
+  # SPIRAM-backed draw buffer.
+  espressif/esp_lvgl_port:
+    version: "~2.8.0"
+    rules:
+      - if: "target not in [esp32c5, esp32c6]"
+
+  esp_webrtc_utils:
+    path: ../esp_webrtc_utils
+    version: "*"
+
+description: Media stream component
+version: "0.1.0"

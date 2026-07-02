@@ -1,0 +1,27 @@
+# BT Configuration
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ONLY=y
+CONFIG_NW_COPROC_BT_ENABLED=y
+CONFIG_ESP_HOSTED_COPROCESSOR_BT_ENABLED=y
+
+CONFIG_ESP32_WIFI_NVS_ENABLED=
+
+# OTA
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_TWO_OTA=y
+
+# OS
+CONFIG_FREERTOS_HZ=1000
+
+# Enable network only capabilities
+CONFIG_ADAPTER_ONLY_MODE=y
+
+#Disable enterprise support by default
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+
+# Disable ESP-Hosted coprocessor app_main (we provide our own)
+CONFIG_ESP_HOSTED_COPROCESSOR_APP_MAIN=n
+
+# Build network_coprocessor as the SDIO/SPI slave-side firmware: this
+# example IS the coprocessor.
+CONFIG_NETWORK_COPROCESSOR_BUILD_FIRMWARE=y

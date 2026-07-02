@@ -1,0 +1,132 @@
+#
+# ESP32-P4 Function EV Board v1.6 build config for the streaming_only example.
+# Layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32p4;
+# override only the EV-board v1.6-specific deltas here.
+#
+# Build with:
+#   idf.py set-target esp32p4
+#   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_function_ev_board_v16.esp32p4' reconfigure
+#
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# Chip revision - EV Function Board v1.6 ships with P4 silicon ≥ v3.0.
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
+
+#
+# Board variant selection — Espressif ESP32-P4 Function EV Board.
+# bsp_selector resolves to espressif/esp32_p4_function_ev_board BSP package
+# (kit's bundled MIPI-DSI panel, no on-board audio codec — customer adds
+# their XMOS DSP for mic / speaker paths).
+#
+CONFIG_BSP_SELECT_ESP32_P4_FUNCTION_EV_BOARD=y
+# CONFIG_BSP_SELECT_ESP32_P4_EYE is not set
+
+#
+# Flash - EV Function Board v1.6 ships with 8 MB flash (matches
+# sdkconfig.defaults.esp32p4 default; explicit for clarity).
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# esp_hosted SDIO transport buffers in SPIRAM is inherited from
+# sdkconfig.defaults.esp32p4 (common to all P4 variants).
+
+#
+# Slave Flasher DISABLED on the EV Function Board v1.6 — the kit exposes
+# both P4 and C6 USB ports directly, so we flash each chip on its own
+# port via standard `idf.py flash`. No need for the host-side UART-based
+# C6 OTA path that the P4-EYE single-port kit relied on.
+#
+# CONFIG_SLAVE_FLASHER_ENABLE is not set
+
+#
+# Camera sensor - EV Function Board v1.6 ships SC2336 on the MIPI-CSI
+# connector (customer should set this per the sensor module they wire in).
+# TX preset: 1080p @ 25 fps for customer-facing demo.
+#
+# CONFIG_CAMERA_OV2710 is not set
+CONFIG_CAMERA_SC2336=y
+CONFIG_CAMERA_SC2336_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_SC2336_MIPI_RAW10_1920X1080_25FPS=y
+CONFIG_CAMERA_SC2336_STATS_UPDATE_INTERVAL=500
+
+#
+# Console on native USB Serial/JTAG (P4 USB-C port directly).
+#
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+#
+# I2C: drop to 100 kHz standard mode for the camera daughter board.
+# Observed on v1.6: the I2C bus is reported as having weak/missing
+# pull-ups ("Please check pull-up resistances"), and at the 400 kHz
+# fast-mode default the bus wedges during the first camera sensor
+# probe — the driver loops trying to reset the peripheral, starves
+# the host-side SDIO task, and the esp_hosted recovery path issues a
+# SW reset (SW_CPU_RESET). 100 kHz gives the bus enough margin to
+# clock under weak pull-ups; standard MIPI-CSI sensors only need
+# ~100 kHz for SCCB anyway.
+#
+# CONFIG_BSP_I2C_FAST_MODE is not set
+
+#
+# Video player (RX path) — disabled until a MIPI-DSI panel is wired.
+# With it enabled, bsp_display_new_with_handles() fails at session start
+# ("New DSI bus init failed") and aborts. Re-enable (and uncomment the
+# geometry knobs) when the kit's DSI panel is attached.
+#
+# CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
+# CONFIG_MEDIA_STREAM_PLAYER_MAX_WIDTH=800
+# CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=1280
+
+#
+# LVGL: same relaxed refresh as P4-EYE plus generous WDT budget. Adjust
+# down if the bigger 800x1280 canvas becomes a refresh bottleneck.
+#
+CONFIG_LV_DISP_DEF_REFR_PERIOD=200
+CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP=100
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+
+#
+# Pin-conflict / power-save fix — same rationale as P4-EYE: disable host
+# power-save so the wakeup-GPIO ISR doesn't get registered. slave_flasher
+# is the actual recovery path for the C6 slave anyway. Belt-and-suspenders
+# also pins HOST_WAKEUP_GPIO=-1.
+#
+# CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED is not set
+# CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED is not set
+CONFIG_ESP_HOSTED_HOST_WAKEUP_GPIO=-1
+
+#
+# Performance knobs (proven-good on P4-EYE; should carry over cleanly).
+#
+
+# PSRAM offload (BSS/noinit/malloc to SPIRAM) is inherited from
+# sdkconfig.defaults.esp32p4 (common to all P4 variants).
+
+# Wi-Fi RX buffering / IRAM optimisations (lower latency under load).
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
+CONFIG_WIFI_RMT_RX_BA_WIN=16
+CONFIG_WIFI_RMT_IRAM_OPT=y
+CONFIG_WIFI_RMT_RX_IRAM_OPT=y
+CONFIG_WIFI_RMT_EXTRA_IRAM_OPT=y
+CONFIG_WIFI_RMT_SLP_IRAM_OPT=y
+
+# SDIO RX streaming mode (continuous flow vs per-packet MAX-SIZE).
+# CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_MAX_SIZE is not set
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+# CONFIG_ESP_SDIO_OPTIMIZATION_RX_MAX_SIZE is not set
+CONFIG_ESP_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+
+# Task priorities: audio enc/dec stay at 4 (default); video enc/dec drop
+# to 3 so audio gets first crack at CPU on full-duplex sessions. Same
+# rationale as P4-EYE.
+CONFIG_VIDEO_ENCODER_TASK_PRIORITY=3
+CONFIG_MEDIA_STREAM_PLAYER_TASK_PRIORITY=3
+
+# Hardware ECDSA verify (faster TLS handshake — significant for KVS bring-up).
+CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=y

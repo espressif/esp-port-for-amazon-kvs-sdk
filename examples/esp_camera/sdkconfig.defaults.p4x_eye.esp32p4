@@ -1,0 +1,85 @@
+# ESP32-P4-EYE on NEWER P4 silicon (P4X, chip rev > v3) for the esp_camera example.
+# ESP32-P4-EYE board build config for the esp_camera (AppRTC) 
+# example. Layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32p4;
+# override only the board-specific deltas here.
+#
+# Build with:
+#   idf.py set-target esp32p4
+#   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_eye.esp32p4' build
+#
+
+#
+# Board variant selection
+# - BSP_SELECT_ESP32_P4_EYE pulls the espressif/esp32_p4_eye BSP.
+# - ESP32P4_EYE_C6_BOARD (esp_hosted) auto-configures the P4-EYE SDIO pin
+#   set for the on-board C6 co-processor. With this set, the legacy
+#   CONFIG_ESP_SDIO_PIN_D0/D1 overrides are unnecessary.
+# - BSP_AUDIO_SPEAKER_SUBBOARD enables the ES8311 speaker subboard path.
+#
+CONFIG_BSP_SELECT_ESP32_P4_EYE=y
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+# CONFIG_BSP_AUDIO_SPEAKER_SUBBOARD is not set
+
+#
+# Flash - P4-EYE v1.2 ships with 16 MB flash; needed to fit the app
+# binary alongside the C6 slave firmware.
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+#
+# Chip revision - P4-EYE engineering samples ship with pre-v3 P4 silicon.
+# Must be y so the bootloader/cache avoid v3-only timing. Without this the
+# bootloader rejects the chip with "requires chip revision in range v3.1-v3.99".
+#
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set  # P4X: rev > v3 silicon
+
+#
+# Camera sensor: OV2710 on MIPI-CSI, 1080p @ 25fps.
+#
+CONFIG_CAMERA_OV2710=y
+CONFIG_CAMERA_OV2710_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+
+#
+# Console on native USB Serial/JTAG (P4 USB-C port directly).
+#
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+#
+# Video player (receive path) - canvas pinned to the 240x240 P4-EYE LCD.
+#
+CONFIG_MEDIA_STREAM_PLAYER_MAX_WIDTH=240
+CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
+
+#
+# LVGL: relax refresh rate - canvas updates at ~6fps, no need for 33fps polling.
+# LV_COLOR_16_SWAP=y is required for the ST7789 SPI panel byte order on
+# P4-EYE (pairs with the manual swap_rgb565_bytes() in display_preview.c).
+# EV-board MIPI-DSI panels keep LV_COLOR_16_SWAP=n via their own overlay.
+#
+CONFIG_LV_DISP_DEF_REFR_PERIOD=200
+CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP=100
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+CONFIG_LV_COLOR_16_SWAP=y
+
+#
+# Slave flasher - host-side OTA path for the C6 over UART. P4-EYE ships
+# with the C6 on the same PCB, so the P4 image carries the C6 binaries in
+# the slave SPIFFS partition and flashes them on boot. EV / Function dev
+# boards use ESP-Prog on the C6 instead; their overlays leave this off.
+# Addresses match the network_adapter C6 firmware that the standalone
+# example pairs with — minimal no-OTA layout: partition table at 0x8000,
+# app at 0x10000. (rmaker_split_camera uses a different layout — see the
+# streaming_only example for that pairing.)
+#
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0x8000
+CONFIG_SLAVE_APPLICATION_ADDRESS=0x10000
+CONFIG_SLAVE_UART_RX_PIN=36
+CONFIG_SLAVE_UART_TX_PIN=35
+CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
+

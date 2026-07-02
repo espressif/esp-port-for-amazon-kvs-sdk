@@ -1,0 +1,23 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# Chip revision - v1.2 ships with ESP32-P4 pre-v3 (ECO1) silicon.
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+
+# For V1.2 Board
+CONFIG_ESP_SDIO_PIN_D0=14
+CONFIG_ESP_SDIO_PIN_D1=15
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+
+# PSRAM offload + esp_hosted mempool SPIRAM are inherited from
+# sdkconfig.defaults.esp32p4 (common to all P4 variants).
+
+# C6 firmware is flashed directly via ESP-Prog on the EV Function Board's
+# J2/Prog-C6 header (see customer README). The slave_flasher host-side
+# re-flash path is not needed and pulls in extra UART driver + state code.
+# Matches sdkconfig.defaults.p4_function_ev_board_v16.esp32p4.
+# CONFIG_SLAVE_FLASHER_ENABLE is not set
+

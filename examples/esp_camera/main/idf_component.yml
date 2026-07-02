@@ -1,0 +1,56 @@
+## IDF Component Manager Manifest File
+dependencies:
+  # local components
+  espressif/esp_hosted:
+    override_path: ${KVS_SDK_PATH}/components/esp_hosted
+    version: '*'
+    rules:
+    - if: target in [esp32p4]
+
+  espressif/esp_wifi_remote:
+    version: '*'
+    rules:
+    - if: target in [esp32p4]
+
+  esp_webrtc_utils:
+    path: ${KVS_SDK_PATH}/components/esp_webrtc_utils
+    version: '*'
+
+  kvs_webrtc:
+    path: ${KVS_SDK_PATH}/components/kvs_webrtc
+    version: '*'
+
+
+  app_webrtc:
+    path: ${KVS_SDK_PATH}/components/app_webrtc
+    version: '*'
+
+  media_stream:
+    path: ${KVS_SDK_PATH}/components/media_stream
+    version: '*'
+
+  apprtc_signaling:
+    path: ${KVS_SDK_PATH}/components/signaling/apprtc_signaling
+    version: '*'
+
+  app_common:
+    path: ${KVS_SDK_PATH}/examples/common_components/app_common
+    version: '*'
+
+  # Use the local P4-EYE BSP: it does the board-specific camera bring-up
+  # (XCLK allocate/start, sensor reset + enable pins) that the stock registry
+  # BSP omits — without it the OV2710 gets no master clock/reset and never
+  # ACKs on SCCB ("Get sensor ID failed"). Same override the working examples use.
+  espressif/esp32_p4_eye:
+    override_path: ${KVS_SDK_PATH}/examples/common_components/esp32_p4_eye
+    version: '*'
+    rules:
+    - if: target in [esp32p4] && $CONFIG{BSP_SELECT_ESP32_P4_EYE} == True
+
+  # P4-EYE flashes its on-board C6 (network_adapter) in-system from the slave
+  # SPIFFS partition; only needed on the P4 host.
+  slave_flasher:
+    path: ${KVS_SDK_PATH}/components/slave_flasher
+    version: '*'
+    rules:
+    - if: target in [esp32p4]

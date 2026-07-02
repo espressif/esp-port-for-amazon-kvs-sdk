@@ -1,0 +1,9 @@
+dependencies:
+  idf:
+    version: ">=5.3.0"
+  signaling_serializer:
+    path: "../../components/signaling_serializer"
+  kvs_utils:
+    path: "../../components/kvs_utils"
+  state_machine:
+    path: "../../components/state_machine"

@@ -1,0 +1,69 @@
+## IDF Component Manager Manifest File
+dependencies:
+  # local components
+
+  espressif/esp_wifi_remote:
+    version: '*'
+    rules:
+    - if: target in [esp32p4]
+
+  espressif/esp_hosted:
+    override_path: ${KVS_SDK_PATH}/components/esp_hosted
+    version: '*'
+    rules:
+    - if: target in [esp32p4]
+
+  # Local P4-EYE BSP override. Defines the BSP_LCD_DRAW_BUFF_* macros our
+  # video_render_display path uses (registry version drops them), plus
+  # the I2S0/I2S-std path for the ES8311 speaker subboard.
+  #
+  # CRITICAL: this override is gated on CONFIG_BSP_SELECT_ESP32_P4_EYE.
+  # Without this gate, even EV Function Board builds end up linking ALL
+  # the P4-EYE bsp_* functions (bsp_i2c_init, bsp_audio_codec_*_init,
+  # bsp_display_start_with_config, ...) because both BSP libs define the
+  # same globals and the linker picks whichever .a it sees first (here
+  # the local override). Running P4-EYE pin maps on EV-board hardware
+  # leaves several peripherals talking to unwired pins, which manifests
+  # as I2C bus wedge + SDIO host-task timeout + SW_CPU_RESET.
+  espressif/esp32_p4_eye:
+    override_path: ${KVS_SDK_PATH}/examples/common_components/esp32_p4_eye
+    version: '*'
+    rules:
+    - if: target in [esp32p4] && $CONFIG{BSP_SELECT_ESP32_P4_EYE} == True
+
+  # Pin the EV Function Board BSP to a current release. bsp_selector's
+  # transitive '*' otherwise resolves to v1.0 (registry hash 2d90a516...)
+  # which is stale; bumping to the 5.x line picks up the modern
+  # codec-detection / audio-init behaviour.
+  espressif/esp32_p4_function_ev_board:
+    version: '^5.2.0'
+    rules:
+    - if: target in [esp32p4] && $CONFIG{BSP_SELECT_ESP32_P4_FUNCTION_EV_BOARD} == True
+
+  esp_webrtc_utils:
+    path: ${KVS_SDK_PATH}/components/esp_webrtc_utils
+    version: '*'
+
+  kvs_webrtc:
+    path: ${KVS_SDK_PATH}/components/kvs_webrtc
+    version: '*'
+
+  app_webrtc:
+    path: ${KVS_SDK_PATH}/components/app_webrtc
+    version: '*'
+
+  media_stream:
+    path: ${KVS_SDK_PATH}/components/media_stream
+    version: '*'
+
+  bridge_signaling:
+    path: ${KVS_SDK_PATH}/components/signaling/bridge_signaling
+    version: '*'
+
+  app_common:
+    path: ${KVS_SDK_PATH}/examples/common_components/app_common
+    version: '*'
+
+  slave_flasher:
+    path: ${KVS_SDK_PATH}/components/slave_flasher
+    version: '*'

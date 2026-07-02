@@ -1,0 +1,10 @@
+# Name,   Type, SubType, Offset,    Size,     Flags
+# 16 MB flash, P4-EYE (P4 + on-board C6) — adds a `slave` SPIFFS partition
+# holding the C6 (network_adapter) firmware that the P4 flashes in-system via
+# slave_flasher. Selected by the p4_eye overlay; 8 MB / smaller boards keep
+# partitions.8mb.csv (no slave). Partition table at 0xC000 (IDF v5.5 bootloader).
+nvs,      data, nvs,     0xD000,    0x6000,
+phy_init, data, phy,     0x13000,   0x1000,
+factory,  app,  factory, 0x20000,   0x2F0000,
+slave,    data, spiffs,  0x310000,  0x1D0000,
+storage,  data, spiffs,  0x4E0000,  1M,

@@ -1,0 +1,24 @@
+#
+# network_adapter overlay for the C6 co-processor paired with the
+# ESP32-P4-EYE host (single-PCB kit with an on-board C6 socket).
+#
+# Layer order:
+#   sdkconfig.defaults + sdkconfig.defaults.esp32c6 + this file
+#
+# Build with:
+#   idf.py set-target esp32c6
+#   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.p4_eye_pair.esp32c6' reconfigure
+#
+# Mirrors the pair-overlay convention used by rmaker_split_camera
+# (sdkconfig.defaults.p4_eye_pair.esp32c6 / sdkconfig.defaults.evboard_pair).
+#
+
+#
+# Board selector — P4-EYE-specific SDIO slave pinout. The C6 sits on the
+# P4-EYE PCB with non-default SDIO wiring; without this the C6 won't
+# enumerate over SDIO on the P4-EYE.
+#
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+# CONFIG_ESP_HOST_DEV_BOARD_NONE is not set
+# CONFIG_ESP_HOST_DEV_BOARD_P4_FUNC_BOARD is not set
+# CONFIG_ESP_HOST_DEV_BOARD_P4_C6_CORE is not set

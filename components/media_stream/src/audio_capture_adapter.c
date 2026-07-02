@@ -1,0 +1,150 @@
+/*
+ * SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @brief Adapter implementation for audio_capture.h using OpusFrameGrabber
+ */
+
+#include <string.h>
+#include <stdbool.h>
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "audio_capture.h"
+#include "OpusFrameGrabber.h"
+
+static const char *TAG = "audio_capture_adapter";
+
+typedef struct {
+    audio_capture_config_t config;
+    bool initialized;
+    bool running;
+} audio_capture_context_t;
+
+esp_err_t audio_capture_init(audio_capture_config_t *config, audio_capture_handle_t *ret_handle)
+{
+    if (config == NULL || ret_handle == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Currently only OPUS is supported
+    if (config->codec != AUDIO_CODEC_OPUS) {
+        ESP_LOGE(TAG, "Only OPUS codec is supported");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    audio_capture_context_t *ctx = calloc(1, sizeof(audio_capture_context_t));
+    if (ctx == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Save configuration
+    memcpy(&ctx->config, config, sizeof(audio_capture_config_t));
+    ctx->running = false;
+
+    void *encoder_handle = opus_encoder_init_internal(config);
+    if (encoder_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize Opus encoder");
+        free(ctx);
+        return ESP_FAIL;
+    }
+
+    ctx->initialized = true;
+    *ret_handle = ctx;
+    return ESP_OK;
+}
+
+esp_err_t audio_capture_start(audio_capture_handle_t handle)
+{
+    audio_capture_context_t *ctx = (audio_capture_context_t *)handle;
+    if (ctx == NULL || !ctx->initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // The microphone and encoder are already running when frames are requested
+    ctx->running = true;
+    opus_encoder_start_internal();
+    return ESP_OK;
+}
+
+esp_err_t audio_capture_stop(audio_capture_handle_t handle)
+{
+    audio_capture_context_t *ctx = (audio_capture_context_t *)handle;
+    if (ctx == NULL || !ctx->initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    opus_encoder_stop_internal();
+    ctx->running = false;
+    return ESP_OK;
+}
+
+esp_err_t audio_capture_get_frame(audio_capture_handle_t handle, audio_frame_t **frame, uint32_t wait_ms)
+{
+    audio_capture_context_t *ctx = (audio_capture_context_t *)handle;
+    if (ctx == NULL || !ctx->initialized || !ctx->running || frame == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Receive directly into stack — no heap traffic on the producer side.
+    esp_opus_out_buf_t opus_frame;
+    if (!get_opus_encoded_frame(&opus_frame)) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    audio_frame_t *output_frame = calloc(1, sizeof(audio_frame_t));
+    if (output_frame == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Caller (audio_capture_release_frame) frees output_frame->buffer
+    // with free(); allocate a fresh internal-heap buffer of the exact
+    // encoded length. Eliminates the SPIRAM churn the producer used to
+    // do, while preserving the downstream lifetime contract.
+    output_frame->buffer = malloc(opus_frame.len);
+    if (output_frame->buffer == NULL) {
+        free(output_frame);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(output_frame->buffer, opus_frame.buffer, opus_frame.len);
+    output_frame->len = opus_frame.len;
+    output_frame->timestamp = esp_timer_get_time();
+
+    *frame = output_frame;
+    return ESP_OK;
+}
+
+esp_err_t audio_capture_release_frame(audio_capture_handle_t handle, audio_frame_t *frame)
+{
+    if (handle == NULL || frame == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (frame->buffer != NULL) {
+        free(frame->buffer);
+    }
+    free(frame);
+    return ESP_OK;
+}
+
+esp_err_t audio_capture_deinit(audio_capture_handle_t handle)
+{
+    audio_capture_context_t *ctx = (audio_capture_context_t *)handle;
+    if (ctx == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (ctx->initialized) {
+        // Deinitialize the OPUS encoder
+        esp_err_t ret = opus_encoder_deinit_internal();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to deinitialize OPUS encoder: %d", ret);
+            // Continue anyway to clean up our resources
+        }
+    }
+
+    free(ctx);
+    return ESP_OK;
+}
