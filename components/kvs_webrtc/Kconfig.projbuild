@@ -1,0 +1,39 @@
+menu "KVS WebRTC Configuration"
+
+    config KVS_AUTO_APPLY_PATCHES
+        bool "Auto-apply webrtc-c platform patches at CMake configure time"
+        default y
+        help
+            On fresh clones, the upstream webrtc-c submodule needs the
+            platform patches in patches/ applied before the build will
+            produce a working firmware. With this on, CMake invokes
+            patches/apply_patches.sh at configure time (idempotent —
+            no-op if patches are already present).
+            Disable if you maintain the submodule manually (e.g. rebasing
+            onto a different SDK tip), or if you bring your own patch
+            workflow.
+
+    config ENABLE_DATA_CHANNEL
+        bool "Enable Data channel support using usrsctp"
+        default y
+        help
+            Enables WebRTC Data channel support
+
+    config USE_ESP_TLS_FOR_KVS
+        bool "Use ESP-TLS for KVS TLS connections (TURN over TLS)"
+        default y
+        help
+            Use ESP-TLS implementation instead of direct mbedTLS for TLS connections.
+            This enables the use of ESP certificate bundle for CA verification,
+            eliminating the need for certificate files on the filesystem.
+            Recommended for ESP platforms to avoid certificate management complexity.
+
+    config KVS_WEBRTC_MEDIA_DIAG_LOG
+        bool "Verbose media diagnostics (per-frame FPS/drop-reason + PTS logs)"
+        default n
+        help
+            Emit the periodic media diagnostics from kvs_media (send FPS,
+            per-reason frame-drop counters, audio PTS vs counter drift). Useful
+            when bringing up a new board/pipeline or debugging why frames aren't
+            flowing; off by default since it logs every couple of seconds.
+endmenu

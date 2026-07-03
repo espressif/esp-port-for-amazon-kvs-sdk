@@ -1,0 +1,18 @@
+description: esp_utils
+version: "0.8.0"
+
+dependencies:
+  espressif/esp_hosted:
+    override_path: ../esp_hosted
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"
+  webrtc_bridge:
+    path: ../webrtc_bridge
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/mqtt:
+    matches:
+      - if: "idf_version >5.3"
+        version: "~1"

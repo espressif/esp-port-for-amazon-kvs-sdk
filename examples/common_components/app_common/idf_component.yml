@@ -1,0 +1,8 @@
+description: app_common
+version: "0.0.1"
+
+dependencies:
+  espressif/network_provisioning:
+    version: "*"
+    rules:
+      - if: "idf_version >=5.4"

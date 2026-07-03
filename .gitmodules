@@ -1,0 +1,12 @@
+[submodule "amazon-kinesis-video-streams-webrtc-sdk-c"]
+	path = amazon-kinesis-video-streams-webrtc-sdk-c
+	url = https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c.git
+[submodule "components/esp_usrsctp/usrsctp"]
+	path = components/esp_usrsctp/usrsctp
+	url = https://github.com/vikramdattu/usrsctp.git
+[submodule "components/libwebsockets/libwebsockets"]
+	path = components/libwebsockets/libwebsockets
+	url = https://github.com/warmcat/libwebsockets.git
+[submodule "components/esp_hosted"]
+	path = components/esp_hosted
+	url = https://github.com/espressif/esp-hosted-mcu.git

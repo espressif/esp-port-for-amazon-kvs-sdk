@@ -1,0 +1,19 @@
+syntax = "proto3";
+package bridge;
+
+enum MsgType {
+    CMD = 0;   // Command request
+    RSP = 1;   // Command response
+    EVT = 2;   // Async event (future use)
+}
+
+message BridgeCommand {
+    uint32 cmd_id = 1;       // Application-defined command identifier
+    MsgType msg_type = 2;    // CMD / RSP / EVT (replaces is_response bool)
+    uint32 req_id = 3;       // Correlation ID (replaces seq_id)
+    int32 status = 4;        // Response status (esp_err_t), RSP only
+    bytes payload = 5;       // Command-specific payload
+    uint32 seq_num = 6;      // Chunk sequence number (0-based)
+    bool is_final = 7;       // true for last/only chunk
+    uint32 total_size = 8;   // Total payload size across all chunks
+}

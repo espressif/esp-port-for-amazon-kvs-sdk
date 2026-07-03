@@ -1,0 +1,102 @@
+/*
+ * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: ESPRESSIF MIT
+ */
+
+#pragma once
+
+#include "esp_err.h"
+#include "H264FrameGrabber.h"
+#include "video_capture.h"
+#include <sys/time.h>
+
+/**
+ * @brief Frame buffer structure
+ */
+typedef struct {
+    uint8_t *buf;               /*!< Pointer to the frame data */
+    size_t len;                 /*!< Length of the buffer in bytes */
+    size_t width;               /*!< Width of the image frame in pixels */
+    size_t height;              /*!< Height of the image frame in pixels */
+    struct timeval timestamp;   /*!< Timestamp since boot of the frame */
+} video_fb_t;
+
+/**
+ * @brief Initialize the video interface
+ *
+ * @return esp_err_t ESP_OK on success, otherwise an error code
+ */
+esp_err_t esp_video_if_init(void);
+
+/**
+ * @brief Stop the video interface
+ *
+ * @return esp_err_t ESP_OK on success, otherwise an error code
+ */
+esp_err_t esp_video_if_stop(void);
+
+/**
+ * @brief Deinitialize the video interface while retaining mmap buffers
+ *
+ * This function stops streaming but keeps the mmap buffers and fd open so the next
+ * init/start cycle can reuse them without reallocation. The camera hardware may
+ * remain powered because the fd stays open.
+ *
+ * For a full cleanup (free buffers, close fd, release resources), call
+ * esp_video_if_cleanup().
+ *
+ * @return esp_err_t ESP_OK on success, otherwise an error code
+ */
+esp_err_t esp_video_if_deinit(void);
+
+/**
+ * @brief Start the video interface
+ *
+ * @return esp_err_t ESP_OK on success, otherwise an error code
+ */
+esp_err_t esp_video_if_start(void);
+
+/**
+ * @brief Get a raw video frame
+ *
+ * @return video_fb_t* Pointer to the raw frame, or NULL if no frame is available
+ */
+video_fb_t *esp_video_if_get_frame(void);
+
+/**
+ * @brief Release a video frame when done with it
+ *
+ * @param fb Pointer to the frame to release
+ */
+void esp_video_if_release_frame(video_fb_t *fb);
+
+/**
+ * @brief Get the current video resolution
+ *
+ * @param resolution Pointer to store the current resolution
+ * @return esp_err_t
+ *  - ESP_OK: Successfully retrieved resolution
+ *  - ESP_ERR_INVALID_ARG: resolution pointer is NULL
+ *  - ESP_ERR_INVALID_STATE: Video interface not initialized
+ */
+esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution);
+
+/**
+ * @brief Set desired resolution before init (called by video_capture_adapter)
+ *
+ * @param resolution Desired resolution (width, height, fps). Use 0 for width/height to use defaults.
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t esp_video_if_set_desired_resolution(const video_resolution_t *resolution);
+
+/**
+ * @brief Cleanup mapped buffers and close camera fd
+ *
+ * This function explicitly frees mapped buffers and closes the camera file
+ * descriptor. After this, a subsequent esp_video_if_init/start cycle will
+ * reallocate buffers.
+ *
+ * @return esp_err_t ESP_OK on success, otherwise an error code
+ */
+esp_err_t esp_video_if_cleanup(void);

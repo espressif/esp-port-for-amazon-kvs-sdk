@@ -1,0 +1,97 @@
+stages:
+  - build
+  - docs
+
+variables:
+  V: "0"
+  MAKEFLAGS: "-j8 --no-keep-going"
+  GIT_SUBMODULE_STRATEGY: recursive
+
+.apply_sdk_patches: &apply_sdk_patches
+  - echo "Applying SDK patches to WebRTC SDK submodule..."
+  - cd $CI_PROJECT_DIR/amazon-kinesis-video-streams-webrtc-sdk-c
+  # Inject identity so `git am` doesn't bail on a runner without one.
+  - git -c user.email=ci@espressif.local -c user.name='CI Patch Apply' am $CI_PROJECT_DIR/patches/*.patch
+  - cd $CI_PROJECT_DIR
+
+.build_examples: &build_examples
+  - apt-get update && apt-get install -y pkg-config
+  - *apply_sdk_patches
+  - for TARGET in $TARGETS; do
+  - for EXAMPLE in $EXAMPLES; do
+  - if [ $EXAMPLE == "network_adapter" ] && [ $TARGET != "esp32c6" ] && [ $TARGET != "esp32c5" ]; then
+  - echo "Skipping $EXAMPLE for $TARGET (network_adapter only for esp32c6/esp32c5)"
+  - continue
+  - fi
+  - if [ $EXAMPLE == "signaling_only" ] && [ $TARGET == "esp32p4" ]; then
+  - echo "Skipping $EXAMPLE for $TARGET (P4 has no Wi-Fi/BLE — runs C6 network_adapter instead)"
+  - continue
+  - fi
+  # streaming_only is the split-mode P4 host (HW H.264 encoder + esp_video
+  # MIPI-CSI). It has no meaning on the C-series or plain ESP32.
+  - if [ $EXAMPLE == "streaming_only" ] && [ $TARGET != "esp32p4" ]; then
+  - echo "Skipping $EXAMPLE for $TARGET (split-mode host — esp32p4 only)"
+  - continue
+  - fi
+  # simple_video_server is the P4 camera HTTP-server demo (esp_video MIPI-CSI).
+  - if [ $EXAMPLE == "simple_video_server" ] && [ $TARGET != "esp32p4" ]; then
+  - echo "Skipping $EXAMPLE for $TARGET (camera HTTP server — esp32p4 only)"
+  - continue
+  - fi
+  - example_path=$CI_PROJECT_DIR/examples/$EXAMPLE
+  - cd $example_path
+  - echo "Building $EXAMPLE for $TARGET"
+  - idf.py set-target $TARGET
+  - idf.py build
+  - mkdir -p $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
+  - cp $example_path/build/*.bin $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
+  - cp $example_path/build/*.elf $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
+  - cp $example_path/build/*.map $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
+  - rm -rf build sdkconfig
+  - done
+  - done
+  - cd $CI_PROJECT_DIR
+
+.build_template:
+  stage: build
+  tags:
+    - build
+  artifacts:
+    paths:
+      - build_output/
+    expire_in: 6 mos
+  script:
+    - *build_examples
+
+build_idf_v5.4:
+  extends: .build_template
+  image: espressif/idf:release-v5.4
+  variables:
+    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server
+    TARGETS: esp32 esp32s3 esp32c6 esp32p4
+
+build_idf_v5.5:
+  extends: .build_template
+  image: espressif/idf:release-v5.5
+  variables:
+    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server
+    TARGETS: esp32 esp32s3 esp32c6 esp32c5 esp32p4
+
+build_docs:
+  stage: docs
+  image: python:3.11
+  tags:
+    - build
+  artifacts:
+    paths:
+      - docs/_build/
+    expire_in: 6 mos
+  script:
+    # esp_docs.esp_extensions.run_doxygen invokes `doxygen` directly;
+    # sphinxcontrib-plantuml invokes the real Java `plantuml` binary
+    # with `-pipe -charset -tsvg` flags — the pip `plantuml` python
+    # wrapper doesn't accept those. Install both system tools.
+    - apt-get update && apt-get install -y --no-install-recommends doxygen plantuml
+    - pip install -r docs/requirements.txt
+    - cd docs
+    - build-docs -l en -t esp32

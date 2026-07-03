@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,    Size,     Flags
+# 8 MB flash, P4-only — partition table at 0xC000 (IDF v5.5 bootloader > 0x6000).
+# Selected via the P4 overlay; base ESP32/S3 builds keep the 4 MB partitions.csv.
+nvs,      data, nvs,     0xD000,    0x6000,
+phy_init, data, phy,     0x13000,   0x1000,
+factory,  app,  factory, 0x20000,   0x2F0000,
+storage,  data, spiffs,  0x310000,  1M

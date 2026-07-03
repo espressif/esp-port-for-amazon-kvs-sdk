@@ -1,0 +1,8 @@
+# Plantuml warnings due to older plantuml version in CI (Debian-packaged).
+# Diagrams still render but some features are not supported.
+architecture.rst:: WARNING: error while running plantuml
+architecture.rst:: WARNING: error while running plantuml
+architecture.rst:: WARNING: error while running plantuml
+architecture.rst:: WARNING: error while running plantuml
+flows.rst:: WARNING: error while running plantuml
+flows.rst:: WARNING: error while running plantuml

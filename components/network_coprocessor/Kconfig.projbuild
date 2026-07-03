@@ -1,0 +1,31 @@
+# Network Coprocessor Configuration
+# This component wraps ESP-Hosted slave firmware. The gate below decides
+# whether the wrapper compiles its slave-side SRCS (network_adapter
+# example builds) or registers as an empty component (host-side
+# examples that pull network_coprocessor transitively via webrtc_bridge).
+
+menu "Network Coprocessor (slave-side firmware)"
+
+config NETWORK_COPROCESSOR_BUILD_FIRMWARE
+    bool "Build network_coprocessor as the SDIO/SPI slave firmware"
+    default n
+    help
+        Enable when this build IS the co-processor slave firmware
+        (e.g. examples/network_adapter on ESP32-C5/C6). The wrapper
+        then compiles esp_hosted/slave/main/*.c — including slave_bt.c
+        and the slave_*_api transport files — and exposes the
+        host_power_save API used by signaling_only's power-save hooks.
+
+        Keep disabled (default) for host-side single-device builds
+        (webrtc_classic, esp_camera, signaling_only as a standalone)
+        so the slave-side firmware doesn't get linked into the host
+        image where it would reference esp_vhci_host_* HCI symbols
+        that aren't built into a host-side BT stack.
+
+endmenu
+
+# Pull in the complete slave Kconfig from the esp_hosted submodule.
+# All the CONFIG_ESP_HOSTED_* knobs it defines are referenced by the
+# wrapper's slave-side CMakeLists when
+# CONFIG_NETWORK_COPROCESSOR_BUILD_FIRMWARE=y.
+rsource "../esp_hosted/slave/main/Kconfig.projbuild"

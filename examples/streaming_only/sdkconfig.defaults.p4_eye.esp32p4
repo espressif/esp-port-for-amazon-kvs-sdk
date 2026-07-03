@@ -1,0 +1,132 @@
+#
+# ESP32-P4-EYE board build config for the streaming_only example.
+# Layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32p4;
+# override only the P4-EYE-specific deltas here.
+#
+# Build with:
+#   idf.py set-target esp32p4
+#   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_eye.esp32p4' reconfigure
+#
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# Chip revision - P4-EYE engineering samples ship with pre-v3 P4 silicon.
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_0=y
+
+#
+# Board variant selection
+#   BSP_SELECT_ESP32_P4_EYE  -> pulls the espressif/esp32_p4_eye BSP.
+#   ESP32P4_EYE_C6_BOARD     -> esp_hosted auto-configures P4-EYE SDIO pinout
+#                               for the on-board C6 co-processor.
+#   BSP_BOARD_TYPE_SAMPLE_V12 + AUDIO_SPEAKER_SUBBOARD enable the ES8311
+#                               speaker sub-board path.
+#
+CONFIG_BSP_SELECT_ESP32_P4_EYE=y
+# CONFIG_BSP_SELECT_ESP32_P4_FUNCTION_EV_BOARD is not set
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+# CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD is not set
+# CONFIG_BSP_AUDIO_SPEAKER_SUBBOARD is not set
+
+#
+# Flash - P4-EYE v1.2 ships with 16 MB flash.
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# esp_hosted SDIO transport buffers in SPIRAM is inherited from
+# sdkconfig.defaults.esp32p4 (common to all P4 variants).
+
+#
+# Slave Flasher (host-side OTA path for the C6 slave over UART).
+# Addresses must match the C6 firmware packed into target-firmware/.
+# rmaker_split_camera (RainMaker C6 reference): partition table at 0xC000,
+# ota_0 (first app slot) at 0x20000.
+#
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0xC000
+CONFIG_SLAVE_APPLICATION_ADDRESS=0x20000
+CONFIG_SLAVE_UART_RX_PIN=36
+CONFIG_SLAVE_UART_TX_PIN=35
+CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
+
+#
+# Camera sensor: OV2710 on MIPI-CSI, 1080p @ 25fps.
+# AE stats polling at 500 ms (default 120 ms) — lower I2C transaction rate
+# to reduce contention with audio codec / general I2C ISR scheduling
+# when audio RX is active.
+#
+CONFIG_CAMERA_OV2710=y
+CONFIG_CAMERA_OV2710_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+CONFIG_CAMERA_OV2710_STATS_UPDATE_INTERVAL=500
+
+#
+# Console on native USB Serial/JTAG (P4 USB-C port directly).
+#
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+#
+# Video player (RX path) - canvas pinned to 240x240 P4-EYE LCD.
+#
+CONFIG_MEDIA_STREAM_PLAYER_MAX_WIDTH=240
+CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
+
+#
+# LVGL: relax refresh rate (~6 fps canvas updates) + bigger WDT.
+# LV_COLOR_16_SWAP=y is required for the ST7789 SPI panel byte order on
+# P4-EYE (works with the manual swap_rgb565_bytes() call — see plan §9.12).
+# EV-board MIPI-DSI panels use LV_COLOR_16_SWAP=n — handled by their overlay.
+#
+CONFIG_LV_DISP_DEF_REFR_PERIOD=200
+CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP=100
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
+CONFIG_LV_COLOR_16_SWAP=y
+
+#
+# Pin-conflict fix: esp_hosted's slave-reset-detect GPIO defaults to 6,
+# which is also BSP_AUDIO_SUBBOARD_I2S_BCLK on P4-EYE. Once audio TX starts,
+# I2S BCLK pulses get interpreted as slave-reset and the host self-resets.
+# Disable host power-save (which is what registers the wakeup-GPIO ISR);
+# slave_flasher is the actual recovery path anyway. The GPIO knob is also
+# set to -1 as belt-and-suspenders.
+#
+# CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED is not set
+# CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED is not set
+CONFIG_ESP_HOSTED_HOST_WAKEUP_GPIO=-1
+
+#
+# Performance knobs ported from rmaker standalone (proven-good on P4-EYE).
+#
+
+# PSRAM offload (BSS/noinit/malloc to SPIRAM) is inherited from
+# sdkconfig.defaults.esp32p4 (common to all P4 variants).
+
+# Wi-Fi RX buffering / IRAM optimisations (better throughput, lower latency).
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
+CONFIG_WIFI_RMT_RX_BA_WIN=16
+CONFIG_WIFI_RMT_IRAM_OPT=y
+CONFIG_WIFI_RMT_RX_IRAM_OPT=y
+CONFIG_WIFI_RMT_EXTRA_IRAM_OPT=y
+CONFIG_WIFI_RMT_SLP_IRAM_OPT=y
+
+# SDIO RX streaming mode (continuous flow vs per-packet MAX-SIZE).
+# CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_MAX_SIZE is not set
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+# CONFIG_ESP_SDIO_OPTIMIZATION_RX_MAX_SIZE is not set
+CONFIG_ESP_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
+
+# Hardware ECDSA verify (faster TLS handshake — significant for KVS bring-up).
+CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=y
+
+# Task priorities: audio encoder/decoder stay at 4 (default);
+# video encoder/decoder drop to 3 so audio gets first crack at CPU.
+# Rationale: video can adapt (PLI/IDR, jitter buffer, frame dropping);
+# audio glitches are immediately audible and have no graceful recovery.
+CONFIG_VIDEO_ENCODER_TASK_PRIORITY=3
+CONFIG_MEDIA_STREAM_PLAYER_TASK_PRIORITY=3

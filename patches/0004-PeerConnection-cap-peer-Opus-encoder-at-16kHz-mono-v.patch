@@ -1,0 +1,83 @@
+From 622b2266d878b467c82150c27150e36b925a5847 Mon Sep 17 00:00:00 2001
+From: Vikram Dattu <vikram.dattu@espressif.com>
+Date: Fri, 15 May 2026 20:16:15 +0530
+Subject: [PATCH 4/4] PeerConnection: cap peer Opus encoder at 16kHz mono via
+ DEFAULT_OPUS_FMTP
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When ESP32-P4 runs full-duplex audio against a browser/Android peer,
+the peer defaults to 48 kHz stereo Opus (Fullband CELT). On P4 the
+Opus decoder ends up averaging ~21 ms per 20 ms frame, which means
+the per-frame budget is permanently overrun and the decode queue
+saturates within seconds (50/50 deep) — every RX audio frame past
+that point is dropped (ESP_LOGE / ESP_ERR_NO_MEM, 'Audio decode queue
+full' warnings every couple of seconds).
+
+Narrow DEFAULT_OPUS_FMTP so we advertise:
+  - maxplaybackrate=16000          (peer caps its encoder at 16 kHz)
+  - sprop-maxcapturerate=16000     (we won't capture above 16 kHz)
+  - stereo=0 ; sprop-stereo=0      (mono both ways)
+  - maxaveragebitrate=24000        (sensible for 16 kHz mono speech)
+
+On real hardware this drops per-frame Opus decode from ~21 ms to
+~5 ms, the decode queue holds 1-2 frames steady, queue-full / NO_MEM
+errors go to zero, and mic-side ring backpressure stops occurring.
+
+Also: stop gating the fmtp override on isOffer. The answer path used
+to echo whatever fmtp the peer sent, which defeated the cap entirely
+when we were the answerer. Mirrors patch 0007 (H.264).
+
+Add a DLOGI on each advertised fmtp so we can see in logs what the
+SDK actually offered/answered without having to dump full SDP.
+---
+ src/source/PeerConnection/SessionDescription.c | 10 +++++++---
+ src/source/PeerConnection/SessionDescription.h |  3 ++-
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
+index 8fbcc00bf1..b74c46cd58 100644
+--- a/src/source/PeerConnection/SessionDescription.c
++++ b/src/source/PeerConnection/SessionDescription.c
+@@ -787,9 +787,11 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
+             attributeCount++;
+         }
+     } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_OPUS) {
+-        if (pKvsPeerConnection->isOffer) {
+-            currentFmtp = DEFAULT_OPUS_FMTP;
+-        }
++        // Force DEFAULT_OPUS_FMTP for both offers and answers (mirrors the
++        // H264 fix in patch 0007). DEFAULT_OPUS_FMTP caps the peer encoder at
++        // 16kHz mono, which keeps Opus decode work on ESP32-P4 within the
++        // 20ms frame budget when bidirectional A/V is active.
++        currentFmtp = DEFAULT_OPUS_FMTP;
+ 
+         STRCPY(pSdpMediaDescription->sdpAttributes[attributeCount].attributeName, "rtpmap");
+         amountWritten = SNPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue,
+@@ -803,6 +805,8 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
+                 SNPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue,
+                          SIZEOF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue), "%" PRId64 " %s", payloadType, currentFmtp);
+             CHK_ERR(amountWritten > 0, STATUS_INTERNAL_ERROR, "Full Opus fmtp could not be written");
++            DLOGI("Opus fmtp advertised in %s: pt=%" PRId64 " %s",
++                  pKvsPeerConnection->isOffer ? "offer" : "answer", payloadType, currentFmtp);
+             attributeCount++;
+         }
+     } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_VP8) {
+diff --git a/src/source/PeerConnection/SessionDescription.h b/src/source/PeerConnection/SessionDescription.h
+index 4d511c8653..94221fd383 100644
+--- a/src/source/PeerConnection/SessionDescription.h
++++ b/src/source/PeerConnection/SessionDescription.h
+@@ -53,7 +53,8 @@ extern "C" {
+ 
+ #define DEFAULT_H264_FMTP   (PCHAR) "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+ #define DEFAULT_H265_FMTP   (PCHAR) "level-id=93;profile-id=1"
+-#define DEFAULT_OPUS_FMTP   (PCHAR) "minptime=10;useinbandfec=1"
++#define DEFAULT_OPUS_FMTP                                                                                                                            \
++    (PCHAR) "minptime=10;useinbandfec=1;maxplaybackrate=16000;sprop-maxcapturerate=16000;stereo=0;sprop-stereo=0;maxaveragebitrate=24000"
+ #define H264_PROFILE_42E01F 0x42e01f
+ // profile-level-id:
+ //   A base16 [7] (hexadecimal) representation of the following
+-- 
+2.39.5 (Apple Git-154)
+

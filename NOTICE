@@ -1,0 +1,39 @@
+ESP-IDF Port of Amazon Kinesis Video Streams WebRTC SDK C
+=========================================================
+
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Copyright 2024-2026 Espressif Systems (Shanghai) CO LTD
+
+This product is an ESP-IDF port of the Amazon Kinesis Video Streams WebRTC
+SDK C (https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c).
+The upstream SDK is licensed under the Apache License, Version 2.0; a copy
+of the License is available in the LICENSE file at the top of this repository.
+
+The upstream SDK is included as a git submodule at
+amazon-kinesis-video-streams-webrtc-sdk-c/ and a small set of platform patches
+is applied to it via git am. See patches/README.md for the patch ledger.
+
+Bundled third-party components
+------------------------------
+
+This product also includes software developed by third parties, included as
+git submodules. Each is distributed under its own license; see the individual
+LICENSE file inside each submodule for the full text.
+
+  cisco/libsrtp                       (BSD-3-Clause)
+    components/libsrtp2/libsrtp/
+
+  warmcat/libwebsockets               (MIT)
+    components/libwebsockets/libwebsockets/
+
+  sctplab/usrsctp (via vikramdattu/usrsctp fork with ESP-specific patches)
+                                      (BSD-3-Clause)
+    components/esp_usrsctp/usrsctp/
+
+  espressif/esp-hosted-mcu            (Apache-2.0)
+    components/esp_hosted/
+
+The component manifests under components/*/idf_component.yml may also pull in
+additional Espressif components from the ESP Component Registry
+(https://components.espressif.com); each registry component carries its own
+license metadata.

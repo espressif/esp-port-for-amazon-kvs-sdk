@@ -1,0 +1,44 @@
+menu "Simple Video Server"
+
+choice CAPTURE_BACKEND
+    prompt "Video capture backend"
+    default CAPTURE_DIRECT_V4L2
+    help
+        Select capture backend: direct V4L2 (esp-video style) or media_stream.
+
+config CAPTURE_DIRECT_V4L2
+    bool "Direct V4L2"
+    help
+        Use example_video_init + V4L2 + example_encoder (same as esp-video simple_video_server).
+        Recommended for verifying camera works before media_stream.
+
+config CAPTURE_MEDIA_STREAM
+    bool "Media stream"
+    help
+        Use media_stream component (MJPEGFrameGrabber). Camera init via esp_video_if.
+
+endchoice
+
+config CAPTURE_MEDIA_STREAM_WIDTH
+    int "Media stream frame width"
+    default 640
+    depends on CAPTURE_MEDIA_STREAM
+    help
+        Frame width for media_stream backend.
+
+config CAPTURE_MEDIA_STREAM_HEIGHT
+    int "Media stream frame height"
+    default 480
+    depends on CAPTURE_MEDIA_STREAM
+    help
+        Frame height for media_stream backend.
+
+config CAPTURE_MEDIA_STREAM_QUALITY
+    int "Media stream JPEG quality"
+    default 80
+    range 1 100
+    depends on CAPTURE_MEDIA_STREAM
+    help
+        JPEG quality (1-100) for media_stream backend.
+
+endmenu

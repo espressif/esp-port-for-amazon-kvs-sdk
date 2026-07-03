@@ -1,0 +1,80 @@
+name: Deploy ESP Launchpad
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "Build esp_camera for Launchpad"
+    runs-on: ubuntu-22.04
+    container: espressif/idf:release-v5.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply SDK patches
+        shell: bash
+        run: |
+          git config --global --add safe.directory "*"
+          cd amazon-kinesis-video-streams-webrtc-sdk-c
+          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+
+      - name: Build esp_camera for ESP32-S3
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd examples/esp_camera
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Generate merged binary and prepare deploy
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd examples/esp_camera
+          idf.py merge-bin
+          mkdir -p ../../deploy
+          cp build/merged-binary.bin ../../deploy/esp_camera_esp32s3.bin
+
+      - name: Generate launchpad.toml
+        shell: bash
+        run: |
+          PAGES_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          cat > deploy/launchpad.toml << EOF
+          esp_toml_version = 1.0
+          firmware_images_url = "${PAGES_URL}"
+          supported_apps = ["esp_camera"]
+
+          [esp_camera]
+          chipsets = ["ESP32-S3"]
+          image.esp32-s3 = "esp_camera_esp32s3.bin"
+          description = "ESP Camera WebRTC demo (AppRTC, no AWS account needed)"
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: deploy/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

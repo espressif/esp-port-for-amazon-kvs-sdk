@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+# SPDX-License-Identifier: Apache-2.0
+
+test_app:
+  enable:
+    - if: IDF_TARGET == "linux"
+    - if: IDF_TARGET == "esp32s3"
+  depends_components:
+    - signaling_serializer
+    - kvs_utils
+    - state_machine
