@@ -1,0 +1,20 @@
+menu "KVS Common Configuration"
+
+    # In kvs_utils (a common dep of both kvs_webrtc and kvs_signaling), not
+    # kvs_webrtc: signaling-only builds pull kvs_signaling but not kvs_webrtc, so
+    # a kvs_webrtc-scoped symbol would be undefined there and kvs_signaling's
+    # patch-apply step would silently skip, building against unpatched upstream.
+    config KVS_AUTO_APPLY_PATCHES
+        bool "Auto-apply webrtc-c platform patches at CMake configure time"
+        default y
+        help
+            On fresh clones, the upstream webrtc-c submodule needs the
+            platform patches in patches/ applied before the build will
+            produce a working firmware. With this on, CMake invokes
+            patches/apply_patches.sh at configure time (idempotent —
+            no-op if patches are already present).
+            Disable if you maintain the submodule manually (e.g. rebasing
+            onto a different SDK tip), or if you bring your own patch
+            workflow.
+
+endmenu

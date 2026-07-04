@@ -1,18 +1,5 @@
 menu "KVS WebRTC Configuration"
 
-    config KVS_AUTO_APPLY_PATCHES
-        bool "Auto-apply webrtc-c platform patches at CMake configure time"
-        default y
-        help
-            On fresh clones, the upstream webrtc-c submodule needs the
-            platform patches in patches/ applied before the build will
-            produce a working firmware. With this on, CMake invokes
-            patches/apply_patches.sh at configure time (idempotent —
-            no-op if patches are already present).
-            Disable if you maintain the submodule manually (e.g. rebasing
-            onto a different SDK tip), or if you bring your own patch
-            workflow.
-
     config ENABLE_DATA_CHANNEL
         bool "Enable Data channel support using usrsctp"
         default y
