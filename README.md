@@ -1,5 +1,9 @@
 # ESP-IDF Port of Amazon Kinesis Video Streams WebRTC SDK
 
+[![Build Examples & Docs](https://github.com/espressif/esp-port-for-amazon-kvs-sdk/actions/workflows/build.yml/badge.svg)](https://github.com/espressif/esp-port-for-amazon-kvs-sdk/actions/workflows/build.yml)
+
+<a href="https://espressif.github.io/esp-launchpad/?flashConfigURL=https://espressif.github.io/esp-port-for-amazon-kvs-sdk/launchpad.toml"><img alt="Try it with ESP Launchpad" src="https://espressif.github.io/esp-launchpad/assets/try_with_launchpad.png" width="200"></a>
+
 This repo gives you a drop-in ESP-IDF port of the [**Amazon Kinesis Video Streams WebRTC SDK C**](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c) for building real-time audio/video products on ESP32-family SoCs. It combines the upstream SDK with ESP-IDF components and BSP hooks. You also get ready-to-run examples (single-device and dual-chip split) and `esp_hosted` Wi-Fi co-processor support, so you can get a board streaming with a few Kconfig changes.
 
 ## Customizations Added by the Repo
