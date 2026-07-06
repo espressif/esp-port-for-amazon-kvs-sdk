@@ -45,7 +45,7 @@ static int wifi_set_cli_handler(int argc, char *argv[])
     snprintf((char*)wifi_cfg.sta.password, sizeof(wifi_cfg.sta.password), "%s", argv[2]);
 
     /* Configure WiFi station with provided host credentials */
-    if (esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_cfg) != ESP_OK) {
+    if (esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg) != ESP_OK) {
         printf("%s: Failed to set WiFi configuration\n", TAG);
         return 0;
     }

@@ -11,4 +11,5 @@ endif()
 
 idf_component_register(${_slave_flasher_srcs}
                        INCLUDE_DIRS "include"
-                       REQUIRES driver spiffs mbedtls console )
+                       # IDF v6 split uart/gpio out of `driver`; keep `driver` for v5.x.
+                       REQUIRES driver esp_driver_uart esp_driver_gpio spiffs mbedtls console )

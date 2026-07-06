@@ -1,4 +1,8 @@
 dependencies:
+  # IDF v6 dropped the bundled `json` (cJSON) component; pull the registry
+  # cJSON instead (works on v5.4/v5.5 too — the REQUIRES "json" is gone).
+  espressif/cjson: "*"
+
   esp_webrtc_utils:
     path: ${KVS_SDK_PATH}/components/esp_webrtc_utils
     version: '*'

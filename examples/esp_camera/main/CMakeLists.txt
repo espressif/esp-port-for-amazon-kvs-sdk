@@ -8,7 +8,6 @@ idf_component_register(
              "esp_event"
              "mbedtls"
              "lwip"
-             "json"
     )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE

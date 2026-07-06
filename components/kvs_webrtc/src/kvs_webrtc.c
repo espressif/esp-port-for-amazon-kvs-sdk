@@ -2258,7 +2258,11 @@ static VOID kvs_senderBandwidthEstimationHandler(UINT64 customData, UINT32 txByt
     }
 
     // Calculate packet loss with exponential moving average
+    // Newer SDK cores (v1.19.0+) define this in a public header; guard against
+    // a -Werror redefinition.
+    #ifndef EMA_ACCUMULATOR_GET_NEXT
     #define EMA_ACCUMULATOR_GET_NEXT(avg, sample) ((avg) * 0.9 + (sample) * 0.1)
+    #endif
     session->twcc_metadata.average_packet_loss =
         EMA_ACCUMULATOR_GET_NEXT(session->twcc_metadata.average_packet_loss, percentLost);
 

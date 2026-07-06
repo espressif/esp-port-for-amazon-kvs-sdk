@@ -69,7 +69,6 @@ set(component_requires
     "esp_common"
     "esp_timer"
     "esp_http_client"
-    "json"
     "libwebsockets"
     "mbedtls"
     "kvs_utils"

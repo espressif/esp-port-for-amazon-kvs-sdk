@@ -11,7 +11,7 @@
 
 #include "esp_spiffs.h"
 #include "esp_heap_caps.h"
-#include "mbedtls/md5.h"
+#include "mbedtls/md.h"
 
 #include "esp_console.h"
 #include "argtable3/argtable3.h"
@@ -191,7 +191,9 @@ static esp_err_t check_and_flash_partition(const char *file_path, uint32_t addr)
     #define MD5_MAX_LEN 16
     #define MD5_CHUNK_SIZE 4096  // 4KB chunks for MD5 computation
 
-    mbedtls_md5_context ctx;
+    // Generic mbedtls_md streaming API (works on mbedTLS 3 and 4; the
+    // standalone mbedtls_md5_* API is dropped/private in mbedTLS 4).
+    mbedtls_md_context_t ctx;
     unsigned char digest[MD5_MAX_LEN];
     uint8_t *chunk = heap_caps_malloc(MD5_CHUNK_SIZE, MALLOC_CAP_SPIRAM);
     if (!chunk) {
@@ -200,8 +202,15 @@ static esp_err_t check_and_flash_partition(const char *file_path, uint32_t addr)
         return ESP_ERR_NO_MEM;
     }
 
-    mbedtls_md5_init(&ctx);
-    mbedtls_md5_starts(&ctx);
+    mbedtls_md_init(&ctx);
+    if (mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_MD5), 0) != 0) {
+        ESP_LOGE(TAG, "MD5 unavailable in mbedTLS config");
+        mbedtls_md_free(&ctx);
+        free(chunk);
+        fclose(f);
+        return ESP_FAIL;
+    }
+    mbedtls_md_starts(&ctx);
 
     size_t remaining = size;
     while (remaining > 0) {
@@ -209,15 +218,17 @@ static esp_err_t check_and_flash_partition(const char *file_path, uint32_t addr)
         size_t read = fread(chunk, 1, to_read, f);
         if (read != to_read) {
             ESP_LOGE(TAG, "Failed to read file %s (read %zu of %zu)", file_path, read, to_read);
+            mbedtls_md_free(&ctx);
             free(chunk);
             fclose(f);
             return ESP_FAIL;
         }
-        mbedtls_md5_update(&ctx, chunk, read);
+        mbedtls_md_update(&ctx, chunk, read);
         remaining -= read;
     }
 
-    mbedtls_md5_finish(&ctx, digest);
+    mbedtls_md_finish(&ctx, digest);
+    mbedtls_md_free(&ctx);
     free(chunk);  // Free MD5 buffer before allocating flash buffer
 
     // Create a string of the digest (32 hex chars + null terminator)

@@ -1,5 +1,8 @@
 ## IDF Component Manager Manifest File
 dependencies:
+  # IDF v6 dropped the bundled `json` (cJSON) component; pull registry cJSON.
+  espressif/cjson: "*"
+
   # local components
   espressif/esp_hosted:
     override_path: ${KVS_SDK_PATH}/components/esp_hosted
