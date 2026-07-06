@@ -7,26 +7,11 @@ dependencies:
     rules:
       - if: "target in [esp32, esp32s3]"
 
-  # Require esp_video >= 2.0.1: ships the AWB subwindow zero-init fix
-  # (upstream MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon (EV
-  # Board v1.6 and later). Without it the ISP AWB hardware check on
-  # rev >= 3.0 reads stack garbage and ISP init fails -> camera does not
-  # start. Tightening here also auto-climbs the EV-board BSP version via
-  # the dep solver (BSP 5.2.1/5.2.2 pin esp_video ~1.4 and get rejected;
-  # 5.2.3 pins ~2.0 and resolves), so consumers don't need explicit BSP
-  # pins. media_stream does not use the V4L2 pixel format macros that
-  # were renamed/split in the 2.0.0 breaking change.
-  #
-  # Cap below 2.3.0: esp_video 2.3.0 pulls esp_ipa 2.2.0, whose
-  # CMakeLists lists itself in the prebuilt's PRIV_REQUIRES
-  # (add_prebuilt_library ... PRIV_REQUIRES esp_timer esp_ipa), which
-  # the build system cannot resolve -> "Failed to resolve component
-  # 'esp_ipa'" on every P4 camera build. esp_video 2.2.0 pulls the
-  # working esp_ipa 2.1.0. Lift the cap once the esp_ipa self-dep fix
-  # ships upstream:
-  # https://github.com/espressif/esp-video-components/issues/89
+  # Require esp_video >= 2.0.1 for the AWB subwindow zero-init fix (upstream
+  # MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon; also auto-climbs the
+  # EV-board BSP via the dep solver.
   espressif/esp_video:
-    version: ">=2.0.1,<2.3.0"
+    version: ">=2.0.1"
     rules:
       - if: "target not in [esp32]"
 
