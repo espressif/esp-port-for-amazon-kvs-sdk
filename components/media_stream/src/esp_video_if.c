@@ -216,20 +216,33 @@ static esp_err_t queue_all_buffers(v4l2_src_t *v4l2)
     }
 
     for (int i = 0; i < BUFFER_COUNT; i++) {
-        v4l2->v4l2_buf[i].type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        v4l2->v4l2_buf[i].memory = USE_V4L2_USERPTR ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
-        v4l2->v4l2_buf[i].index = i;
+        /* Rebuild the descriptor from scratch. Reusing the struct left over
+         * from the previous session's last DQBUF would carry stale fields
+         * (flags such as DONE/ERROR, bytesused, sequence, timestamp) into the
+         * requeue. After a fresh REQBUFS on the reopened fd the driver expects
+         * clean descriptors; stale flags make QBUF/DQBUF go out of sync so
+         * DQBUF never returns a frame (black video after a few sessions).
+         * We keep the backing memory (cap_buffer[]/buffer_size[]) to avoid
+         * PSRAM fragmentation — only the bookkeeping is reset. */
+        struct v4l2_buffer buf;
+        memset(&buf, 0, sizeof(buf));
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = USE_V4L2_USERPTR ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
+        buf.index  = i;
+
         v4l2->fb_used[i] = false;
 
         if (USE_V4L2_USERPTR) {
-            v4l2->v4l2_buf[i].m.userptr = (unsigned long)v4l2->cap_buffer[i];
-            v4l2->v4l2_buf[i].length = v4l2->buffer_size[i];  /* Restore from saved size */
             if (v4l2->buffer_size[i] == 0) {
                 ESP_LOGE(TAG, "USERPTR buffer size not set for buffer %d", i);
                 return ESP_FAIL;
             }
-            v4l2->v4l2_buf[i].bytesused = 0;
+            buf.m.userptr  = (unsigned long)v4l2->cap_buffer[i];
+            buf.length     = v4l2->buffer_size[i];  /* Restore from saved size */
+            buf.bytesused  = 0;
         }
+
+        v4l2->v4l2_buf[i] = buf;
 
         if (ioctl(v4l2->cap_fd, VIDIOC_QBUF, &v4l2->v4l2_buf[i]) < 0) {
             ESP_LOGE(TAG, "Failed to requeue buffer %d, errno: %d", i, errno);
@@ -365,26 +378,28 @@ esp_err_t esp_video_if_deinit(void)
         return ESP_OK;
     }
 
-    ESP_LOGD(TAG, "Deinitializing camera hardware (keeping buffers for reuse)");
+    ESP_LOGD(TAG, "Deinitializing camera hardware (keeping fd open and buffers for reuse)");
 
-    // Stop streaming first (STREAMOFF unblocks any pending DQBUF)
+    /* Stop streaming only. We deliberately keep the fd OPEN and the USERPTR
+     * buffers allocated across sessions:
+     *
+     *  - Keeping the buffers avoids re-allocating the large aligned PSRAM
+     *    blocks every session (heap fragmentation).
+     *  - Keeping the fd open avoids the close()/reopen()+REQBUFS dance, which
+     *    tears down and rebuilds the driver's device + sensor state. That
+     *    close/reopen cycle is what became unreliable after a few sessions:
+     *    STREAMON would succeed but DQBUF never delivered a frame (black video).
+     *    A persistent fd with a plain STREAMOFF -> (requeue) -> STREAMON is the
+     *    canonical V4L2 stop/start and restarts cleanly every time.
+     *
+     * esp_video_if_stop() does requeue_used_buffers() + STREAMOFF; STREAMOFF
+     * returns every buffer to the dequeued state so the next start can QBUF
+     * them all again (see restart_streaming_with_existing_buffers). */
     esp_video_if_stop();
 
 #if USE_V4L2_USERPTR
-    /* Allow any concurrent DQBUF ioctl to finish returning after STREAMOFF
-     * before closing the fd. Without this, close() destroys the V4L2 device
-     * structures while DQBUF is still unwinding, causing a spinlock crash. */
+    /* Allow any concurrent DQBUF ioctl to finish unwinding after STREAMOFF. */
     vTaskDelay(pdMS_TO_TICKS(50));
-
-    /* For USERPTR: Close fd to power down hardware, but keep buffer memory */
-    if (g_v4l2->cap_fd >= 0) {
-        close(g_v4l2->cap_fd);
-        g_v4l2->cap_fd = -1;
-        ESP_LOGD(TAG, "Closed camera fd (hardware powered down, USERPTR buffers retained)");
-    }
-#else
-    /* For MMAP: Keep fd open so buffers remain valid */
-    ESP_LOGD(TAG, "Kept fd open (MMAP buffers remain valid)");
 #endif
 
     return ESP_OK;
