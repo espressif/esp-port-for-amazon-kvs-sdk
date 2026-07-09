@@ -334,7 +334,7 @@ esp_err_t flash_slave()
     ESP_LOGI(TAG, "Initializing SPIFFS");
 
     esp_vfs_spiffs_conf_t conf = {
-      .base_path = "/spiffs",
+      .base_path = "/target_fw",
       .partition_label = "slave",
       .max_files = 5,
       .format_if_mount_failed = false
@@ -388,17 +388,17 @@ esp_err_t flash_slave()
         uint32_t partition_addr = PARTITION_TABLE_ADDRESS;
         uint32_t app_addr = APPLICATION_ADDRESS;
 
-        ret = check_and_flash_partition("/spiffs/bootloader.bin", bootloader_addr);
+        ret = check_and_flash_partition("/target_fw/bootloader.bin", bootloader_addr);
         if (ret != ESP_OK) {
             return ret;
         }
 
-        ret = check_and_flash_partition("/spiffs/partition-table.bin", partition_addr);
+        ret = check_and_flash_partition("/target_fw/partition-table.bin", partition_addr);
         if (ret != ESP_OK) {
             return ret;
         }
 
-        ret = check_and_flash_partition("/spiffs/app.bin", app_addr);
+        ret = check_and_flash_partition("/target_fw/app.bin", app_addr);
         if (ret != ESP_OK) {
             return ret;
         }
