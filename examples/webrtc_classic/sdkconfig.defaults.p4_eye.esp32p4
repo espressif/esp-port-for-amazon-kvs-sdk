@@ -9,6 +9,20 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_BSP_SELECT_ESP32_P4_EYE=y
 
 #
+# esp_hosted board select: auto-configures the P4-EYE SDIO pin map and the
+# C6 slave-reset GPIO (9). Without this esp_hosted falls back to the default
+# P4 map (reset GPIO 54) and the C6 never resets -> SDIO card-init timeout.
+#
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+
+#
+# Camera sensor: P4-EYE units ship with OV2710 (the base esp32p4 overlay only
+# enables SC2336, whose auto-detect then fails -> session comes up audio-only).
+# Both stay enabled; esp_cam_sensor auto-detect probes for whichever responds.
+#
+CONFIG_CAMERA_OV2710=y
+
+#
 # Chip revision
 #
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
