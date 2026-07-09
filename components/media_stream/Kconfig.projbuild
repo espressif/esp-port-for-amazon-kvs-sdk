@@ -1383,7 +1383,12 @@ menu "Media Stream Configuration"
             # only for ESP32-P4. S3 has the esp_h264 SW decoder but no
             # imgfx-accelerated YUV->RGB565 path — until a SW render backend
             # lands, restrict the player to P4 to keep the s3 build clean.
-            depends on IDF_TARGET_ESP32P4
+            #
+            # The render backend also needs the LVGL display stack
+            # (bsp_display_start + lvgl.h), which only the GLIB BSP variants
+            # provide — with a NoGLIB BSP the player has nothing to draw on,
+            # so it must drop out of the build instead of failing to compile.
+            depends on IDF_TARGET_ESP32P4 && BSP_SELECT_GLIB
             default y
             help
                 Enable the video player in media_stream so the device can

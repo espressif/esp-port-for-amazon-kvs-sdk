@@ -20,13 +20,15 @@
 
 #include "sdkconfig.h"
 
-/* The render backend is built on esp_image_effects, which ships only
- * for ESP32-P4 (idf_component.yml restricts the dep to that target).
- * On other targets this translation unit must compile to empty —
- * video_player_adapter.c's NO-PLAYER stub branch is selected via
- * CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n so it never calls the
- * symbols defined below. */
-#if CONFIG_IDF_TARGET_ESP32P4
+/* The render backend is built on esp_image_effects (ESP32-P4 only) and
+ * the LVGL display stack (GLIB BSP variants only). Gate on the player
+ * Kconfig switch — it already encodes both constraints (P4 + GLIB), so
+ * on any build where the deps are absent (other targets, NoGLIB BSP)
+ * this translation unit compiles to empty and video_player_adapter.c's
+ * NO-PLAYER stub branch (selected via
+ * CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n) never calls the symbols
+ * defined below. */
+#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER
 
 #include <inttypes.h>
 #include <stdlib.h>
