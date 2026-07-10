@@ -152,6 +152,14 @@ idf_component_register(
 # option(ENABLE_KVS_THREADPOOL "Enable support for KVS thread pool in signaling" OFF)
 set(KVS_PLAT_ESP_FREERTOS ON CACHE BOOL "Build for ESP FreeRTOS")
 add_definitions(-DKVS_PLAT_ESP_FREERTOS)
+
+# Signaling message sizing (upstream #2356 knob). 17024 yields
+# MAX_SESSION_DESCRIPTION_INIT_SDP_LEN = (17024 - 1024) * 3/4 = 12000 — the
+# RAM cap this port used to carry as a patch — and MAX_SIGNALING_MESSAGE_LEN
+# = 17024 (down from the 18750 default). These macros size public struct
+# members, so every component that includes the SDK headers must see the
+# SAME value: keep in sync with kvs_signaling and apprtc_signaling.
+add_definitions(-DKVS_SIGNALING_MESSAGE_LEN=17024)
 # if (ENABLE_KVS_THREADPOOL)
 #   add_definitions(-DENABLE_KVS_THREADPOOL)
 # endif()
@@ -207,7 +215,6 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    -Wno-error=format
     -Wno-error=unused-function
     -Wno-error=unused-variable
     -Wno-error=unused-but-set-variable
@@ -226,7 +233,6 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-int-to-pointer-cast
     -Wno-error=format-truncation
     -Wno-error=restrict
-    -Wno-error=implicit-fallthrough
     -Wno-error=type-limits
     -Wno-error=array-bounds
     -Wno-error=maybe-uninitialized
