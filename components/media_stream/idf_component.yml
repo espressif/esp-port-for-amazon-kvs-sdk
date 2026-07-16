@@ -10,8 +10,12 @@ dependencies:
   # Require esp_video >= 2.0.1 for the AWB subwindow zero-init fix (upstream
   # MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon; also auto-climbs the
   # EV-board BSP via the dep solver.
+  # ~2.0.1 (>=2.0.1,<2.1.0): the solver otherwise maximizes esp_video (2.3.x)
+  # and, since the BSPs are requested as '*' via bsp_selector, sacrifices the
+  # BSP down to the 4.x line (which lacks the audio-codec API). The 5.x BSPs
+  # require esp_video ~2.0, so capping here keeps the newest BSP resolvable.
   espressif/esp_video:
-    version: ">=2.0.1"
+    version: "~2.0.1"
     rules:
       - if: "target not in [esp32]"
 
@@ -31,8 +35,13 @@ dependencies:
         version: "<2.6.0"
       - if: 'target != "esp32p4" || $CONFIG{ESP32P4_REV_MIN_FULL} >= 300'
 
+  # esp_codec_dev 1.6.x conflicts with the EV-board BSP: esp32_p4_function_ev_board
+  # 5.2.x requires esp_codec_dev ~1.5, so a floating spec here lets the solver pick
+  # 1.6.1 and silently walk the BSP down to 4.0.1 (the first version with no
+  # codec_dev dep) — which predates bsp_audio_codec_microphone_init and the
+  # hw_cfg-based display config this component uses. Keep in lockstep with the BSP.
   espressif/esp_codec_dev:
-    version: "*"
+    version: "~1.5"
 
   # BSP component from component manager
   espressif/bsp_selector:

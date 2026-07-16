@@ -20,8 +20,9 @@ dependencies:
     version: ">=2.5,<5.0"
     public: true
 
+  # ~1.5: keep consistent with media_stream's pin (BSP 5.2.x requires ~1.5)
   esp_codec_dev:
-    version: "^1"
+    version: "~1.5"
     public: true
 
   esp_video:
