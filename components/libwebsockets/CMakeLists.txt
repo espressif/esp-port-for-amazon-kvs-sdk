@@ -42,6 +42,19 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libwebsockets
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE websockets)
 
+# lws is an add_subdirectory subproject, so it doesn't inherit this component's
+# REQUIRES include dirs; link idf::mbedtls for the mbedtls headers (incl.
+# tf-psa-crypto on mbedTLS 4 / IDF v6).
+target_link_libraries(websockets PRIVATE idf::mbedtls)
+
+# add_subdirectory bypasses lws's own mbedtls-version detection; set
+# LWS_HAVE_MBEDTLS_V4 so libwebsockets.h uses the v4 include paths (lws sources +
+# public consumers of the header).
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    target_compile_definitions(websockets PUBLIC LWS_HAVE_MBEDTLS_V4=1)
+    target_compile_definitions(${COMPONENT_LIB} INTERFACE LWS_HAVE_MBEDTLS_V4=1)
+endif()
+
 # Supply our own dependency-free UTC timegm() (picolibc's symbol isn't linkable here)
 # so lws's date.c resolves it under LWS_HAVE_TIMEGM.
 target_sources(websockets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lws_timegm.c)

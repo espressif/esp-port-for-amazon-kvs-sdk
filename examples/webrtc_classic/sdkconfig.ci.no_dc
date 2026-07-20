@@ -1,0 +1,2 @@
+# Data channel disabled — SCTP/usrsctp path must gate out.
+# CONFIG_ENABLE_DATA_CHANNEL is not set

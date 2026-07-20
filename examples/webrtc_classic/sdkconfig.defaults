@@ -180,6 +180,14 @@ CONFIG_WS_DYNAMIC_BUFFER=y
 CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
 #
+# esp_hosted: on P4 the GDMA can reach PSRAM through cache, so let the SDIO
+# transport buffer mempool allocate from DMA-capable SPIRAM first (falls back
+# to internal DMA RAM). Without this the internal-DMA-only alloc fails at boot
+# (sdio_mempool_create assert) — the P4 has little spare internal RAM.
+#
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+
+#
 # MDNS Memory Configuration
 #
 CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
@@ -196,3 +204,19 @@ CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
 # p4_c5_core_board). Off by default so single-chip and base P4 builds don't
 # expect a slave partition or staged co-processor images.
 # CONFIG_SLAVE_FLASHER_ENABLE is not set
+
+#
+# mbedTLS crypto features KVS WebRTC needs but IDF's minimal mbedtls config
+# leaves off — not board-specific, required for every KVS example on IDF v6:
+#   - DTLS-SRTP + keying-material export: derive SRTP keys from the DTLS handshake
+#   - X509 create: generate the ephemeral DTLS certificate
+#
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+CONFIG_MBEDTLS_SSL_KEYING_MATERIAL_EXPORT=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
+
+#
+# BLE provisioning security v1 (x25519 + PoP); IDF v6 gates the
+# NETWORK_PROV_SECURITY_1 enum behind this (default off).
+#
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y

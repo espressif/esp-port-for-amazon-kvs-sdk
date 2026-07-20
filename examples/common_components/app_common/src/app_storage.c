@@ -147,9 +147,14 @@ static esp_err_t spiffs_init(void)
 {
     ESP_LOGI(TAG, "Initializing SPIFFS");
 
+    /* Pin the partition by label. With label = NULL, SPIFFS picks the FIRST
+     * subtype-spiffs partition in the table — on boards whose table also
+     * carries a 'slave' SPIFFS partition (16 MB slave-flasher layouts) that
+     * used to resolve to 'slave', not 'storage', so files placed in the
+     * storage image were never visible at /spiffs. */
     esp_vfs_spiffs_conf_t conf = {
       .base_path = "/spiffs",
-      .partition_label = NULL,
+      .partition_label = "storage",
       .max_files = 5,
       .format_if_mount_failed = false
     };
@@ -171,7 +176,7 @@ static esp_err_t spiffs_init(void)
     }
 
     size_t total = 0, used = 0;
-    ret = esp_spiffs_info(NULL, &total, &used);
+    ret = esp_spiffs_info("storage", &total, &used);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
     } else {
@@ -195,7 +200,7 @@ esp_err_t app_storage_deinit()
 {
 #if USE_SPIFFS_STORAGE
     // All done, unmount partition and disable SPIFFS
-    esp_vfs_spiffs_unregister(NULL);
+    esp_vfs_spiffs_unregister("storage");
     ESP_LOGI(TAG, "SPIFFS unmounted");
 #else
     // All done, unmount partition and disable SDMMC or SPI peripheral

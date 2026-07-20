@@ -1,4 +1,4 @@
-From fc1f889314aac3066ba1c8bbb560fd4d30a77d3a Mon Sep 17 00:00:00 2001
+From b4fc0ee9308c947b6da867f01b84bd21c2ff2b50 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Mon, 9 Feb 2026 16:52:34 +0530
 Subject: [PATCH 1/4] Added support for SDP re-negotiation flow
@@ -8,15 +8,15 @@ Subject: [PATCH 1/4] Added support for SDP re-negotiation flow
  - Added test cases in PeerConnectionFunctionalityTest.cpp
 ---
  src/source/PeerConnection/PeerConnection.c    |   3 +
- .../PeerConnection/SessionDescription.c       |  23 ++
+ .../PeerConnection/SessionDescription.c       |  27 ++-
  tst/PeerConnectionFunctionalityTest.cpp       | 217 ++++++++++++++++++
- 3 files changed, 243 insertions(+)
+ 3 files changed, 245 insertions(+), 2 deletions(-)
 
 diff --git a/src/source/PeerConnection/PeerConnection.c b/src/source/PeerConnection/PeerConnection.c
-index 68106aa78d..9f70797769 100644
+index 6c96286c..5fe1e9f2 100644
 --- a/src/source/PeerConnection/PeerConnection.c
 +++ b/src/source/PeerConnection/PeerConnection.c
-@@ -1407,6 +1407,9 @@ STATUS setRemoteDescription(PRtcPeerConnection pPeerConnection, PRtcSessionDescr
+@@ -1412,6 +1412,9 @@ STATUS setRemoteDescription(PRtcPeerConnection pPeerConnection, PRtcSessionDescr
  
      // In master mode, this should be freed once `createAnswer` is invoked for the session.
      // In viewer mode, this should be freed once `setRemoteDescription` is completed for the session.
@@ -27,10 +27,10 @@ index 68106aa78d..9f70797769 100644
      pSessionDescription = pKvsPeerConnection->pRemoteSessionDescription;
      CHK(pSessionDescription != NULL, STATUS_NOT_ENOUGH_MEMORY);
 diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
-index 68dd473612..4a94cc479a 100644
+index 0e6b31fa..c760ec57 100644
 --- a/src/source/PeerConnection/SessionDescription.c
 +++ b/src/source/PeerConnection/SessionDescription.c
-@@ -350,6 +350,14 @@ STATUS setTransceiverPayloadTypes(PHashTable codecTable, PHashTable rtxTable, PD
+@@ -355,6 +355,14 @@ STATUS setTransceiverPayloadTypes(PHashTable codecTable, PHashTable rtxTable, PD
          }
  
          if (pKvsRtpTransceiver != NULL) {
@@ -45,7 +45,7 @@ index 68dd473612..4a94cc479a 100644
              if (pKvsRtpTransceiver->pRollingBufferConfig == NULL) {
                  // Passing in 0,0. The default values will be set up since application has not set up rolling buffer config with the
                  // configureTransceiverRollingBuffer() call
-@@ -1373,6 +1381,21 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
+@@ -1397,6 +1405,21 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
      PKvsRtpTransceiver pKvsRtpFakeTransceiver = NULL;
      PRtcMediaStreamTrack pRtcMediaStreamTrack;
      RtcMediaStreamTrack track;
@@ -67,8 +67,19 @@ index 68dd473612..4a94cc479a 100644
  
      // pSeenTranceivers is populated only with codec types supported by the SDK. And if already populated, it is not added again.
      // Hence, it is sufficient if the hash table count is set to minimum or required transceivers
+@@ -1537,8 +1560,8 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
+             MEMSET(&track, 0x00, SIZEOF(RtcMediaStreamTrack));
+             track.kind = streamKind;
+             track.codec = RTC_CODEC_UNKNOWN;
+-            SNPRINTF(track.streamId, SIZEOF(track.streamId), "fakeStream%u", currentMedia);
+-            SNPRINTF(track.trackId, SIZEOF(track.trackId), "fakeTrack%u", currentMedia);
++            SNPRINTF(track.streamId, SIZEOF(track.streamId), "fakeStream%" PRIu32, currentMedia);
++            SNPRINTF(track.trackId, SIZEOF(track.trackId), "fakeTrack%" PRIu32, currentMedia);
+             pRtcMediaStreamTrack = &track;
+             CHK_STATUS(createKvsRtpTransceiver(RTC_RTP_TRANSCEIVER_DIRECTION_INACTIVE, pKvsPeerConnection, (UINT32) RAND(), (UINT32) RAND(),
+                                                pRtcMediaStreamTrack, NULL, RTC_CODEC_UNKNOWN, &pKvsRtpFakeTransceiver));
 diff --git a/tst/PeerConnectionFunctionalityTest.cpp b/tst/PeerConnectionFunctionalityTest.cpp
-index 4fc9b7af16..5170a3b2f9 100644
+index 4fc9b7af..5170a3b2 100644
 --- a/tst/PeerConnectionFunctionalityTest.cpp
 +++ b/tst/PeerConnectionFunctionalityTest.cpp
 @@ -1330,6 +1330,70 @@ TEST_F(PeerConnectionFunctionalityTest, connectTwoPeersForcedTURNWithDynamicIceS

@@ -7,9 +7,11 @@
 #include "aws_signer_v4.h"
 #include "request_info.h"
 
-#include <mbedtls/ssl.h>
-#include <mbedtls/sha256.h>
-#include <mbedtls/md5.h>
+/* Pull the full mbedTLS config first: on mbedTLS 4, <mbedtls/md.h> includes
+ * only tf-psa-crypto/build_info.h, which does not define the mbedTLS-level
+ * MBEDTLS_MD_C — without this the mbedtls_md_* declarations get gated out. */
+#include <mbedtls/build_info.h>
+#include <mbedtls/md.h>
 #include <mbedtls/error.h>
 
 /**
@@ -24,14 +26,17 @@
 #define KVS_RSA_F4                  0x10001L
 #define KVS_MD5_DIGEST_LENGTH       16
 #define KVS_SHA1_DIGEST_LENGTH      20
-#define KVS_MD5_DIGEST(m, mlen, ob) mbedtls_md5((m), (mlen), (ob));
+// Route MD5/SHA-256 through the generic message-digest API (mbedtls/md.h).
+// mbedTLS 4 / TF-PSA-Crypto moved the direct mbedtls_md5()/mbedtls_sha256()
+// modules to a private include path; mbedtls_md() stays public on 3.x and 4.x.
+#define KVS_MD5_DIGEST(m, mlen, ob) CHK(0 == mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_MD5), (m), (mlen), (ob)), STATUS_HMAC_GENERATION_ERROR)
 #define KVS_HMAC(k, klen, m, mlen, ob, plen)                                                                                                         \
     CHK(0 == mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), (k), (klen), (m), (mlen), (ob)), STATUS_HMAC_GENERATION_ERROR);           \
     *(plen) = mbedtls_md_get_size(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256));
 #define KVS_SHA1_HMAC(k, klen, m, mlen, ob, plen)                                                                                                    \
     CHK(0 == mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), (k), (klen), (m), (mlen), (ob)), STATUS_HMAC_GENERATION_ERROR);             \
     *(plen) = mbedtls_md_get_size(mbedtls_md_info_from_type(MBEDTLS_MD_SHA1));
-#define KVS_SHA256(m, mlen, ob) mbedtls_sha256((m), (mlen), (ob), 0);
+#define KVS_SHA256(m, mlen, ob) CHK(0 == mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), (m), (mlen), (ob)), STATUS_HMAC_GENERATION_ERROR)
 
 
 STATUS generateAwsSigV4Signature(PRequestInfo pRequestInfo, PCHAR dateTimeStr, BOOL authHeaders, PCHAR* ppSigningInfo, PINT32 pSigningInfoLen)

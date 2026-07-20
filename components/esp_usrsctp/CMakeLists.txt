@@ -56,16 +56,26 @@ set(sctp_inet6 OFF CACHE BOOL "Support IPv6" FORCE)
 set(SCTP_USE_MBEDTLS_SHA1 ON CACHE BOOL "Build with mbedtls sha1 support" FORCE)
 set(sctp_werror OFF CACHE BOOL "Treat warning as error" FORCE)
 
+# mbedTLS 4 (ESP-IDF v6) renamed the crypto library target mbedcrypto ->
+# tfpsacrypto; on <= v5 it's still mbedcrypto.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    set(_kvs_crypto_lib tfpsacrypto)
+else()
+    set(_kvs_crypto_lib mbedcrypto)
+endif()
+
 # Create a custom FindMbedTLS.cmake in the CMAKE_MODULE_PATH
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/FindMbedTLS.cmake" "
 # Custom FindMbedTLS.cmake for ESP-IDF
 set(MBEDTLS_FOUND TRUE)
 set(MBEDTLS_INCLUDE_DIRS \"${IDF_PATH}/components/mbedtls/mbedtls/include\" \"${IDF_PATH}/components/mbedtls/port/include\")
-set(MBEDTLS_LIBRARIES mbedtls mbedcrypto mbedx509)
+set(MBEDTLS_LIBRARIES mbedtls ${_kvs_crypto_lib} mbedx509)
 ")
 
-# Add the directory with our custom FindMbedTLS.cmake to CMAKE_MODULE_PATH
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
+# Prepend (not append) our generated FindMbedTLS.cmake so it takes precedence
+# over the vendored usrsctp/cmake/FindMbedTLS.cmake, which hardcodes mbedcrypto
+# and would fail to link on mbedTLS-4 / IDF v6 (crypto target is tfpsacrypto).
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Add compiler flags to suppress warnings
 add_compile_options(

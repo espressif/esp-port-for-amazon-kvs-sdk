@@ -6,5 +6,5 @@
 nvs,      data, nvs,     0xD000,    0x6000,
 phy_init, data, phy,     0x13000,   0x1000,
 factory,  app,  factory, 0x20000,   0x2F0000,
-slave,    data, spiffs,  0x310000,  0x1D0000,
-storage,  data, spiffs,  0x4E0000,  1M,
+slave,    data, spiffs,  0x310000,  0x2E0000,
+storage,  data, spiffs,  0x5F0000,  1M,

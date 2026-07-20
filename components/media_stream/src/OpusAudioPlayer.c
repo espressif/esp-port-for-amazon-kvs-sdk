@@ -43,13 +43,10 @@ typedef struct {
 
 static write_ctx_t write_ctx;
 static rb_handle_t rb_handle;
-/* Declared on any BSP that advertises a speaker, and always on ESP32-P4:
- * the P4 media_playback_task references spk_codec_dev unconditionally and
- * relies on the runtime NULL check to no-op when the board has no speaker
- * subboard (production P4-EYE ships without one). The BSP_CAPS_AUDIO_SPEAKER
- * init block lower down only populates it when a speaker is actually present;
- * on s3/etc. without a speaker the symbol stays unused and undeclared. */
-#if BSP_CAPS_AUDIO_SPEAKER || CONFIG_IDF_TARGET_ESP32P4
+/* Only declared when the BSP advertises a speaker: the P4 playback task and the
+ * codec init below are both gated on BSP_CAPS_AUDIO_SPEAKER; boards without one
+ * (e.g. P4-EYE) use the no-op playback stub and never touch this handle. */
+#if BSP_CAPS_AUDIO_SPEAKER
 static esp_codec_dev_handle_t spk_codec_dev = NULL;
 #endif
 
@@ -175,7 +172,11 @@ static int decode_one_frame(uint8_t *data, int size)
     return ret;
 }
 
-#if CONFIG_IDF_TARGET_ESP32P4
+/* The P4 playback task feeds decoded PCM to the speaker codec (spk_codec_dev),
+ * which only exists when the BSP advertises a speaker. Some P4 boards have no
+ * speaker (e.g. ESP32-P4-EYE: BSP_CAPS_AUDIO_SPEAKER == 0) — there we fall
+ * through to the no-op stub below rather than reference an undeclared handle. */
+#if CONFIG_IDF_TARGET_ESP32P4 && BSP_CAPS_AUDIO_SPEAKER
 #include "resampling.h"
 #include <math.h>
 
@@ -316,15 +317,15 @@ static void media_playback_task(void *arg)
     }
 }
 #endif /* AUDIO_PLAYER_SINE_TEST */
-#else /* !CONFIG_IDF_TARGET_ESP32P4 */
+#else /* !CONFIG_IDF_TARGET_ESP32P4 || !BSP_CAPS_AUDIO_SPEAKER */
 static void media_playback_task(void *arg)
 {
     while (1) {
-        ESP_LOGW(TAG, "media playback task not implemented for this target");
+        ESP_LOGW(TAG, "media playback task not implemented (no speaker on this board/target)");
         vTaskDelay(pdMS_TO_TICKS(5 * 1000));
     }
 }
-#endif /* CONFIG_IDF_TARGET_ESP32P4 */
+#endif /* CONFIG_IDF_TARGET_ESP32P4 && BSP_CAPS_AUDIO_SPEAKER */
 esp_err_t opus_player_decode_and_play_one_frame(uint8_t *data, size_t size)
 {
     // printf("Decoding and playing one frame %p of size %zu\n", data, size);

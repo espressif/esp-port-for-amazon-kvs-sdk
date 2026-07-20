@@ -35,12 +35,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply SDK patches
+      # No manual `git am`: rely on the SDK's auto-apply (CONFIG_KVS_AUTO_APPLY_PATCHES,
+      # default y) so CI exercises the exact patch path downstream consumers use.
+      - name: Allow git to operate on the CI checkout
         shell: bash
-        run: |
-          git config --global --add safe.directory "*"
-          cd amazon-kinesis-video-streams-webrtc-sdk-c
-          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+        run: git config --global --add safe.directory "*"
 
       - name: Build ${{ matrix.example }} for ${{ matrix.target }}
         env:
@@ -92,12 +91,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply SDK patches
+      # No manual `git am`: rely on the SDK's auto-apply (CONFIG_KVS_AUTO_APPLY_PATCHES,
+      # default y) so CI exercises the exact patch path downstream consumers use.
+      - name: Allow git to operate on the CI checkout
         shell: bash
-        run: |
-          git config --global --add safe.directory "*"
-          cd amazon-kinesis-video-streams-webrtc-sdk-c
-          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+        run: git config --global --add safe.directory "*"
 
       - name: Build ${{ matrix.example }} for ${{ matrix.target }}
         env:
@@ -128,12 +126,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply SDK patches
+      # No manual `git am`: rely on the SDK's auto-apply (CONFIG_KVS_AUTO_APPLY_PATCHES,
+      # default y) so CI exercises the exact patch path downstream consumers use.
+      - name: Allow git to operate on the CI checkout
         shell: bash
-        run: |
-          git config --global --add safe.directory "*"
-          cd amazon-kinesis-video-streams-webrtc-sdk-c
-          git -c user.email=ci@espressif.local -c user.name=CI am ../patches/*.patch
+        run: git config --global --add safe.directory "*"
 
       - name: Build and run tests on Linux target
         shell: bash

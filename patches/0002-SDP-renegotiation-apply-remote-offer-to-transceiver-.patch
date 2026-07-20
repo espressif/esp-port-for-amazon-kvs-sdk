@@ -1,4 +1,4 @@
-From 7faf6b097a86fc83ca811b7cc344c2f39041096b Mon Sep 17 00:00:00 2001
+From 5b196c16e134056a2cf340448f8287fa5df67e65 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 17 Feb 2026 22:55:40 +0530
 Subject: [PATCH 2/4] SDP renegotiation: apply remote offer to transceiver
@@ -17,10 +17,10 @@ Subject: [PATCH 2/4] SDP renegotiation: apply remote offer to transceiver
  3 files changed, 119 insertions(+), 2 deletions(-)
 
 diff --git a/src/source/PeerConnection/PeerConnection.c b/src/source/PeerConnection/PeerConnection.c
-index 9f70797769..06e80f32a3 100644
+index 5fe1e9f2..f8ed8974 100644
 --- a/src/source/PeerConnection/PeerConnection.c
 +++ b/src/source/PeerConnection/PeerConnection.c
-@@ -1547,6 +1547,27 @@ STATUS setRemoteDescription(PRtcPeerConnection pPeerConnection, PRtcSessionDescr
+@@ -1552,6 +1552,27 @@ STATUS setRemoteDescription(PRtcPeerConnection pPeerConnection, PRtcSessionDescr
      CHK_STATUS(setTransceiverPayloadTypes(pKvsPeerConnection->pCodecTable, pKvsPeerConnection->pRtxTable, pKvsPeerConnection->pTransceivers));
      CHK_STATUS(setReceiversSsrc(pSessionDescription, pKvsPeerConnection->pTransceivers));
  
@@ -49,10 +49,10 @@ index 9f70797769..06e80f32a3 100644
          DLOGD("REMOTE_SDP:%s\n", pSessionDescriptionInit->sdp);
      }
 diff --git a/src/source/PeerConnection/Rtp.c b/src/source/PeerConnection/Rtp.c
-index 00ea9d3314..9b5c0b549d 100644
+index 3ceb4add..bc824cc5 100644
 --- a/src/source/PeerConnection/Rtp.c
 +++ b/src/source/PeerConnection/Rtp.c
-@@ -310,6 +310,10 @@ STATUS writeFrame(PRtcRtpTransceiver pRtcRtpTransceiver, PFrame pFrame)
+@@ -311,6 +311,10 @@ STATUS writeFrame(PRtcRtpTransceiver pRtcRtpTransceiver, PFrame pFrame)
  
      CHK(pKvsRtpTransceiver != NULL && pFrame != NULL, STATUS_NULL_ARG);
      pKvsPeerConnection = pKvsRtpTransceiver->pKvsPeerConnection;
@@ -64,10 +64,10 @@ index 00ea9d3314..9b5c0b549d 100644
      if (MEDIA_STREAM_TRACK_KIND_VIDEO == pKvsRtpTransceiver->sender.track.kind) {
          frames++;
 diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
-index 4a94cc479a..8fbcc00bf1 100644
+index c760ec57..89496a46 100644
 --- a/src/source/PeerConnection/SessionDescription.c
 +++ b/src/source/PeerConnection/SessionDescription.c
-@@ -355,6 +355,7 @@ STATUS setTransceiverPayloadTypes(PHashTable codecTable, PHashTable rtxTable, PD
+@@ -360,6 +360,7 @@ STATUS setTransceiverPayloadTypes(PHashTable codecTable, PHashTable rtxTable, PD
              // threads may be actively using these buffers, so freeing and recreating them
              // would cause a use-after-free race condition. The existing buffers remain valid.
              if (pKvsRtpTransceiver->sender.packetBuffer != NULL && pKvsRtpTransceiver->sender.retransmitter != NULL) {
@@ -75,7 +75,7 @@ index 4a94cc479a..8fbcc00bf1 100644
                  continue;
              }
  
-@@ -1354,6 +1355,39 @@ CleanUp:
+@@ -1378,6 +1379,39 @@ CleanUp:
      return retStatus;
  }
  
@@ -115,7 +115,7 @@ index 4a94cc479a..8fbcc00bf1 100644
  // primarily used for creating a list of transceivers corresponding to each media m-line to respond to an offer with an answer
  // This function generates the pAnswerTransceivers list which contains transceivers corresponding to each m-line in correct order
  // To generate this list, it traverses over each m-line, first checks if it has a user-created transceiver present using findCodecInTransceivers
-@@ -1374,11 +1408,12 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
+@@ -1398,11 +1432,12 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
      PCHAR attributeValue, end, codecs = NULL;
      PCHAR rtpMapValue = NULL;
      CHAR firstCodec[MAX_PAYLOAD_TYPE_LENGTH];
@@ -130,7 +130,7 @@ index 4a94cc479a..8fbcc00bf1 100644
      PRtcMediaStreamTrack pRtcMediaStreamTrack;
      RtcMediaStreamTrack track;
      PDoubleListNode pCurNode = NULL;
-@@ -1559,6 +1594,63 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
+@@ -1585,6 +1620,63 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
          }
      }
  

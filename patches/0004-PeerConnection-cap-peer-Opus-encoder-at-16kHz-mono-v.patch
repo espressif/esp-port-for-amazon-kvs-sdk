@@ -1,4 +1,4 @@
-From 622b2266d878b467c82150c27150e36b925a5847 Mon Sep 17 00:00:00 2001
+From bc95e041cf1962d22d3bc89d8259cdc2f7eea7ea Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Fri, 15 May 2026 20:16:15 +0530
 Subject: [PATCH 4/4] PeerConnection: cap peer Opus encoder at 16kHz mono via
@@ -37,10 +37,10 @@ SDK actually offered/answered without having to dump full SDP.
  2 files changed, 9 insertions(+), 4 deletions(-)
 
 diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
-index 8fbcc00bf1..b74c46cd58 100644
+index 89496a46..5e58cdb0 100644
 --- a/src/source/PeerConnection/SessionDescription.c
 +++ b/src/source/PeerConnection/SessionDescription.c
-@@ -787,9 +787,11 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
+@@ -791,9 +791,11 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
              attributeCount++;
          }
      } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_OPUS) {
@@ -55,7 +55,7 @@ index 8fbcc00bf1..b74c46cd58 100644
  
          STRCPY(pSdpMediaDescription->sdpAttributes[attributeCount].attributeName, "rtpmap");
          amountWritten = SNPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue,
-@@ -803,6 +805,8 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
+@@ -807,6 +809,8 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
                  SNPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue,
                           SIZEOF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue), "%" PRId64 " %s", payloadType, currentFmtp);
              CHK_ERR(amountWritten > 0, STATUS_INTERNAL_ERROR, "Full Opus fmtp could not be written");
@@ -65,7 +65,7 @@ index 8fbcc00bf1..b74c46cd58 100644
          }
      } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_VP8) {
 diff --git a/src/source/PeerConnection/SessionDescription.h b/src/source/PeerConnection/SessionDescription.h
-index 4d511c8653..94221fd383 100644
+index 4d511c86..94221fd3 100644
 --- a/src/source/PeerConnection/SessionDescription.h
 +++ b/src/source/PeerConnection/SessionDescription.h
 @@ -53,7 +53,8 @@ extern "C" {

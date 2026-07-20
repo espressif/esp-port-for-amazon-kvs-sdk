@@ -216,23 +216,44 @@ static esp_err_t queue_all_buffers(v4l2_src_t *v4l2)
     }
 
     for (int i = 0; i < BUFFER_COUNT; i++) {
-        v4l2->v4l2_buf[i].type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        v4l2->v4l2_buf[i].memory = USE_V4L2_USERPTR ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
-        v4l2->v4l2_buf[i].index = i;
+        /* Rebuild the descriptor from scratch. Reusing the struct left over
+         * from the previous session's last DQBUF would carry stale fields
+         * (flags such as DONE/ERROR, bytesused, sequence, timestamp) into the
+         * requeue. After a fresh REQBUFS on the reopened fd the driver expects
+         * clean descriptors; stale flags make QBUF/DQBUF go out of sync so
+         * DQBUF never returns a frame (black video after a few sessions).
+         * We keep the backing memory (cap_buffer[]/buffer_size[]) to avoid
+         * PSRAM fragmentation — only the bookkeeping is reset. */
+        struct v4l2_buffer buf;
+        memset(&buf, 0, sizeof(buf));
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = USE_V4L2_USERPTR ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP;
+        buf.index  = i;
+
         v4l2->fb_used[i] = false;
 
         if (USE_V4L2_USERPTR) {
-            v4l2->v4l2_buf[i].m.userptr = (unsigned long)v4l2->cap_buffer[i];
-            v4l2->v4l2_buf[i].length = v4l2->buffer_size[i];  /* Restore from saved size */
             if (v4l2->buffer_size[i] == 0) {
                 ESP_LOGE(TAG, "USERPTR buffer size not set for buffer %d", i);
                 return ESP_FAIL;
             }
-            v4l2->v4l2_buf[i].bytesused = 0;
+            buf.m.userptr  = (unsigned long)v4l2->cap_buffer[i];
+            buf.length     = v4l2->buffer_size[i];  /* Restore from saved size */
+            buf.bytesused  = 0;
         }
+
+        v4l2->v4l2_buf[i] = buf;
 
         if (ioctl(v4l2->cap_fd, VIDIOC_QBUF, &v4l2->v4l2_buf[i]) < 0) {
             ESP_LOGE(TAG, "Failed to requeue buffer %d, errno: %d", i, errno);
+            /* Buffers 0..i-1 are already queued to the driver. Flush them with
+             * STREAMOFF (legal before STREAMON; returns every queued buffer to
+             * the dequeued state) so the driver is not left half-queued and a
+             * later start attempt begins from a clean queue. */
+            int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if (i > 0 && ioctl(v4l2->cap_fd, VIDIOC_STREAMOFF, &type) < 0) {
+                ESP_LOGE(TAG, "STREAMOFF after partial queue failed, errno: %d (full re-init required)", errno);
+            }
             return ESP_FAIL;
         }
     }
@@ -254,6 +275,15 @@ static video_fb_t *video_fb_get_cb(void *cb_ctx)
             int ret = ioctl(v4l2->cap_fd, VIDIOC_DQBUF, &buf);
             if (ret != 0) {
                 ESP_LOGE(TAG, "failed to receive video frame ret %d", ret);
+                return NULL;
+            }
+
+            /* Guard the driver-supplied index before it touches fb_used[] /
+             * cap_buffer[] / v4l2_buf[] (all sized BUFFER_COUNT): a buggy or
+             * racing driver returning an unexpected index must not become an
+             * out-of-bounds write. */
+            if (buf.index >= BUFFER_COUNT) {
+                ESP_LOGE(TAG, "DQBUF returned out-of-range buffer index %u", (unsigned) buf.index);
                 return NULL;
             }
 
@@ -365,26 +395,28 @@ esp_err_t esp_video_if_deinit(void)
         return ESP_OK;
     }
 
-    ESP_LOGD(TAG, "Deinitializing camera hardware (keeping buffers for reuse)");
+    ESP_LOGD(TAG, "Deinitializing camera hardware (keeping fd open and buffers for reuse)");
 
-    // Stop streaming first (STREAMOFF unblocks any pending DQBUF)
+    /* Stop streaming only. We deliberately keep the fd OPEN and the USERPTR
+     * buffers allocated across sessions:
+     *
+     *  - Keeping the buffers avoids re-allocating the large aligned PSRAM
+     *    blocks every session (heap fragmentation).
+     *  - Keeping the fd open avoids the close()/reopen()+REQBUFS dance, which
+     *    tears down and rebuilds the driver's device + sensor state. That
+     *    close/reopen cycle is what became unreliable after a few sessions:
+     *    STREAMON would succeed but DQBUF never delivered a frame (black video).
+     *    A persistent fd with a plain STREAMOFF -> (requeue) -> STREAMON is the
+     *    canonical V4L2 stop/start and restarts cleanly every time.
+     *
+     * esp_video_if_stop() does requeue_used_buffers() + STREAMOFF; STREAMOFF
+     * returns every buffer to the dequeued state so the next start can QBUF
+     * them all again (see restart_streaming_with_existing_buffers). */
     esp_video_if_stop();
 
 #if USE_V4L2_USERPTR
-    /* Allow any concurrent DQBUF ioctl to finish returning after STREAMOFF
-     * before closing the fd. Without this, close() destroys the V4L2 device
-     * structures while DQBUF is still unwinding, causing a spinlock crash. */
+    /* Allow any concurrent DQBUF ioctl to finish unwinding after STREAMOFF. */
     vTaskDelay(pdMS_TO_TICKS(50));
-
-    /* For USERPTR: Close fd to power down hardware, but keep buffer memory */
-    if (g_v4l2->cap_fd >= 0) {
-        close(g_v4l2->cap_fd);
-        g_v4l2->cap_fd = -1;
-        ESP_LOGD(TAG, "Closed camera fd (hardware powered down, USERPTR buffers retained)");
-    }
-#else
-    /* For MMAP: Keep fd open so buffers remain valid */
-    ESP_LOGD(TAG, "Kept fd open (MMAP buffers remain valid)");
 #endif
 
     return ESP_OK;
@@ -652,7 +684,24 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
                  (int)format.fmt.pix.width, (int)format.fmt.pix.height, errno);
     }
 
-    ESP_LOGE(TAG, "Failed to set any supported format. Check the camera resolution in menuconfig");
+    /* None of the requested/fallback resolutions could be set. Rather than treating
+     * this as fatal, fall back to whatever format the sensor is already in: query it
+     * with VIDIOC_G_FMT, adopt it as the current resolution, warn, and continue. Some
+     * sensors reject S_FMT but still deliver a usable current format. */
+    struct v4l2_format current_format = {0};
+    current_format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(v4l2->cap_fd, VIDIOC_G_FMT, &current_format) == 0) {
+        g_current_resolution.width = current_format.fmt.pix.width;
+        g_current_resolution.height = current_format.fmt.pix.height;
+        g_current_resolution.fps = g_desired_resolution.fps ? g_desired_resolution.fps : 30;
+        ESP_LOGW(TAG,
+                 "Could not set any requested resolution; using the sensor's current format %dx%d "
+                 "(check the camera resolution in menuconfig if this is unexpected)",
+                 (int) g_current_resolution.width, (int) g_current_resolution.height);
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "Failed to set any supported format and could not query the current one (errno %d)", errno);
     return ESP_FAIL;
 }
 

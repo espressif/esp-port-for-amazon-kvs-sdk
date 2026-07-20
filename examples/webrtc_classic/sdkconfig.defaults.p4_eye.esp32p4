@@ -1,6 +1,28 @@
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
 #
+# BSP selection: pick the P4-EYE BSP (ST7789 SPI display). Without this the
+# bsp_selector choice defaults to ESP32_P4_FUNCTION_EV_BOARD for esp32p4,
+# which pulls the EV-board MIPI stack (esp_lcd_ek79007) — wrong panel for
+# this board.
+#
+CONFIG_BSP_SELECT_ESP32_P4_EYE=y
+
+#
+# esp_hosted board select: auto-configures the P4-EYE SDIO pin map and the
+# C6 slave-reset GPIO (9). Without this esp_hosted falls back to the default
+# P4 map (reset GPIO 54) and the C6 never resets -> SDIO card-init timeout.
+#
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+
+#
+# Camera sensor: P4-EYE units ship with OV2710 (the base esp32p4 overlay only
+# enables SC2336, whose auto-detect then fails -> session comes up audio-only).
+# Both stay enabled; esp_cam_sensor auto-detect probes for whichever responds.
+#
+CONFIG_CAMERA_OV2710=y
+
+#
 # Chip revision
 #
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
@@ -10,8 +32,8 @@ CONFIG_ESP32P4_REV_MIN_0=y
 # Slave Flasher
 #
 CONFIG_SLAVE_FLASHER_ENABLE=y
-CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0xC000
-CONFIG_SLAVE_APPLICATION_ADDRESS=0x20000
+CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0x8000
+CONFIG_SLAVE_APPLICATION_ADDRESS=0x10000
 CONFIG_SLAVE_UART_RX_PIN=36
 CONFIG_SLAVE_UART_TX_PIN=35
 CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33

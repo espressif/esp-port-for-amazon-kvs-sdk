@@ -2202,7 +2202,7 @@ STATUS describeMediaStorageConfEsp(PSignalingClient pSignalingClient, UINT64 tim
 
                             if (previousStorageStatus != newStorageStatus) {
                                 ESP_LOGD(TAG, "Storage status changed: %d -> %d, invalidating getEndpointTime",
-                                         previousStorageStatus, newStorageStatus);
+                                         (int) previousStorageStatus, (int) newStorageStatus);
                                 pSignalingClient->getEndpointTime = INVALID_TIMESTAMP_VALUE;
                             }
                         }
@@ -2511,7 +2511,7 @@ STATUS performEspHttpRequest(PSignalingClient pSignalingClient, PCHAR url,
         ESP_LOGE(TAG, "HTTP request failed with status code %d", statusCode);
         if (response != NULL && responseLen > 0) {
             UINT32 previewLen = MIN(responseLen, 500);
-            ESP_LOGE(TAG, "Error response (first %u bytes): %.*s", previewLen, previewLen, response);
+            ESP_LOGE(TAG, "Error response (first %u bytes): %.*s", (unsigned) previewLen, (int) previewLen, response);
         }
         // Convert HTTP status code to SERVICE_CALL_RESULT and store it
         if (pSignalingClient != NULL) {

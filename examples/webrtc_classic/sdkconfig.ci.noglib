@@ -1,0 +1,2 @@
+# NoGLIB BSP: no LVGL/display stack — the video player must gate out.
+# CONFIG_BSP_SELECT_GLIB is not set

@@ -69,7 +69,6 @@ set(component_requires
     "esp_common"
     "esp_timer"
     "esp_http_client"
-    "json"
     "libwebsockets"
     "mbedtls"
     "kvs_utils"
@@ -120,6 +119,14 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
 if(CONFIG_PREFER_DYNAMIC_ALLOCS)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC -DPREFER_DYNAMIC_ALLOCS=1)
 endif()
+
+# Signaling message sizing (upstream #2356 knob) — same cross-component rule
+# as above: this macro sizes public struct members (SignalingMessage payload,
+# RtcSessionDescriptionInit sdp), so it must match kvs_webrtc's value exactly
+# or struct layouts silently fork across components. Keep in sync with
+# kvs_webrtc and apprtc_signaling (canonical value + rationale in
+# kvs_webrtc/CMakeLists.txt).
+target_compile_definitions(${COMPONENT_LIB} PUBLIC -DKVS_SIGNALING_MESSAGE_LEN=17024)
 
 # Suppress warnings for KVS code
 target_compile_options(${COMPONENT_LIB} PRIVATE
