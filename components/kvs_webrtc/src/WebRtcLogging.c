@@ -186,7 +186,7 @@ STATUS logIceCandidatePairStats(PRtcPeerConnection pPeerConnection, PRtcStats pR
 
         // Log round trip time and STUN responses
         DLOGD("Current STUN request round trip time: %lf sec", pRtcStats->rtcStatsObject.iceCandidatePairStats.currentRoundTripTime);
-        DLOGD("Number of STUN responses received: %llu", pRtcStats->rtcStatsObject.iceCandidatePairStats.responsesReceived);
+        DLOGD("Number of STUN responses received: %" PRIu64, pRtcStats->rtcStatsObject.iceCandidatePairStats.responsesReceived);
 
         // Update the metrics history with the current values
         pRtcMetricsHistory->prevTs = pRtcStats->timestamp;

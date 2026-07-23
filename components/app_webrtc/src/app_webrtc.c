@@ -855,7 +855,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
             // Check for connection timeout
             if (connectionInProgress && (currentTime - connectionStartTime >= CONNECTION_TIMEOUT)) {
                 DLOGE("Connection attempt timed out after %llu seconds, marking as failed",
-                      CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      (unsigned long long) (CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND));
                 connectionInProgress = FALSE;
                 retryCount++;
                 lastRetryTime = currentTime;
@@ -868,7 +868,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
 
             if (shouldRetry) {
                 DLOGI("Reconnecting signaling client (attempt %d, delay: %llu seconds)",
-                      retryCount + 1, retryDelay / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      retryCount + 1, (unsigned long long) (retryDelay / HUNDREDS_OF_NANOS_IN_A_SECOND));
 
                 // Disconnect and reconnect (don't abort loop on disconnect failure —
                 // the connection may already be broken, which is why we're reconnecting)
@@ -891,7 +891,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                     lastRetryTime = currentTime;
                     DLOGE("Failed to start signaling client connection: 0x%08x (attempt %d, next retry in %llu seconds)",
                           retStatus, retryCount,
-                          retryDelays[MIN(retryCount, maxRetryIndex)] / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                          (unsigned long long) (retryDelays[MIN(retryCount, maxRetryIndex)] / HUNDREDS_OF_NANOS_IN_A_SECOND));
 
                     // Reset status to avoid breaking the loop
                     retStatus = STATUS_SUCCESS;
@@ -902,13 +902,13 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                 }
             } else if (connectionInProgress) {
                 DLOGD("Connection in progress for %llu seconds (timeout: %llu)",
-                      (currentTime - connectionStartTime) / HUNDREDS_OF_NANOS_IN_A_SECOND,
-                      CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      (unsigned long long) ((currentTime - connectionStartTime) / HUNDREDS_OF_NANOS_IN_A_SECOND),
+                      (unsigned long long) (CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND));
             } else {
                 // Not time to retry yet
                 UINT64 timeUntilNextRetry = retryDelay - (currentTime - lastRetryTime);
                 DLOGD("Waiting %llu more seconds before next reconnection attempt",
-                      timeUntilNextRetry / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      (unsigned long long) (timeUntilNextRetry / HUNDREDS_OF_NANOS_IN_A_SECOND));
             }
 
             // Check if connection actually succeeded by checking signaling state

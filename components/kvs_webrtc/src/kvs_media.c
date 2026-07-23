@@ -225,7 +225,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
         target_fps = g_global_media.config.video_fps > 0 ? g_global_media.config.video_fps : 30;
         frame_duration_100ns = HUNDREDS_OF_NANOS_IN_A_SECOND / target_fps;
         frame_interval_us = frame_duration_100ns / 10; // Convert 100ns to microseconds
-        ESP_LOGI(TAG, "Video frame rate control: %" PRIu32 " fps (frame interval: %llu us)",
+        ESP_LOGI(TAG, "Video frame rate control: %" PRIu32 " fps (frame interval: %" PRIu64 " us)",
                  target_fps, frame_interval_us);
 
 #if KVS_MEDIA_ENABLE_ADAPTIVE_BITRATE
@@ -353,7 +353,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
             if (video_frame_index % 100 == 0) {
                 UINT64 pts_ms = frame.presentationTs / HUNDREDS_OF_NANOS_IN_A_MILLISECOND;
                 DOUBLE actual_fps = video_frame_index * 1000.0 / (DOUBLE)pts_ms;
-                ESP_LOGD(TAG, "Video: frame %llu, pts=%llums, fps=%.2f", video_frame_index, pts_ms, actual_fps);
+                ESP_LOGD(TAG, "Video: frame %" PRIu64 ", pts=%" PRIu64 "ms, fps=%.2f", video_frame_index, pts_ms, actual_fps);
             }
         }
 
@@ -385,7 +385,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
 #if KVS_MEDIA_ENABLE_ADAPTIVE_BITRATE
             /* Adaptive bitrate control based on send performance */
             if (sendDuration > 50 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND) {  // >50ms is concerning
-                ESP_LOGW(TAG, "Slow video frame send: %llums (frame %" PRIu64 "), size: %" PRIu32,
+                ESP_LOGW(TAG, "Slow video frame send: %" PRIu64 "ms (frame %" PRIu64 "), size: %" PRIu32,
                          sendDuration / HUNDREDS_OF_NANOS_IN_A_MILLISECOND, video_frame_index, frame.size);
 
                 /* Reduce bitrate using configured step */
@@ -417,7 +417,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
 #else
             /* Adaptive bitrate disabled - just log slow sends without adjustment */
             if (sendDuration > 50 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND) {
-                ESP_LOGW(TAG, "Slow video frame send: %llums (frame %" PRIu64 "), size: %" PRIu32,
+                ESP_LOGW(TAG, "Slow video frame send: %" PRIu64 "ms (frame %" PRIu64 "), size: %" PRIu32,
                          sendDuration / HUNDREDS_OF_NANOS_IN_A_MILLISECOND, video_frame_index, frame.size);
             }
 #endif
@@ -560,7 +560,7 @@ static PVOID kvs_global_audio_sender_thread(PVOID args)
 
             /* Log if frame send is slow (bottleneck detection) */
             if (sendDuration > 20 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND) {
-                ESP_LOGW(TAG, "Slow audio frame send: %llums (frame %" PRIu64 "), size: %" PRIu32,
+                ESP_LOGW(TAG, "Slow audio frame send: %" PRIu64 "ms (frame %" PRIu64 "), size: %" PRIu32,
                          sendDuration / HUNDREDS_OF_NANOS_IN_A_MILLISECOND, audio_frame_index, frame.size);
             }
             /* No rate-control sleep here: get_frame() already blocks on xQueueReceive
@@ -1265,10 +1265,10 @@ void kvs_media_print_stats(kvs_pc_session_t* session)
     UINT64 totalAudioFrames = session->audio_frames_sent + session->audio_frames_dropped + session->audio_frames_failed;
 
     ESP_LOGI(TAG, "Frame Statistics for peer: %s", session->peer_id);
-    ESP_LOGI(TAG, "  Video: Sent=%llu, Dropped=%llu, Failed=%llu, Total=%llu",
+    ESP_LOGI(TAG, "  Video: Sent=%" PRIu64 ", Dropped=%" PRIu64 ", Failed=%" PRIu64 ", Total=%" PRIu64,
              session->video_frames_sent, session->video_frames_dropped,
              session->video_frames_failed, totalVideoFrames);
-    ESP_LOGI(TAG, "  Audio: Sent=%llu, Dropped=%llu, Failed=%llu, Total=%llu",
+    ESP_LOGI(TAG, "  Audio: Sent=%" PRIu64 ", Dropped=%" PRIu64 ", Failed=%" PRIu64 ", Total=%" PRIu64,
              session->audio_frames_sent, session->audio_frames_dropped,
              session->audio_frames_failed, totalAudioFrames);
 
@@ -1286,13 +1286,13 @@ void kvs_media_print_stats(kvs_pc_session_t* session)
 
     if (session->first_video_frame_sent > 0) {
         UINT64 timeToFirstVideo = (session->first_video_frame_sent - session->start_time) / HUNDREDS_OF_NANOS_IN_A_MILLISECOND;
-        ESP_LOGI(TAG, "  Time to first video frame: %llu ms", timeToFirstVideo);
+        ESP_LOGI(TAG, "  Time to first video frame: %" PRIu64 " ms", timeToFirstVideo);
     }
 
     if (session->first_audio_frame_sent > 0) {
         UINT64 timeToFirstAudio = (session->first_audio_frame_sent - session->start_time) / HUNDREDS_OF_NANOS_IN_A_MILLISECOND;
-        ESP_LOGI(TAG, "  Time to first audio frame: %llu ms", timeToFirstAudio);
+        ESP_LOGI(TAG, "  Time to first audio frame: %" PRIu64 " ms", timeToFirstAudio);
     }
 
-    ESP_LOGI(TAG, "  Session Duration: %llu seconds", sessionDuration);
+    ESP_LOGI(TAG, "  Session Duration: %" PRIu64 " seconds", sessionDuration);
 }
