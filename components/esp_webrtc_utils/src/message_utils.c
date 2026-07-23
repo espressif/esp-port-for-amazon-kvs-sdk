@@ -47,6 +47,11 @@ esp_err_t esp_webrtc_append_msg_to_existing(received_msg_t *dst_msg, void *data_
             return ESP_ERR_NOT_FINISHED;
         }
     } else if (dst_msg->data_size == 0) { /* non-fragmented message */
+        if (data_len > dst_msg->capacity) {
+            ESP_LOGE(TAG, "Cannot fit message in %d size buffer. incoming_data: %d",
+                    dst_msg->capacity, data_len);
+            return ESP_FAIL;
+        }
         memcpy(dst_msg->buf + dst_msg->data_size, data_ptr, data_len);
         dst_msg->data_size += data_len;
         return ESP_OK;

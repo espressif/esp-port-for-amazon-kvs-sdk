@@ -1333,6 +1333,10 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
 
         case WEBRTC_MESSAGE_TYPE_ICE_CANDIDATE:
             DLOGD("Received ICE candidate message from peer: %s", pWebRtcMessage->peer_client_id);
+            /* Reject an implausibly large (peer-controlled) payload up front — before any
+             * queue is created/enqueued — so the later +1 can't UINT32-wrap and a failure
+             * here can't leave a half-registered pending queue behind (use-after-free). */
+            CHK(pWebRtcMessage->payload_len <= APP_WEBRTC_MAX_MESSAGE_PAYLOAD_LEN, STATUS_INVALID_ARG);
             /*
              * if peer connection hasn't been created, create an queue to store the ice candidate message. Otherwise
              * submit the signaling message into the corresponding streaming session.
@@ -1359,6 +1363,7 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
                 pWebRtcMessageCopy->payload_len = pWebRtcMessage->payload_len;
 
                 // Handle payload copying - always allocate separate memory for queue storage
+                // (payload_len already capped at the top of this case)
                 if (pWebRtcMessage->payload_len > 0 && pWebRtcMessage->payload != NULL) {
                     pWebRtcMessageCopy->payload = (PCHAR) MEMALLOC(pWebRtcMessage->payload_len + 1);
                     CHK(pWebRtcMessageCopy->payload != NULL, STATUS_NOT_ENOUGH_MEMORY);

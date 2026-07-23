@@ -487,7 +487,8 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
     CHK(session != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     session->client = client_data;
-    STRNCPY(session->peer_id, peer_id, SIZEOF(session->peer_id));
+    STRNCPY(session->peer_id, peer_id, SIZEOF(session->peer_id) - 1);
+    session->peer_id[SIZEOF(session->peer_id) - 1] = '\0';
     session->is_initiator = is_initiator;
     session->terminated = FALSE;
     session->start_time = GETTIME();
@@ -1881,7 +1882,7 @@ static STATUS kvs_handleOffer(kvs_pc_session_t* session, webrtc_message_t* messa
 
     /* Check if remote supports trickle ICE */
     canTrickle = canTrickleIceCandidates(session->peer_connection);
-    CHECK(!NULLABLE_CHECK_EMPTY(canTrickle));
+    CHK(!NULLABLE_CHECK_EMPTY(canTrickle), STATUS_INVALID_ARG);
     session->remote_can_trickle_ice = canTrickle.value;
 
     ESP_LOGD(TAG, "Remote peer trickle ICE support: %s", session->remote_can_trickle_ice ? "YES" : "NO");
