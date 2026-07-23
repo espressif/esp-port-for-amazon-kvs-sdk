@@ -20,9 +20,6 @@ This product also includes software developed by third parties, included as
 git submodules. Each is distributed under its own license; see the individual
 LICENSE file inside each submodule for the full text.
 
-  cisco/libsrtp                       (BSD-3-Clause)
-    components/libsrtp2/libsrtp/
-
   warmcat/libwebsockets               (MIT)
     components/libwebsockets/libwebsockets/
 
