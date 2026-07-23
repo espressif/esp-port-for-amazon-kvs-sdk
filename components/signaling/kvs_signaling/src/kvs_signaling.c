@@ -894,6 +894,13 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
         }
     }
 
+    // Free the callback credential-fetch adapter context (allocated in
+    // createCredentialProvider); freed after the provider that referenced it.
+    if (pClientData->pCredFetchAdapterCtx != NULL) {
+        MEMFREE(pClientData->pCredFetchAdapterCtx);
+        pClientData->pCredFetchAdapterCtx = NULL;
+    }
+
     // Free the mutex
     if (IS_VALID_MUTEX_VALUE(pClientData->signalingSendMessageLock)) {
         MUTEX_FREE(pClientData->signalingSendMessageLock);

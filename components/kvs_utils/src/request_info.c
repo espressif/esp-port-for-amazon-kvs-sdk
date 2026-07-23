@@ -340,6 +340,10 @@ PUBLIC_API STATUS removeRequestHeader(PRequestInfo pRequestInfo, PCHAR headerNam
         if (STRCMPI(pCurrentHeader->pName, headerName) == 0) {
             CHK_STATUS(singleListDeleteNode(pRequestInfo->pRequestHeaders, pCurNode));
 
+            // Only free the matched header that was just unlinked; leave the
+            // rest of the list intact (freeing a still-linked node dangles it).
+            SAFE_MEMFREE(pCurrentHeader);
+
             // Early return
             CHK(FALSE, retStatus);
         }
@@ -348,8 +352,6 @@ PUBLIC_API STATUS removeRequestHeader(PRequestInfo pRequestInfo, PCHAR headerNam
     }
 
 CleanUp:
-
-    SAFE_MEMFREE(pCurrentHeader);
 
     return retStatus;
 }
