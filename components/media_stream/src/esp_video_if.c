@@ -793,6 +793,15 @@ esp_err_t esp_video_if_init(void)
         /* media_stream_init() already brought the BSP I2C bus up; bsp_i2c_init()
          * itself is idempotent, so call it again defensively in case this path
          * is reached without media_stream_init() running first. */
+        /* Mark registered before the call: esp_video_init() (called directly
+         * below or inside bsp_camera_start()) registers the ISP device even when
+         * it then fails to detect the sensor, and that can't be undone — so a
+         * retry must never register again. */
+        s_esp_video_registered = true;
+
+#if CONFIG_BSP_SELECT_NONE
+        /* No BSP selected: bring the CSI sensor up directly using the pins from
+         * the customized board header (boards/customized/). */
         esp_err_t i2c_ret = bsp_i2c_init();
         if (i2c_ret != ESP_OK) {
             ESP_LOGE(TAG, "bsp_i2c_init failed: %s", esp_err_to_name(i2c_ret));
@@ -818,11 +827,14 @@ esp_err_t esp_video_if_init(void)
             .csi      = csi_config,
         };
 
-        /* Mark registered before the call: esp_video_init() registers the ISP
-         * device even when it then fails to detect the sensor, and that can't
-         * be undone — so a retry must never call it again. */
-        s_esp_video_registered = true;
         esp_err_t video_init_ret = esp_video_init(&cam_config);
+#else
+        /* BSP path: the selected board's BSP owns the camera pins, power and
+         * XCLK and registers the CSI sensor with esp_video. New BSP-backed
+         * boards (e.g. M5Stack Tab5, whose camera-enable is behind an I2C IO
+         * expander) work here with no media_stream change. */
+        esp_err_t video_init_ret = bsp_camera_start(NULL);
+#endif
         if (video_init_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize video: %s", esp_err_to_name(video_init_ret));
             free(v4l2);

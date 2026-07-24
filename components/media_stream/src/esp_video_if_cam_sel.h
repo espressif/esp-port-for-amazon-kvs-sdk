@@ -2,17 +2,11 @@
 
 #include "sdkconfig.h"
 
-#if !CONFIG_BSP_SELECT_NONE
-#if CONFIG_ESP32_P4_FUNCTION_EV_BOARD
-#include "boards/esp32-p4-function-ev-board-v1.4/example_video_common_board.h"
-#elif CONFIG_BSP_SELECT_ESP32_S3_EYE
-#include "boards/esp32-s3-eye/example_video_common_board.h"
-#elif CONFIG_BSP_SELECT_ESP32_P4_EYE
-#include "boards/esp32-p4-eye/example_video_common_board.h"
-#else
-#error Add config to boards directory
-#endif
-#else
+/* Board camera pins now come from the selected BSP (bsp_camera_start owns
+ * reset/pwdn/xclk/power). Only the no-BSP case needs a static pin table, which
+ * lives in the customized board header — edit it for a bare/custom board. The
+ * interface-common macros below (device path, SCCB freq) are board-agnostic. */
+#if CONFIG_BSP_SELECT_NONE
 #include "boards/customized/example_video_common_board.h"
 #endif
 
