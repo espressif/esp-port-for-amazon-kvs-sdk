@@ -70,6 +70,10 @@ typedef struct __IotCredentialProvider {
     // Static Aws Credentials structure with the pointer following the main allocation
     PAwsCredentials pAwsCredentials;
 
+    // Serializes credential get/refresh - the refresh frees and reallocates
+    // pAwsCredentials, so concurrent getters must not race it
+    MUTEX credentialLock;
+
     // Service call functionality
     BlockingServiceCallFunc serviceCallFn;
 } IotCredentialProvider, *PIotCredentialProvider;

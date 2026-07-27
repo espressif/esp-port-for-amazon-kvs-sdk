@@ -355,16 +355,22 @@ STATUS http_api_rsp_getIoTCredential(PIotCredentialProvider pIotCredentialProvid
     CHK_STATUS(convertTimestampToEpoch(expirationTimestampStr, currentTime / HUNDREDS_OF_NANOS_IN_A_SECOND, &expiration));
     DLOGD("Iot credential expiration time %" PRIu64, expiration / HUNDREDS_OF_NANOS_IN_A_SECOND);
 
-    if (pIotCredentialProvider->pAwsCredentials != NULL) {
-        aws_credential_free(&pIotCredentialProvider->pAwsCredentials);
-        pIotCredentialProvider->pAwsCredentials = NULL;
-    }
-
     // Fix-up the expiration to be no more than max enforced token rotation
     expiration = MIN(expiration, currentTime + MAX_ENFORCED_TOKEN_EXPIRATION_DURATION);
 
-    CHK_STATUS(aws_credential_create(accessKeyId, accessKeyIdLen, secretKey, secretKeyLen, sessionToken, sessionTokenLen, expiration,
-                                     &pIotCredentialProvider->pAwsCredentials));
+    // Build the new credentials first, then swap and free the old blob: with
+    // the old free-then-create order a failed create left the provider with
+    // no credentials at all, and the old memory died while the new one was
+    // still being built
+    {
+        PAwsCredentials pNewCredentials = NULL;
+        CHK_STATUS(aws_credential_create(accessKeyId, accessKeyIdLen, secretKey, secretKeyLen, sessionToken, sessionTokenLen, expiration,
+                                         &pNewCredentials));
+        if (pIotCredentialProvider->pAwsCredentials != NULL) {
+            aws_credential_free(&pIotCredentialProvider->pAwsCredentials);
+        }
+        pIotCredentialProvider->pAwsCredentials = pNewCredentials;
+    }
 
 CleanUp:
     SAFE_MEMFREE(pTokens);
