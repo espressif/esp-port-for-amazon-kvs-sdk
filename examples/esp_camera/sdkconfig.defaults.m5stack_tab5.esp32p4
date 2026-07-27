@@ -72,8 +72,10 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_SLAVE_FLASHER_ENABLE=n
 
 #
-# Inbound video player OFF for now: video_render_display.c's DSI render path
-# assumes the Function-EV-Board bsp_display_cfg_t; Tab5's DSI layout differs.
-# Camera (TX) streaming is unaffected. Tab5 RX render is a separate follow-up.
+# Inbound video player (RX H.264 decode + LCD render). The Tab5 BSP configures
+# its DSI bus internally, so no hw_cfg is needed from media_stream. Canvas
+# capped at 320x240 - the SW decoder + CPU YUV->RGB565 path tops out around
+# there; video_render_display centers the canvas on the 720x1280 panel.
 #
-# CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
+CONFIG_MEDIA_STREAM_PLAYER_MAX_WIDTH=320
+CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240

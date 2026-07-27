@@ -53,7 +53,10 @@ CONFIG_ESP32P4_REV_MIN_0=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"
+# streaming_only ships a single custom table (partitions.csv - factory app +
+# storage + slave). It fits the 16 MB flash as-is; the slave partition is
+# unused on Tab5 (slave flasher off). No 16 MB-specific table exists here,
+# matching the p4_eye overlay convention.
 
 #
 # Console on UART0 - Tab5 routes UART0 to an external USB-UART chip
@@ -72,8 +75,19 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_SLAVE_FLASHER_ENABLE=n
 
 #
-# Inbound video player OFF for now: video_render_display.c's DSI render path
-# assumes the Function-EV-Board bsp_display_cfg_t; Tab5's DSI layout differs.
-# Camera (TX) streaming is unaffected. Tab5 RX render is a separate follow-up.
+# Inbound video player (RX H.264 decode + LCD render). The Tab5 BSP configures
+# its DSI bus internally, so no hw_cfg is needed from media_stream. Canvas
+# capped at 320x240 - the SW decoder + CPU YUV->RGB565 path tops out around
+# there; video_render_display centers the canvas on the 720x1280 panel.
 #
-# CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
+CONFIG_MEDIA_STREAM_PLAYER_MAX_WIDTH=320
+CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
+
+#
+# Workaround: m5stack_tab5 BSP 1.2.0 misuses BSP_ERROR_CHECK_RETURN_NULL in
+# int bsp_get_board_version() (src/bsp_display.c). With BSP_ERROR_CHECK=n
+# (this example's base default) that macro expands to `return NULL` inside an
+# int-returning function -> -Wint-conversion build error. Force abort-style
+# BSP error checks on Tab5 until the BSP is fixed upstream.
+#
+CONFIG_BSP_ERROR_CHECK=y
