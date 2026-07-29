@@ -1267,8 +1267,6 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
             DLOGD("Successfully processed offer via unified interface for peer: %s",
                   pWebRtcMessage->peer_client_id);
 
-            CHK_STATUS(hashTablePut(pSampleConfiguration->pRtcPeerConnectionForRemoteClient, clientIdHash, POINTER_TO_HANDLE(pAppWebRTCSession)));
-
             // If there are any ice candidate messages in the queue for this client id, submit them now.
             CHK_STATUS(getPendingMessageQueueForHash(pSampleConfiguration->pPendingSignalingMessageForRemoteClient, clientIdHash, TRUE,
                                                      &pPendingMessageQueue));
@@ -1278,6 +1276,10 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
                 // NULL the pointer to avoid it being freed in the cleanup
                 pPendingMessageQueue = NULL;
             }
+
+            /* Publish last: the pending-ICE submit above can fail, and CleanUp frees
+             * the session without removing it from the hash table. */
+            CHK_STATUS(hashTablePut(pSampleConfiguration->pRtcPeerConnectionForRemoteClient, clientIdHash, POINTER_TO_HANDLE(pAppWebRTCSession)));
 
             MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
             pSampleConfiguration->webrtcSessionList[pSampleConfiguration->streamingSessionCount++] = pAppWebRTCSession;
