@@ -1,6 +1,8 @@
 # Name,   Type, SubType, Offset,  Size, Flags
 # Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x2F0000,
+# Partition table at 0xC000, app at 0x20000 — matches rmaker_split_camera so the
+# streaming_only host's slave_flasher can flash either C6 firmware at one offset.
+nvs,      data, nvs,     0x10000, 0x6000,
+phy_init, data, phy,     0x16000, 0x1000,
+factory,  app,  factory, 0x20000, 0x2E0000,
 storage,  data, spiffs,  0x300000,1M
