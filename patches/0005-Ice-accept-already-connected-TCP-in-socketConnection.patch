@@ -1,0 +1,42 @@
+From 4bc107534a542728e28ac84f31144fd278165255 Mon Sep 17 00:00:00 2001
+From: Vikram Dattu <vikram.dattu@espressif.com>
+Date: Tue, 4 Aug 2026 15:42:52 +0530
+Subject: [PATCH 5/5] Ice: accept already-connected TCP in
+ socketConnectionIsConnected via getpeername
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+socketConnectionIsConnected() re-connect()s the socket and treats only EISCONN
+as connected. On lwIP an already-connected TCP socket returns EALREADY, so a
+live TCP/TLS TURN channel is wrongly declared dead — TURN stalls and, when only
+TLS TURN is reachable, ICE gets no relay candidate. Confirm with getpeername()
+after the existing EISCONN check (POSIX unaffected).
+---
+ src/source/Ice/SocketConnection.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/source/Ice/SocketConnection.c b/src/source/Ice/SocketConnection.c
+index a8b59390..7818baeb 100644
+--- a/src/source/Ice/SocketConnection.c
++++ b/src/source/Ice/SocketConnection.c
+@@ -494,6 +494,16 @@ BOOL socketConnectionIsConnected(PSocketConnection pSocketConnection)
+         return TRUE;
+     }
+ 
++    /* On lwIP, re-connect()ing an already-connected TCP socket returns EALREADY,
++     * not EISCONN, so the check above misses it. Confirm with getpeername(). */
++    {
++        struct sockaddr_storage connectedPeer;
++        socklen_t connectedPeerLen = SIZEOF(connectedPeer);
++        if (getpeername(pSocketConnection->localSocket, (struct sockaddr*) &connectedPeer, &connectedPeerLen) == 0) {
++            return TRUE;
++        }
++    }
++
+     DLOGW("socket connection check failed with errno %s(%d)", getErrorString(getErrorCode()), getErrorCode());
+     return FALSE;
+ }
+-- 
+2.39.5 (Apple Git-154)
+

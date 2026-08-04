@@ -26,7 +26,7 @@ cd ..
 
 ## Patch ledger
 
-Base: upstream **`release-v1.19.0`** (`190a25abce`). All four patches apply
+Base: upstream **`release-v1.19.0`** (`190a25abce`). All five patches apply
 cleanly against this base (`git am`, no fuzz).
 
 | # | Patch | Category | Upstream PR / status |
@@ -35,6 +35,7 @@ cleanly against this base (`git am`, no fuzz).
 | 0002 | SDP renegotiation: apply remote offer to transceiver directions and mark removed tracks inactive | aligned | [awslabs#2214](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2214) |
 | 0003 | ESP-IDF platform adaptations + robustness — including the `PREFER_DYNAMIC_ALLOCS` / dynamic-signaling-payload work (heap-allocate the payload in `parseSignalingMessage`) and the IceAgent `turnChannelData` heap-allocation | mixed | partial: [awslabs#2146](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2146) for the dynamic-allocs portion |
 | 0004 | PeerConnection: cap peer Opus encoder at 16kHz mono via `DEFAULT_OPUS_FMTP` | ESP-specific | n/a — narrow-Opus negotiation keeps decode under the 20 ms frame budget on P4 |
+| 0005 | Ice: accept already-connected TCP in `socketConnectionIsConnected` (lwIP reports `EALREADY`, not `EISCONN`; use `getpeername`) | ESP-IDF/lwIP-specific | candidate — low-priority portability PR to upstream; drop if it lands |
 
 > **Not carried as patches:** the upstream `Network.c` uses POSIX `getifaddrs()`,
 > which ESP-IDF does not ship, so the ESP-IDF adaptation lives as a full port file
@@ -85,6 +86,14 @@ on `isOffer` so the answer path applies the cap too. On bench this drops
 per-frame Opus decode from ~21 ms to ~5 ms at session start and eliminates
 queue-full / mem errors during the first ~15 s of bidir. ESP-specific
 because narrow Opus is a P4 capability trade — keep long-term.
+
+**0005 — Accept already-connected TCP in `socketConnectionIsConnected`.** The
+function re-`connect()`s the socket and treats only `EISCONN` as connected. On
+lwIP an already-connected TCP socket returns `EALREADY`, not `EISCONN`, so a
+live TCP/TLS TURN channel is wrongly declared dead — TURN stalls and, on
+UDP-blocked networks (TLS TURN only), ICE never gets a relay candidate. Fix
+confirms with `getpeername()` after the existing `EISCONN` fast path (POSIX
+builds unaffected). Worth upstreaming as portability hardening.
 
 ## Patches-removal schedule
 
