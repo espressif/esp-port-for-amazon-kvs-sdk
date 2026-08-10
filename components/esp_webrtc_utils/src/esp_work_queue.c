@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <esp_err.h>
 #include <esp_log.h>
 
@@ -71,6 +72,42 @@ esp_err_t esp_work_queue_add_task(esp_work_fn_t work_fn, void *priv_data)
 
     ESP_LOGW(TAG, "Failed to add work task");
     return ESP_FAIL;
+}
+
+/* Barrier task: signals the caller once the single FIFO worker reaches it,
+ * i.e. after every task queued before it has run. */
+static void esp_work_queue_barrier(void *arg)
+{
+    xSemaphoreGive((SemaphoreHandle_t) arg);
+}
+
+esp_err_t esp_work_queue_sync(uint32_t timeout_ms)
+{
+    if (!work_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (done == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = esp_work_queue_add_task(esp_work_queue_barrier, done);
+    if (err != ESP_OK) {
+        vSemaphoreDelete(done);
+        return err;
+    }
+
+    TickType_t wait = (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    if (xSemaphoreTake(done, wait) != pdTRUE) {
+        /* Barrier may still fire later and give a deleted semaphore, so leak it
+         * (rare, small) rather than risk a use-after-free on the handle. */
+        ESP_LOGW(TAG, "esp_work_queue_sync timed out after %u ms", (unsigned) timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    vSemaphoreDelete(done);
+    return ESP_OK;
 }
 
 esp_err_t esp_work_queue_init(void)

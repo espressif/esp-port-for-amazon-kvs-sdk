@@ -565,6 +565,13 @@ STATUS freeAppWebRTCSession(PAppWebRTCSession* ppAppWebRTCSession)
         ESP_LOGW(TAG, "Session has no interface_session_handle for peer: %s", pAppWebRTCSession->peerId);
     }
 
+    // Drop this departed peer's buffered ICE candidates so the re-trickle buffer
+    // frees the slots now instead of at the retry cap (optional; NULL if unused).
+    if (gWebRtcAppConfig.signaling_client_if != NULL && gSignalingClientData != NULL &&
+        gWebRtcAppConfig.signaling_client_if->purge_peer_candidates != NULL) {
+        gWebRtcAppConfig.signaling_client_if->purge_peer_candidates(gSignalingClientData, pAppWebRTCSession->peerId);
+    }
+
     SAFE_MEMFREE(pAppWebRTCSession);
 
 CleanUp:
