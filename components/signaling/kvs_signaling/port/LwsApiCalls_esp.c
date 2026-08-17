@@ -26,6 +26,9 @@
 
 #include "DataBuffer.h"
 
+/* HTTP request-body scratch size for the REST helpers below (heap-allocated). */
+#define SIGNALING_HTTP_BODY_LEN 1024
+
 #define TAG "LWS_API_ESP"
 
 // Define constants needed for ESP implementation
@@ -677,9 +680,9 @@ PCHAR getMessageTypeInString(SIGNALING_MESSAGE_TYPE messageType)
 STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR message, UINT32 messageLength)
 {
     STATUS retStatus = STATUS_SUCCESS;
-    ReceivedSignalingMessage receivedSignalingMessage;
+    PReceivedSignalingMessage pRecvMsg = NULL;
     jsmn_parser parser;
-    jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
+    jsmntok_t* tokens = NULL;
     UINT32 tokenCount;
     UINT32 i, strLen;
     BOOL parsedStatusResponse = FALSE, jsonInIceServerList = FALSE;
@@ -693,19 +696,26 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
 
     CHK(pSignalingClient != NULL && message != NULL, STATUS_NULL_ARG);
 
+    /* Heap, not stack: ~1.8 KB of ReceivedSignalingMessage + ~1.6 KB of jsmn
+     * tokens made this the deepest frame on the shared work-queue task. */
+    pRecvMsg = (PReceivedSignalingMessage) MEMCALLOC(1, SIZEOF(ReceivedSignalingMessage));
+    CHK(pRecvMsg != NULL, STATUS_NOT_ENOUGH_MEMORY);
+    tokens = (jsmntok_t*) MEMCALLOC(MAX_JSON_TOKEN_COUNT, SIZEOF(jsmntok_t));
+    CHK(tokens != NULL, STATUS_NOT_ENOUGH_MEMORY);
+
     // Initialize the received signaling message
-    MEMSET(&receivedSignalingMessage, 0, SIZEOF(ReceivedSignalingMessage));
-    receivedSignalingMessage.signalingMessage.version = SIGNALING_MESSAGE_CURRENT_VERSION;
+    MEMSET(pRecvMsg, 0, SIZEOF(ReceivedSignalingMessage));
+    pRecvMsg->signalingMessage.version = SIGNALING_MESSAGE_CURRENT_VERSION;
 
     // ESP_LOGI(TAG, "Parsing received signaling message");
 
     // Parse the incoming JSON message
     jsmn_init(&parser);
-    tokenCount = jsmn_parse(&parser, message, messageLength, tokens, SIZEOF(tokens) / SIZEOF(jsmntok_t));
+    tokenCount = jsmn_parse(&parser, message, messageLength, tokens, MAX_JSON_TOKEN_COUNT);
 
     // Verify we have at least the outer JSON object
     CHK(tokenCount >= 1, STATUS_INVALID_API_CALL_RETURN_JSON);
-    CHK(tokenCount <= (INT32)(SIZEOF(tokens) / SIZEOF(jsmntok_t)), STATUS_INVALID_API_CALL_RETURN_JSON);
+    CHK(tokenCount <= (INT32)(MAX_JSON_TOKEN_COUNT), STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
     // Extract message fields
@@ -727,7 +737,7 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
 
             // Now use getMessageTypeFromString to parse it
             CHK_STATUS(getMessageTypeFromString(messageTypeStr, strLen,
-                                               &receivedSignalingMessage.signalingMessage.messageType));
+                                               &pRecvMsg->signalingMessage.messageType));
             i++;
         } else if (compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "messagePayload")) {
             // Extract message payload
@@ -741,9 +751,9 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
                 // Allocate a buffer to store the decoded data
                 pDecodedData = (PBYTE) MEMALLOC(decodedLen + 1);
                 CHK(pDecodedData != NULL, STATUS_NOT_ENOUGH_MEMORY);
-                receivedSignalingMessage.signalingMessage.payload = (PCHAR)pDecodedData;
+                pRecvMsg->signalingMessage.payload = (PCHAR)pDecodedData;
 #else
-                pDecodedData = receivedSignalingMessage.signalingMessage.payload;
+                pDecodedData = pRecvMsg->signalingMessage.payload;
 #endif
                 // Now decode the payload
                 outLen = decodedLen;
@@ -753,7 +763,7 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
                 pDecodedData[outLen] = '\0';
 
                 // Store the actual payload length
-                receivedSignalingMessage.signalingMessage.payloadLen = outLen;
+                pRecvMsg->signalingMessage.payloadLen = outLen;
 
                 // ESP_LOGI(TAG, "Message payload decoded successfully, length: %d", outLen);
             }
@@ -762,8 +772,8 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
             // Extract sender client ID
             strLen = (UINT32)(tokens[i + 1].end - tokens[i + 1].start);
             if (strLen <= MAX_SIGNALING_CLIENT_ID_LEN) {
-                STRNCPY(receivedSignalingMessage.signalingMessage.peerClientId, message + tokens[i + 1].start, strLen);
-                receivedSignalingMessage.signalingMessage.peerClientId[strLen] = '\0';
+                STRNCPY(pRecvMsg->signalingMessage.peerClientId, message + tokens[i + 1].start, strLen);
+                pRecvMsg->signalingMessage.peerClientId[strLen] = '\0';
             }
             i++;
         } else if (!parsedStatusResponse && compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "statusResponse")) {
@@ -772,14 +782,14 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
         } else if (parsedStatusResponse && compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "correlationId")) {
             strLen = (UINT32)(tokens[i + 1].end - tokens[i + 1].start);
             CHK(strLen <= MAX_CORRELATION_ID_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
-            STRNCPY(receivedSignalingMessage.signalingMessage.correlationId, message + tokens[i + 1].start, strLen);
-            receivedSignalingMessage.signalingMessage.correlationId[MAX_CORRELATION_ID_LEN] = '\0';
+            STRNCPY(pRecvMsg->signalingMessage.correlationId, message + tokens[i + 1].start, strLen);
+            pRecvMsg->signalingMessage.correlationId[MAX_CORRELATION_ID_LEN] = '\0';
             i++;
         } else if (parsedStatusResponse && compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "errorType")) {
             strLen = (UINT32)(tokens[i + 1].end - tokens[i + 1].start);
             CHK(strLen <= MAX_ERROR_TYPE_STRING_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
-            STRNCPY(receivedSignalingMessage.errorType, message + tokens[i + 1].start, strLen);
-            receivedSignalingMessage.errorType[MAX_ERROR_TYPE_STRING_LEN] = '\0';
+            STRNCPY(pRecvMsg->errorType, message + tokens[i + 1].start, strLen);
+            pRecvMsg->errorType[MAX_ERROR_TYPE_STRING_LEN] = '\0';
             i++;
         } else if (parsedStatusResponse && compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "statusCode")) {
             strLen = (UINT32)(tokens[i + 1].end - tokens[i + 1].start);
@@ -790,17 +800,17 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
                 UINT32 statusCodeValue;
                 CHK_STATUS(STRTOUI32(message + tokens[i + 1].start, message + tokens[i + 1].end, 10,
                                    &statusCodeValue));
-                receivedSignalingMessage.statusCode = (SERVICE_CALL_RESULT)statusCodeValue;
+                pRecvMsg->statusCode = (SERVICE_CALL_RESULT)statusCodeValue;
             }
             i++;
         } else if (parsedStatusResponse && compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "description")) {
             strLen = (UINT32)(tokens[i + 1].end - tokens[i + 1].start);
             CHK(strLen <= MAX_MESSAGE_DESCRIPTION_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
-            STRNCPY(receivedSignalingMessage.description, message + tokens[i + 1].start, strLen);
-            receivedSignalingMessage.description[MAX_MESSAGE_DESCRIPTION_LEN] = '\0';
+            STRNCPY(pRecvMsg->description, message + tokens[i + 1].start, strLen);
+            pRecvMsg->description[MAX_MESSAGE_DESCRIPTION_LEN] = '\0';
             i++;
         } else if (!jsonInIceServerList &&
-                 receivedSignalingMessage.signalingMessage.messageType == SIGNALING_MESSAGE_TYPE_OFFER &&
+                 pRecvMsg->signalingMessage.messageType == SIGNALING_MESSAGE_TYPE_OFFER &&
                  compareJsonString(message, &tokens[i], JSMN_STRING, (PCHAR) "IceServerList")) {
             jsonInIceServerList = TRUE;
 
@@ -852,34 +862,34 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
     }
 
     // If message type is UNKNOWN after parsing, try to determine it from payload
-    if (receivedSignalingMessage.signalingMessage.messageType == SIGNALING_MESSAGE_TYPE_UNKNOWN) {
+    if (pRecvMsg->signalingMessage.messageType == SIGNALING_MESSAGE_TYPE_UNKNOWN) {
         // Check for RECONNECT_ICE_SERVER message - this doesn't need payload
         if (STRSTR(message, "RECONNECT_ICE_SERVER") != NULL) {
             ESP_LOGI(TAG, "Detected RECONNECT_ICE_SERVER message, setting message type accordingly");
-            receivedSignalingMessage.signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_RECONNECT_ICE_SERVER;
+            pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_RECONNECT_ICE_SERVER;
         }
         // For other message types, check payload if available
-        else if (receivedSignalingMessage.signalingMessage.payloadLen > 0) {
+        else if (pRecvMsg->signalingMessage.payloadLen > 0) {
             // Look for ICE candidate in the payload
-            if (STRSTR(receivedSignalingMessage.signalingMessage.payload, "candidate") != NULL) {
+            if (STRSTR(pRecvMsg->signalingMessage.payload, "candidate") != NULL) {
                 ESP_LOGI(TAG, "Detected ICE candidate in payload, setting message type accordingly");
-                receivedSignalingMessage.signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE;
+                pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE;
             }
             // Check for SDP offer in the payload
-            else if (STRSTR(receivedSignalingMessage.signalingMessage.payload, "offer") != NULL) {
+            else if (STRSTR(pRecvMsg->signalingMessage.payload, "offer") != NULL) {
                 ESP_LOGI(TAG, "Detected SDP offer in payload, setting message type accordingly");
-                receivedSignalingMessage.signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_OFFER;
+                pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_OFFER;
             }
             // Check for SDP answer in the payload
-            else if (STRSTR(receivedSignalingMessage.signalingMessage.payload, "answer") != NULL) {
+            else if (STRSTR(pRecvMsg->signalingMessage.payload, "answer") != NULL) {
                 ESP_LOGI(TAG, "Detected SDP answer in payload, setting message type accordingly");
-                receivedSignalingMessage.signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ANSWER;
+                pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ANSWER;
             }
         }
     }
 
     // Handle special message types
-    switch (receivedSignalingMessage.signalingMessage.messageType) {
+    switch (pRecvMsg->signalingMessage.messageType) {
         case SIGNALING_MESSAGE_TYPE_RECONNECT_ICE_SERVER:
             ESP_LOGI(TAG, "Received RECONNECT_ICE_SERVER message, setting status for ICE reconnection");
             ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_SIGNALING_RECONNECT_ICE);
@@ -907,7 +917,7 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
     if (pSignalingClient->signalingClientCallbacks.messageReceivedFn != NULL) {
         pSignalingClient->signalingClientCallbacks.messageReceivedFn(
             pSignalingClient->signalingClientCallbacks.customData,
-            &receivedSignalingMessage);
+            pRecvMsg);
     } else {
         ESP_LOGW(TAG, "No message received callback registered!");
     }
@@ -915,8 +925,11 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
 CleanUp:
 
 #ifdef DYNAMIC_SIGNALING_PAYLOAD
+    /* Only heap-allocated on this path; otherwise it points into pRecvMsg. */
     SAFE_MEMFREE(pDecodedData);
 #endif
+    SAFE_MEMFREE(tokens);
+    SAFE_MEMFREE(pRecvMsg);
 
     if (STATUS_FAILED(retStatus)) {
         ESP_LOGE(TAG, "Failed to parse signaling message with status 0x%08" PRIx32, retStatus);
@@ -1426,13 +1439,18 @@ STATUS describeChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     PCHAR paramsJson = NULL;
     PCHAR pResponseStr = NULL;
     jsmn_parser parser;
-    jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
+    jsmntok_t* tokens = NULL;
     UINT32 i, strLen, resultLen;
     UINT32 tokenCount;
     UINT64 messageTtl;
     BOOL jsonInChannelDescription = FALSE, jsonInMvConfiguration = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: ~1.6 KB of jsmn tokens on a shared work-queue task.
+     * Matches the url/paramsJson/pResponseStr allocations already here. */
+    tokens = (jsmntok_t*) MEMCALLOC(MAX_JSON_TOKEN_COUNT, SIZEOF(jsmntok_t));
+    CHK(tokens != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(DESCRIBE_SIGNALING_CHANNEL_API_POSTFIX);
     url = (PCHAR) MEMALLOC(urlLen + 1); // +1 for the NULL terminator
@@ -1463,7 +1481,7 @@ STATUS describeChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
 
     // Parse the response
     jsmn_init(&parser);
-    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, SIZEOF(tokens) / SIZEOF(jsmntok_t));
+    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, MAX_JSON_TOKEN_COUNT);
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
@@ -1535,6 +1553,7 @@ STATUS describeChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
 
 CleanUp:
+    SAFE_MEMFREE(tokens);
     if (STATUS_FAILED(retStatus)) {
         DLOGE("Call Failed with Status: 0x%08x", retStatus);
         // Only set SERVICE_CALL_RESULT if result hasn't been set by performEspHttpRequest
@@ -1574,10 +1593,15 @@ STATUS createChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     UINT32 i, strLen, resultLen, tagsJsonLen = 0, tagsContentLen = 0;
     INT32 charsCopied;
     jsmn_parser parser;
-    jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
+    jsmntok_t* tokens = NULL;
     UINT32 tokenCount;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: ~1.6 KB of jsmn tokens on a shared work-queue task.
+     * Matches the url/paramsJson/pResponseStr allocations already here. */
+    tokens = (jsmntok_t*) MEMCALLOC(MAX_JSON_TOKEN_COUNT, SIZEOF(jsmntok_t));
+    CHK(tokens != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     // Create the API url
     UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(CREATE_SIGNALING_CHANNEL_API_POSTFIX);
@@ -1654,7 +1678,7 @@ STATUS createChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
 
     // Parse out the ARN
     jsmn_init(&parser);
-    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, SIZEOF(tokens) / SIZEOF(jsmntok_t));
+    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, MAX_JSON_TOKEN_COUNT);
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
@@ -1676,6 +1700,7 @@ STATUS createChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
 
 CleanUp:
+    SAFE_MEMFREE(tokens);
     if (STATUS_FAILED(retStatus)) {
         DLOGE("Call Failed with Status: 0x%08x", retStatus);
         ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_UNKNOWN);
@@ -1702,11 +1727,16 @@ STATUS getChannelEndpointEsp(PSignalingClient pSignalingClient, UINT64 time)
     UINT32 i, resultLen, strLen, protocolLen = 0, endpointLen = 0;
     PCHAR pResponseStr = NULL, pProtocol = NULL, pEndpoint = NULL;
     jsmn_parser parser;
-    jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
+    jsmntok_t* tokens = NULL;
     UINT32 tokenCount;
     BOOL jsonInResourceEndpointList = FALSE, protocol = FALSE, endpoint = FALSE, inEndpointArray = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: ~1.6 KB of jsmn tokens on a shared work-queue task.
+     * Matches the url/paramsJson/pResponseStr allocations already here. */
+    tokens = (jsmntok_t*) MEMCALLOC(MAX_JSON_TOKEN_COUNT, SIZEOF(jsmntok_t));
+    CHK(tokens != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     // Create the API url
     UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(GET_SIGNALING_CHANNEL_ENDPOINT_API_POSTFIX);
@@ -1747,7 +1777,7 @@ STATUS getChannelEndpointEsp(PSignalingClient pSignalingClient, UINT64 time)
 
     // Parse and extract the endpoints
     jsmn_init(&parser);
-    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, SIZEOF(tokens) / SIZEOF(jsmntok_t));
+    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, MAX_JSON_TOKEN_COUNT);
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
@@ -1826,6 +1856,7 @@ STATUS getChannelEndpointEsp(PSignalingClient pSignalingClient, UINT64 time)
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
 
 CleanUp:
+    SAFE_MEMFREE(tokens);
     if (STATUS_FAILED(retStatus)) {
         SIZE_T currentResult = ATOMIC_LOAD(&pSignalingClient->result);
 
@@ -1871,7 +1902,7 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     PCHAR paramsJson = NULL;
     PCHAR pResponseStr = NULL;
     jsmn_parser parser;
-    jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
+    jsmntok_t* tokens = NULL;
     jsmntok_t* pToken;
     UINT32 i, strLen, resultLen, configCount = 0, tokenCount;
     INT32 j;
@@ -1879,6 +1910,11 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     BOOL jsonInIceServerList = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: ~1.6 KB of jsmn tokens on a shared work-queue task.
+     * Matches the url/paramsJson/pResponseStr allocations already here. */
+    tokens = (jsmntok_t*) MEMCALLOC(MAX_JSON_TOKEN_COUNT, SIZEOF(jsmntok_t));
+    CHK(tokens != NULL, STATUS_NOT_ENOUGH_MEMORY);
     CHK(pSignalingClient->channelEndpointHttps[0] != '\0', STATUS_INTERNAL_ERROR);
 
     // Update the diagnostics info on the number of ICE refresh calls
@@ -1935,7 +1971,7 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
 
     // Parse the response
     jsmn_init(&parser);
-    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, SIZEOF(tokens) / SIZEOF(jsmntok_t));
+    tokenCount = jsmn_parse(&parser, pResponseStr, resultLen, tokens, MAX_JSON_TOKEN_COUNT);
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
@@ -2003,6 +2039,7 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
 
 CleanUp:
+    SAFE_MEMFREE(tokens);
     if (STATUS_FAILED(retStatus)) {
         DLOGE("Call Failed with Status: 0x%08x", retStatus);
         // Only set SERVICE_CALL_RESULT if result hasn't been set by performEspHttpRequest
@@ -2032,11 +2069,15 @@ STATUS deleteChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
 {
     STATUS retStatus = STATUS_SUCCESS;
     PCHAR url = NULL;
-    CHAR body[1024] = {0};
+    PCHAR body = NULL;
     PCHAR responseData = NULL;
     UINT32 responseLen = 0;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: keeps this REST helper off the shared work-queue stack. */
+    body = (PCHAR) MEMCALLOC(1, SIGNALING_HTTP_BODY_LEN);
+    CHK(body != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     THREAD_SLEEP_UNTIL(time);
 
@@ -2054,7 +2095,7 @@ STATUS deleteChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     STRCAT(url, DELETE_SIGNALING_CHANNEL_API_POSTFIX);
 
     // Create the request body
-    SNPRINTF(body, ARRAY_SIZE(body),
+    SNPRINTF(body, SIGNALING_HTTP_BODY_LEN,
             "{\n"
             "   \"ChannelARN\": \"%s\"\n"
             "}",
@@ -2075,6 +2116,7 @@ STATUS deleteChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     }
 
 CleanUp:
+    SAFE_MEMFREE(body);
     SAFE_MEMFREE(responseData);
     SAFE_MEMFREE(url);
     return retStatus;
@@ -2084,11 +2126,15 @@ STATUS joinStorageSessionEsp(PSignalingClient pSignalingClient, UINT64 time)
 {
     STATUS retStatus = STATUS_SUCCESS;
     PCHAR url = NULL;
-    CHAR body[1024] = {0};
+    PCHAR body = NULL;
     PCHAR responseData = NULL;
     UINT32 responseLen = 0;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: keeps this REST helper off the shared work-queue stack. */
+    body = (PCHAR) MEMCALLOC(1, SIGNALING_HTTP_BODY_LEN);
+    CHK(body != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     THREAD_SLEEP_UNTIL(time);
 
@@ -2109,7 +2155,7 @@ STATUS joinStorageSessionEsp(PSignalingClient pSignalingClient, UINT64 time)
              JOIN_STORAGE_SESSION_API_POSTFIX);
 
     // Create the request body
-    SNPRINTF(body, ARRAY_SIZE(body),
+    SNPRINTF(body, SIGNALING_HTTP_BODY_LEN,
             "{\n"
             "   \"ChannelARN\": \"%s\"\n"
             "}",
@@ -2131,6 +2177,7 @@ STATUS joinStorageSessionEsp(PSignalingClient pSignalingClient, UINT64 time)
     }
 
 CleanUp:
+    SAFE_MEMFREE(body);
     SAFE_MEMFREE(responseData);
     SAFE_MEMFREE(url);
     return retStatus;
@@ -2140,11 +2187,15 @@ STATUS describeMediaStorageConfEsp(PSignalingClient pSignalingClient, UINT64 tim
 {
     STATUS retStatus = STATUS_SUCCESS;
     PCHAR url = NULL;
-    CHAR body[1024] = {0};
+    PCHAR body = NULL;
     PCHAR responseData = NULL;
     UINT32 responseLen = 0;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    /* Heap, not stack: keeps this REST helper off the shared work-queue stack. */
+    body = (PCHAR) MEMCALLOC(1, SIGNALING_HTTP_BODY_LEN);
+    CHK(body != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     THREAD_SLEEP_UNTIL(time);
 
@@ -2165,7 +2216,7 @@ STATUS describeMediaStorageConfEsp(PSignalingClient pSignalingClient, UINT64 tim
              DESCRIBE_MEDIA_STORAGE_CONF_API_POSTFIX);
 
     // Create the request body
-    SNPRINTF(body, ARRAY_SIZE(body),
+    SNPRINTF(body, SIGNALING_HTTP_BODY_LEN,
             "{\n"
             "   \"ChannelARN\": \"%s\"\n"
             "}",
@@ -2186,16 +2237,18 @@ STATUS describeMediaStorageConfEsp(PSignalingClient pSignalingClient, UINT64 tim
         // endpoint (which is only available when storage is enabled).
         // Ported from awslabs#2241 ("commit c053a19efb").
         jsmn_parser parser;
-        jsmntok_t tokens[MAX_JSON_TOKEN_COUNT];
+        /* Heap, not stack: ~1.6 KB of jsmn tokens. Freed at the end of this
+         * block — the block has no early exits, so a single free suffices. */
+        jsmntok_t* tokens = (jsmntok_t*) MEMCALLOC(MAX_JSON_TOKEN_COUNT, SIZEOF(jsmntok_t));
         UINT32 i, strLen, tokenCount;
         BOOL jsonInMediaStorageConfig = FALSE;
         BOOL previousStorageStatus = pSignalingClient->mediaStorageConfig.storageStatus;
         BOOL newStorageStatus = previousStorageStatus;
 
         jsmn_init(&parser);
-        tokenCount = jsmn_parse(&parser, responseData, responseLen, tokens, SIZEOF(tokens) / SIZEOF(jsmntok_t));
+        tokenCount = (tokens != NULL) ? jsmn_parse(&parser, responseData, responseLen, tokens, MAX_JSON_TOKEN_COUNT) : 0;
 
-        if (tokenCount > 1 && tokens[0].type == JSMN_OBJECT) {
+        if (tokens != NULL && tokenCount > 1 && tokens[0].type == JSMN_OBJECT) {
             for (i = 1; i < tokenCount; i++) {
                 if (!jsonInMediaStorageConfig) {
                     if (compareJsonString(responseData, &tokens[i], JSMN_STRING, (PCHAR) "MediaStorageConfiguration")) {
@@ -2231,12 +2284,14 @@ STATUS describeMediaStorageConfEsp(PSignalingClient pSignalingClient, UINT64 tim
                 }
             }
         }
+        SAFE_MEMFREE(tokens);
     } else {
         ESP_LOGE(TAG, "Failed to describe media storage configuration");
         ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_NOT_SET);
     }
 
 CleanUp:
+    SAFE_MEMFREE(body);
     SAFE_MEMFREE(responseData);
     SAFE_MEMFREE(url);
 
@@ -2672,8 +2727,8 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
-    CHAR encodedIceConfig[MAX_ENCODED_ICE_SERVER_INFOS_STR_LEN + 1];
-    CHAR encodedUris[MAX_ICE_SERVER_URI_STR_LEN + 1];
+    PCHAR encodedIceConfig = NULL;
+    PCHAR encodedUris = NULL;
     UINT32 writtenSize, urisLen, iceConfigLen = 0, messageLen, corrLen;
     UINT32 bufferOffset = 0, bufferSize = 0;
     PCHAR buffer = NULL;
@@ -2681,6 +2736,7 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
     UINT64 curTime;
 
     CHK(pSignalingClient != NULL && pSignalingMessage != NULL, STATUS_NULL_ARG);
+
     CHK(pSignalingMessage->peerClientId != NULL, STATUS_NULL_ARG);
 
     // Validate the payload
@@ -2718,13 +2774,18 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
 
     ESP_LOGD(TAG, "Sending signaling message: type=%s, recipient=%s", pMessageType, pSignalingMessage->peerClientId);
 
-    // Start off with an empty string for ICE config
-    encodedIceConfig[0] = '\0';
-
     // In case of an Offer, package the ICE candidates only if we have a set of non-expired ICE configs
     if (pSignalingMessage->messageType == SIGNALING_MESSAGE_TYPE_OFFER && pSignalingClient->iceConfigCount != 0 &&
         (curTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient)) <= pSignalingClient->iceConfigExpiration &&
         STATUS_SUCCEEDED(validateIceConfiguration(pSignalingClient))) {
+        /* Heap, not stack (shared work-queue stack), and only here: this device is
+         * the answerer, so ANSWER and every trickled candidate would otherwise pay
+         * ~9.7 KB of zeroed alloc for buffers they never touch. */
+        encodedUris = (PCHAR) MEMCALLOC(1, MAX_ICE_SERVER_URI_STR_LEN + 1);
+        CHK(encodedUris != NULL, STATUS_NOT_ENOUGH_MEMORY);
+        encodedIceConfig = (PCHAR) MEMCALLOC(1, MAX_ENCODED_ICE_SERVER_INFOS_STR_LEN + 1);
+        CHK(encodedIceConfig != NULL, STATUS_NOT_ENOUGH_MEMORY);
+
         // Start the ice infos by copying the preamble, then the main body and then the ending
         STRCPY(encodedIceConfig, SIGNALING_ICE_SERVER_LIST_TEMPLATE_START);
         iceConfigLen = ARRAY_SIZE(SIGNALING_ICE_SERVER_LIST_TEMPLATE_START) - 1; // remove the null terminator
@@ -2769,8 +2830,8 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
     // Calculate base64 encoded payload size (4*ceil(n/3))
     UINT32 base64EncodedSize = ((messageLen + 2) / 3) * 4 + 1; // +1 for null terminator
 
-    // Add ice config size
-    UINT32 iceConfigSize = STRLEN(encodedIceConfig);
+    // Add ice config size (NULL unless this is an OFFER that carries ICE configs)
+    UINT32 iceConfigSize = (encodedIceConfig != NULL) ? STRLEN(encodedIceConfig) : 0;
 
     // Calculate total buffer size needed with a safety margin
     bufferSize = jsonStructureSize + base64EncodedSize + corrLen + iceConfigSize;
@@ -2814,7 +2875,7 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
     // Add ICE config (if any) and closing brace
     INT32 finalPart = SNPRINTF(buffer + bufferOffset, bufferSize - bufferOffset,
                      "%s\n}",
-                     encodedIceConfig);
+                     (encodedIceConfig != NULL) ? encodedIceConfig : "");
     CHK(finalPart > 0 && finalPart < (INT32)(bufferSize - bufferOffset), STATUS_BUFFER_TOO_SMALL);
     bufferOffset += finalPart;
 
@@ -2827,6 +2888,8 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
     CHK_STATUS(sendEspWebSocketMessage(pSignalingClient, buffer, bufferOffset));
 
 CleanUp:
+    SAFE_MEMFREE(encodedUris);
+    SAFE_MEMFREE(encodedIceConfig);
     // Free dynamically allocated buffer
     SAFE_MEMFREE(buffer);
 
