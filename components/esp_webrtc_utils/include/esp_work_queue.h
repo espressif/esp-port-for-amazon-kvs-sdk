@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -107,6 +107,22 @@ esp_err_t esp_work_queue_stop(void);
  * @return error in case of failure.
  */
 esp_err_t esp_work_queue_add_task(esp_work_fn_t work_fn, void *priv_data);
+
+/** Drain the Work Queue: block until every task queued before this call has run.
+ *
+ * The Work Queue is a single FIFO worker, so a barrier task enqueued here runs
+ * only after all previously-queued tasks have completed. Callers use this to
+ * ensure no already-queued task still references state they are about to free
+ * (e.g. before tearing down a client whose deferred tasks captured its pointer).
+ *
+ * Must not be called from the Work Queue's own task context (it would deadlock).
+ *
+ * @param[in] timeout_ms Max time to wait, or 0 to wait indefinitely.
+ * @return ESP_OK once the queue is drained.
+ * @return ESP_ERR_INVALID_STATE if the queue is not running.
+ * @return ESP_ERR_TIMEOUT if it did not drain within timeout_ms.
+ */
+esp_err_t esp_work_queue_sync(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

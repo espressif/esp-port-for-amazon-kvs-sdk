@@ -53,7 +53,7 @@ PVOID defaultMemAlignAlloc(SIZE_T size, SIZE_T alignment)
 #if ALLOC_EXT
     return heap_caps_aligned_alloc(alignment, size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
 #else
-    return memalign(size, alignment);
+    return memalign(alignment, size);
 #endif // PSRAM
 #endif
 }

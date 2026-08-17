@@ -1,7 +1,7 @@
-From b4fc0ee9308c947b6da867f01b84bd21c2ff2b50 Mon Sep 17 00:00:00 2001
+From 7817a7ffa4f3537514672c883e0ca1196304e881 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Mon, 9 Feb 2026 16:52:34 +0530
-Subject: [PATCH 1/4] Added support for SDP re-negotiation flow
+Subject: [PATCH 1/5] Added support for SDP re-negotiation flow
 
  - Instead of rejecting the offer from same client, update the connection with new remote description
  - Updated the samples/Common.c accordingly
@@ -13,7 +13,7 @@ Subject: [PATCH 1/4] Added support for SDP re-negotiation flow
  3 files changed, 245 insertions(+), 2 deletions(-)
 
 diff --git a/src/source/PeerConnection/PeerConnection.c b/src/source/PeerConnection/PeerConnection.c
-index 6c96286c..5fe1e9f2 100644
+index e174f165..38edf787 100644
 --- a/src/source/PeerConnection/PeerConnection.c
 +++ b/src/source/PeerConnection/PeerConnection.c
 @@ -1412,6 +1412,9 @@ STATUS setRemoteDescription(PRtcPeerConnection pPeerConnection, PRtcSessionDescr
@@ -27,10 +27,10 @@ index 6c96286c..5fe1e9f2 100644
      pSessionDescription = pKvsPeerConnection->pRemoteSessionDescription;
      CHK(pSessionDescription != NULL, STATUS_NOT_ENOUGH_MEMORY);
 diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
-index 0e6b31fa..c760ec57 100644
+index 0f910344..8cef5343 100644
 --- a/src/source/PeerConnection/SessionDescription.c
 +++ b/src/source/PeerConnection/SessionDescription.c
-@@ -355,6 +355,14 @@ STATUS setTransceiverPayloadTypes(PHashTable codecTable, PHashTable rtxTable, PD
+@@ -403,6 +403,14 @@ STATUS setTransceiverPayloadTypes(PHashTable codecTable, PHashTable rtxTable, PD
          }
  
          if (pKvsRtpTransceiver != NULL) {
@@ -45,7 +45,7 @@ index 0e6b31fa..c760ec57 100644
              if (pKvsRtpTransceiver->pRollingBufferConfig == NULL) {
                  // Passing in 0,0. The default values will be set up since application has not set up rolling buffer config with the
                  // configureTransceiverRollingBuffer() call
-@@ -1397,6 +1405,21 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
+@@ -1445,6 +1453,21 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
      PKvsRtpTransceiver pKvsRtpFakeTransceiver = NULL;
      PRtcMediaStreamTrack pRtcMediaStreamTrack;
      RtcMediaStreamTrack track;
@@ -67,7 +67,7 @@ index 0e6b31fa..c760ec57 100644
  
      // pSeenTranceivers is populated only with codec types supported by the SDK. And if already populated, it is not added again.
      // Hence, it is sufficient if the hash table count is set to minimum or required transceivers
-@@ -1537,8 +1560,8 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
+@@ -1585,8 +1608,8 @@ STATUS findTransceiversByRemoteDescription(PKvsPeerConnection pKvsPeerConnection
              MEMSET(&track, 0x00, SIZEOF(RtcMediaStreamTrack));
              track.kind = streamKind;
              track.codec = RTC_CODEC_UNKNOWN;

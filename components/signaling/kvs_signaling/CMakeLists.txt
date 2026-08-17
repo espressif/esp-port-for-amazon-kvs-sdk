@@ -34,6 +34,7 @@ set(component_srcs
     "${KVS_WEBRTC_ROOT}/src/source/Signaling/FileCache.c"
     "${KVS_WEBRTC_ROOT}/src/source/Signaling/ChannelInfo.c"
     "src/kvs_signaling.c"
+    "port/kvs_pending_ice.c"
 )
 
 if(CONFIG_USE_ESP_WEBSOCKET_CLIENT)

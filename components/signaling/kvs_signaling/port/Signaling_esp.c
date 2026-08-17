@@ -1326,7 +1326,7 @@ STATUS getChannelEndpoint(PSignalingClient pSignalingClient, UINT64 time)
         case SIGNALING_API_CALL_CACHE_TYPE_FILE:
             /* explicit fall-through */
         case SIGNALING_API_CALL_CACHE_TYPE_FILE_EXCEPT_DESCRIBE_MEDIA:
-            DLOGD("time: %llu, endpoint time: %llu,  Caching Period:  %llu", time, pSignalingClient->getEndpointTime,
+            DLOGD("time: %" PRIu64 ", endpoint time: %" PRIu64 ",  Caching Period:  %" PRIu64, time, pSignalingClient->getEndpointTime,
                   pSignalingClient->pChannelInfo->cachingPeriod);
             if (IS_VALID_TIMESTAMP(pSignalingClient->getEndpointTime) &&
                 time <= pSignalingClient->getEndpointTime + pSignalingClient->pChannelInfo->cachingPeriod) {

@@ -123,6 +123,10 @@ esp_err_t deserialize_signaling_message_json(const char* jsonString, size_t json
             i++;
         } else if (jsoneq(jsonString, &tokens[i], "peerClientId") == 0) {
             int len = tokens[i + 1].end - tokens[i + 1].start;
+            if (len > SS_MAX_SIGNALING_CLIENT_ID_LEN) {
+                ESP_LOGW(TAG, "peerClientId (%d bytes) truncated to %d — peer routing may not match", len, SS_MAX_SIGNALING_CLIENT_ID_LEN);
+                len = SS_MAX_SIGNALING_CLIENT_ID_LEN;
+            }
             if (len > 0) {
                 strncpy(pSignalingMessage->peerClientId, jsonString + tokens[i + 1].start, len);
                 pSignalingMessage->peerClientId[len] = '\0';
@@ -131,6 +135,10 @@ esp_err_t deserialize_signaling_message_json(const char* jsonString, size_t json
             i++;
         } else if (jsoneq(jsonString, &tokens[i], "correlationId") == 0) {
             int len = tokens[i + 1].end - tokens[i + 1].start;
+            if (len > SS_MAX_CORRELATION_ID_LEN) {
+                ESP_LOGW(TAG, "correlationId (%d bytes) truncated to %d", len, SS_MAX_CORRELATION_ID_LEN);
+                len = SS_MAX_CORRELATION_ID_LEN;
+            }
             if (len > 0) {
                 strncpy(pSignalingMessage->correlationId, jsonString + tokens[i + 1].start, len);
                 pSignalingMessage->correlationId[len] = '\0';

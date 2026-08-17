@@ -333,7 +333,7 @@ static void decode_task(void *arg)
     drain_queue(ctx->queue);
     ESP_LOGI(TAG, "decode task exit (queued=%" PRIu32 " rendered=%" PRIu32 " dropped=%" PRIu32 ")",
              ctx->frames_queued, ctx->frames_rendered, ctx->frames_dropped);
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 esp_err_t video_player_init(video_player_config_t *config, video_player_handle_t *ret_handle)

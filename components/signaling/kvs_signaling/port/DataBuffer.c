@@ -205,6 +205,10 @@ STATUS appendDataBuffer(PDataBuffer pDataBuffer, const char* pData, UINT32 dataL
         CHK_STATUS(expandDataBuffer(pDataBuffer, additionalSize));
     }
 
+    // expandDataBuffer may cap the growth silently; verify the space is really
+    // there before copying to avoid overflowing the buffer.
+    CHK(pDataBuffer->currentSize + dataLen <= pDataBuffer->maxSize, STATUS_BUFFER_TOO_SMALL);
+
     // Now we should have enough space, copy the data
     MEMCPY(pDataBuffer->buffer + pDataBuffer->currentSize, pData, dataLen);
     pDataBuffer->currentSize += dataLen;

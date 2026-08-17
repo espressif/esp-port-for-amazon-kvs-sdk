@@ -46,6 +46,9 @@ STATUS createIotCredentialProviderWithTime(PCHAR iotGetCredentialEndpoint, PCHAR
     pIotCredentialProvider = (PIotCredentialProvider) MEMCALLOC(1, SIZEOF(IotCredentialProvider));
     CHK(pIotCredentialProvider != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
+    pIotCredentialProvider->credentialLock = MUTEX_CREATE(FALSE);
+    CHK(IS_VALID_MUTEX_VALUE(pIotCredentialProvider->credentialLock), STATUS_NOT_ENOUGH_MEMORY);
+
     pIotCredentialProvider->credentialProvider.getCredentialsFn = priv_iot_credential_provider_get;
 
     // Store the time functionality and specify default if NULL
@@ -128,6 +131,11 @@ STATUS freeIotCredentialProvider(PAwsCredentialProvider* ppCredentialProvider)
     // Release the underlying AWS credentials object
     aws_credential_free(&pIotCredentialProvider->pAwsCredentials);
 
+    // Release the lock
+    if (IS_VALID_MUTEX_VALUE(pIotCredentialProvider->credentialLock)) {
+        MUTEX_FREE(pIotCredentialProvider->credentialLock);
+    }
+
     // Release the object
     MEMFREE(pIotCredentialProvider);
 
@@ -146,10 +154,16 @@ STATUS priv_iot_credential_provider_get(PAwsCredentialProvider pCredentialProvid
 
     STATUS retStatus = STATUS_SUCCESS;
     UINT64 currentTime;
+    BOOL locked = FALSE;
 
     PIotCredentialProvider pIotCredentialProvider = (PIotCredentialProvider) pCredentialProvider;
 
     CHK(pIotCredentialProvider != NULL && ppAwsCredentials != NULL, STATUS_NULL_ARG);
+
+    // Serialize against concurrent getters - the refresh below frees and
+    // reallocates pAwsCredentials, which must not race another get
+    MUTEX_LOCK(pIotCredentialProvider->credentialLock);
+    locked = TRUE;
 
     currentTime = pIotCredentialProvider->getCurrentTimeFn(pIotCredentialProvider->customData);
 
@@ -177,6 +191,9 @@ CleanUp:
         *ppAwsCredentials = NULL; //!< this can be removed.
     } else {
         *ppAwsCredentials = pIotCredentialProvider->pAwsCredentials;
+    }
+    if (locked) {
+        MUTEX_UNLOCK(pIotCredentialProvider->credentialLock);
     }
     LEAVES();
     return retStatus;

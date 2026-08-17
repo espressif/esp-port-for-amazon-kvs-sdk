@@ -1,7 +1,7 @@
-From bc95e041cf1962d22d3bc89d8259cdc2f7eea7ea Mon Sep 17 00:00:00 2001
+From bf99550f6c91d2addbacdc336b529e1c457cc0b7 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Fri, 15 May 2026 20:16:15 +0530
-Subject: [PATCH 4/4] PeerConnection: cap peer Opus encoder at 16kHz mono via
+Subject: [PATCH 4/5] PeerConnection: cap peer Opus encoder at 16kHz mono via
  DEFAULT_OPUS_FMTP
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -37,10 +37,10 @@ SDK actually offered/answered without having to dump full SDP.
  2 files changed, 9 insertions(+), 4 deletions(-)
 
 diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
-index 89496a46..5e58cdb0 100644
+index e5b752a6..8fae4539 100644
 --- a/src/source/PeerConnection/SessionDescription.c
 +++ b/src/source/PeerConnection/SessionDescription.c
-@@ -791,9 +791,11 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
+@@ -839,9 +839,11 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
              attributeCount++;
          }
      } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_OPUS) {
@@ -55,7 +55,7 @@ index 89496a46..5e58cdb0 100644
  
          STRCPY(pSdpMediaDescription->sdpAttributes[attributeCount].attributeName, "rtpmap");
          amountWritten = SNPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue,
-@@ -807,6 +809,8 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
+@@ -855,6 +857,8 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
                  SNPRINTF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue,
                           SIZEOF(pSdpMediaDescription->sdpAttributes[attributeCount].attributeValue), "%" PRId64 " %s", payloadType, currentFmtp);
              CHK_ERR(amountWritten > 0, STATUS_INTERNAL_ERROR, "Full Opus fmtp could not be written");
@@ -65,7 +65,7 @@ index 89496a46..5e58cdb0 100644
          }
      } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_VP8) {
 diff --git a/src/source/PeerConnection/SessionDescription.h b/src/source/PeerConnection/SessionDescription.h
-index 4d511c86..94221fd3 100644
+index acb85502..eb315cb8 100644
 --- a/src/source/PeerConnection/SessionDescription.h
 +++ b/src/source/PeerConnection/SessionDescription.h
 @@ -53,7 +53,8 @@ extern "C" {

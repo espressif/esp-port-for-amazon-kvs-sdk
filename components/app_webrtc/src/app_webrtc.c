@@ -565,6 +565,13 @@ STATUS freeAppWebRTCSession(PAppWebRTCSession* ppAppWebRTCSession)
         ESP_LOGW(TAG, "Session has no interface_session_handle for peer: %s", pAppWebRTCSession->peerId);
     }
 
+    // Drop this departed peer's buffered ICE candidates so the re-trickle buffer
+    // frees the slots now instead of at the retry cap (optional; NULL if unused).
+    if (gWebRtcAppConfig.signaling_client_if != NULL && gSignalingClientData != NULL &&
+        gWebRtcAppConfig.signaling_client_if->purge_peer_candidates != NULL) {
+        gWebRtcAppConfig.signaling_client_if->purge_peer_candidates(gSignalingClientData, pAppWebRTCSession->peerId);
+    }
+
     SAFE_MEMFREE(pAppWebRTCSession);
 
 CleanUp:
@@ -855,7 +862,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
             // Check for connection timeout
             if (connectionInProgress && (currentTime - connectionStartTime >= CONNECTION_TIMEOUT)) {
                 DLOGE("Connection attempt timed out after %llu seconds, marking as failed",
-                      CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      (unsigned long long) (CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND));
                 connectionInProgress = FALSE;
                 retryCount++;
                 lastRetryTime = currentTime;
@@ -868,7 +875,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
 
             if (shouldRetry) {
                 DLOGI("Reconnecting signaling client (attempt %d, delay: %llu seconds)",
-                      retryCount + 1, retryDelay / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      retryCount + 1, (unsigned long long) (retryDelay / HUNDREDS_OF_NANOS_IN_A_SECOND));
 
                 // Disconnect and reconnect (don't abort loop on disconnect failure —
                 // the connection may already be broken, which is why we're reconnecting)
@@ -891,7 +898,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                     lastRetryTime = currentTime;
                     DLOGE("Failed to start signaling client connection: 0x%08x (attempt %d, next retry in %llu seconds)",
                           retStatus, retryCount,
-                          retryDelays[MIN(retryCount, maxRetryIndex)] / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                          (unsigned long long) (retryDelays[MIN(retryCount, maxRetryIndex)] / HUNDREDS_OF_NANOS_IN_A_SECOND));
 
                     // Reset status to avoid breaking the loop
                     retStatus = STATUS_SUCCESS;
@@ -902,13 +909,13 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                 }
             } else if (connectionInProgress) {
                 DLOGD("Connection in progress for %llu seconds (timeout: %llu)",
-                      (currentTime - connectionStartTime) / HUNDREDS_OF_NANOS_IN_A_SECOND,
-                      CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      (unsigned long long) ((currentTime - connectionStartTime) / HUNDREDS_OF_NANOS_IN_A_SECOND),
+                      (unsigned long long) (CONNECTION_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND));
             } else {
                 // Not time to retry yet
                 UINT64 timeUntilNextRetry = retryDelay - (currentTime - lastRetryTime);
                 DLOGD("Waiting %llu more seconds before next reconnection attempt",
-                      timeUntilNextRetry / HUNDREDS_OF_NANOS_IN_A_SECOND);
+                      (unsigned long long) (timeUntilNextRetry / HUNDREDS_OF_NANOS_IN_A_SECOND));
             }
 
             // Check if connection actually succeeded by checking signaling state
@@ -1333,6 +1340,10 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
 
         case WEBRTC_MESSAGE_TYPE_ICE_CANDIDATE:
             DLOGD("Received ICE candidate message from peer: %s", pWebRtcMessage->peer_client_id);
+            /* Reject an implausibly large (peer-controlled) payload up front — before any
+             * queue is created/enqueued — so the later +1 can't UINT32-wrap and a failure
+             * here can't leave a half-registered pending queue behind (use-after-free). */
+            CHK(pWebRtcMessage->payload_len <= APP_WEBRTC_MAX_MESSAGE_PAYLOAD_LEN, STATUS_INVALID_ARG);
             /*
              * if peer connection hasn't been created, create an queue to store the ice candidate message. Otherwise
              * submit the signaling message into the corresponding streaming session.
@@ -1359,6 +1370,7 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
                 pWebRtcMessageCopy->payload_len = pWebRtcMessage->payload_len;
 
                 // Handle payload copying - always allocate separate memory for queue storage
+                // (payload_len already capped at the top of this case)
                 if (pWebRtcMessage->payload_len > 0 && pWebRtcMessage->payload != NULL) {
                     pWebRtcMessageCopy->payload = (PCHAR) MEMALLOC(pWebRtcMessage->payload_len + 1);
                     CHK(pWebRtcMessageCopy->payload != NULL, STATUS_NOT_ENOUGH_MEMORY);

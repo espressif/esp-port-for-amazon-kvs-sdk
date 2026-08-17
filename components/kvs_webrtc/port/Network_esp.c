@@ -544,14 +544,14 @@ STATUS getIpAddrFromDnsHostname(PCHAR hostname, PCHAR address, UINT16 lengthSrc,
     // For example: 35-90-63-38.t-ae7dd61a.kinesisvideo.us-west-2.amazonaws.com
     while (hostNameLen > 0 && hostname[i] != '.') {
         if (hostname[i] >= '0' && hostname[i] <= '9') {
-            if (j > maxLenDst) {
+            if (j + 1 >= maxLenDst) {  // reserve one slot for the NUL terminator
                 DLOGW("Generated address is past allowed size");
                 retStatus = STATUS_INVALID_ADDRESS_LENGTH;
                 break;
             }
             address[j] = hostname[i];
         } else if (hostname[i] == '-') {
-            if (j > maxLenDst) {
+            if (j + 1 >= maxLenDst) {  // reserve one slot for the NUL terminator
                 DLOGW("Generated address is past allowed size");
                 retStatus = STATUS_INVALID_ADDRESS_LENGTH;
                 break;
@@ -588,7 +588,7 @@ STATUS getDualStackIpAddrFromDnsHostname(PCHAR hostname, PCHAR ipv4Address, PCHA
 
     // Parse the IPv4 portion.
     while (hostNameLen > 0 && hostname[i] != '_') {
-        CHK_WARN(j < maxLenV4Dst, STATUS_INVALID_ADDRESS_LENGTH, "Generated IPv4 address is past allowed size.");
+        CHK_WARN(j + 1 < maxLenV4Dst, STATUS_INVALID_ADDRESS_LENGTH, "Generated IPv4 address is past allowed size.");  // reserve NUL slot
 
         c = hostname[i];
 
@@ -612,7 +612,7 @@ STATUS getDualStackIpAddrFromDnsHostname(PCHAR hostname, PCHAR ipv4Address, PCHA
 
     // Parse the IPv6 portion.
     while (hostNameLen > 0 && hostname[i] != '.') {
-        CHK_WARN(j < maxLenV6Dst, STATUS_INVALID_ADDRESS_LENGTH, "Generated IPv6 address is past allowed size.");
+        CHK_WARN(j + 1 < maxLenV6Dst, STATUS_INVALID_ADDRESS_LENGTH, "Generated IPv6 address is past allowed size.");  // reserve NUL slot
 
         c = hostname[i];
 

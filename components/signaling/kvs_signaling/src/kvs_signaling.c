@@ -1,10 +1,11 @@
 /*
- * SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2025-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #include "kvs_signaling.h"
+#include "../port/kvs_pending_ice.h"
 #include "webrtc_mem_utils.h"
 #include "app_webrtc.h"
 #include "fileio.h"
@@ -56,6 +57,7 @@ STATUS createKvsSignalingClient(kvs_signaling_config_t *pConfig, PVOID *ppSignal
 STATUS connectKvsSignalingClient(PVOID pSignalingClient);
 STATUS disconnectKvsSignalingClient(PVOID pSignalingClient);
 STATUS sendKvsSignalingMessage(PVOID pSignalingClient, webrtc_message_t *pMessage);
+STATUS kvsSignalingPurgePeerCandidates(PVOID pSignalingClient, const char *peerId);
 STATUS freeKvsSignalingClient(PVOID pSignalingClient);
 STATUS setKvsSignalingCallbacks(PVOID pSignalingClient,
                               PVOID customData,
@@ -124,7 +126,73 @@ typedef struct {
 
     // Last notified state to suppress duplicate state change callbacks
     SIGNALING_CLIENT_STATE lastNotifiedState;
+
+    // ICE candidates buffered for re-send after a signaling reconnect
+    // (protected by signalingSendMessageLock). Lazily allocated on the first
+    // buffered candidate and freed once the buffer drains empty, so the ~12 KB
+    // slot array isn't resident for the client's whole lifetime.
+    KvsPendingIceCandidate *pendingIce;
+    UINT32 pendingIceCount;
 } KvsSignalingClientData;
+
+/* Live-client guard: work-queue tasks capture a raw KvsSignalingClientData*.
+ * freeKvsSignalingClient() unregisters before teardown, so a task starting after
+ * that bails instead of touching freed memory (in-flight tasks are drained via
+ * esp_work_queue_sync). The registry mutex is static so it outlives any client. */
+#define KVS_MAX_LIVE_CLIENTS 4
+static void *s_liveClients[KVS_MAX_LIVE_CLIENTS];
+static MUTEX s_liveClientsLock = INVALID_MUTEX_VALUE;
+
+static void kvsSignalingClientRegister(void *pClient)
+{
+    if (!IS_VALID_MUTEX_VALUE(s_liveClientsLock)) {
+        s_liveClientsLock = MUTEX_CREATE(FALSE);
+        if (!IS_VALID_MUTEX_VALUE(s_liveClientsLock)) {
+            return;
+        }
+    }
+    MUTEX_LOCK(s_liveClientsLock);
+    for (UINT32 i = 0; i < KVS_MAX_LIVE_CLIENTS; i++) {
+        if (s_liveClients[i] == NULL) {
+            s_liveClients[i] = pClient;
+            break;
+        }
+    }
+    MUTEX_UNLOCK(s_liveClientsLock);
+}
+
+static void kvsSignalingClientUnregister(void *pClient)
+{
+    if (!IS_VALID_MUTEX_VALUE(s_liveClientsLock)) {
+        return;
+    }
+    MUTEX_LOCK(s_liveClientsLock);
+    for (UINT32 i = 0; i < KVS_MAX_LIVE_CLIENTS; i++) {
+        if (s_liveClients[i] == pClient) {
+            s_liveClients[i] = NULL;
+            break;
+        }
+    }
+    MUTEX_UNLOCK(s_liveClientsLock);
+}
+
+/* TRUE while the client is still registered (not being torn down). */
+static bool kvsSignalingClientIsLive(void *pClient)
+{
+    bool live = false;
+    if (!IS_VALID_MUTEX_VALUE(s_liveClientsLock)) {
+        return false;
+    }
+    MUTEX_LOCK(s_liveClientsLock);
+    for (UINT32 i = 0; i < KVS_MAX_LIVE_CLIENTS; i++) {
+        if (s_liveClients[i] == pClient) {
+            live = true;
+            break;
+        }
+    }
+    MUTEX_UNLOCK(s_liveClientsLock);
+    return live;
+}
 
 /**
  * @brief Work queue task for applying cached ICE servers asynchronously.
@@ -137,7 +205,7 @@ typedef struct {
  */
 static void kvs_apply_cached_ice_task(void *arg)
 {
-    if (arg == NULL) {
+    if (arg == NULL || !kvsSignalingClientIsLive(arg)) {
         return;
     }
 
@@ -161,8 +229,8 @@ static void kvs_apply_cached_ice_task(void *arg)
 static void kvs_refresh_ice_task(void *arg)
 {
 #ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
-    if (arg == NULL) {
-        ESP_LOGE(TAG, "Background ICE refresh task received NULL argument");
+    if (arg == NULL || !kvsSignalingClientIsLive(arg)) {
+        ESP_LOGW(TAG, "Background ICE refresh task: NULL or torn-down client");
         return;
     }
 
@@ -343,6 +411,104 @@ static STATUS fetchCredentialsAdapter(UINT64 customData,
                                       PUINT64 pExpiration);
 
 /**
+ * @brief Re-send ICE candidates that were buffered while the signaling
+ *        websocket was down. Called once the client reconnects.
+ */
+/* Send callback used by kvsPendingIceDrain to re-send one buffered candidate. */
+static bool kvsResendIceCandidate(void *ctx, const char *peerId, const char *payload,
+                                  uint32_t payloadLen, uint32_t version)
+{
+    KvsSignalingClientData *pClientData = (KvsSignalingClientData *) ctx;
+    SignalingMessage m;
+    MEMSET(&m, 0, SIZEOF(m));
+    m.version = version;
+    m.messageType = SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE;
+    strlcpy(m.peerClientId, peerId, MAX_SIGNALING_CLIENT_ID_LEN);
+    m.correlationId[0] = '\0';
+#ifdef DYNAMIC_SIGNALING_PAYLOAD
+    m.payload = (PCHAR) payload;
+#else
+    MEMCPY(m.payload, payload, payloadLen);
+#endif
+    m.payloadLen = payloadLen;
+
+    STATUS s = signalingClientSendMessageSync(pClientData->signalingClientHandle, &m);
+    if (STATUS_FAILED(s)) {
+        ESP_LOGW(TAG, "Re-send of buffered ICE candidate failed: 0x%08" PRIx32, (uint32_t) s);
+    }
+    return STATUS_SUCCEEDED(s);
+}
+
+static void kvsFlushPendingIceCandidates(KvsSignalingClientData *pClientData)
+{
+    if (pClientData == NULL || pClientData->signalingClientHandle == INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
+        return;
+    }
+
+    /* Take ownership of the buffer under the lock, then re-send OUTSIDE it: each
+     * send can block on the websocket, and holding signalingSendMessageLock (and,
+     * since this runs in the state callback, the signaling stateLock) across up to
+     * KVS_PENDING_ICE_MAX blocking sends would stall SDP answers and state-machine
+     * operations on a degraded link. */
+    MUTEX_LOCK(pClientData->signalingSendMessageLock);
+    KvsPendingIceCandidate *batch = pClientData->pendingIce;
+    UINT32 batchCount = pClientData->pendingIceCount;
+    pClientData->pendingIce = NULL;
+    pClientData->pendingIceCount = 0;
+    MUTEX_UNLOCK(pClientData->signalingSendMessageLock);
+
+    if (batch == NULL || batchCount == 0) {
+        SAFE_MEMFREE(batch);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Re-sending %" PRIu32 " buffered ICE candidate(s) after signaling reconnect", batchCount);
+    UINT32 remaining = kvsPendingIceDrain(batch, &batchCount, kvsResendIceCandidate, pClientData);
+
+    if (remaining == 0) {
+        SAFE_MEMFREE(batch);   /* buffer empty -> release the memory (lazy) */
+        return;
+    }
+
+    /* Some re-sends failed (link dropped again): keep the survivors for the next
+     * reconnect instead of losing them. */
+    MUTEX_LOCK(pClientData->signalingSendMessageLock);
+    if (pClientData->pendingIce == NULL) {
+        pClientData->pendingIce = batch;             /* reuse buffer, preserves per-entry attempts */
+        pClientData->pendingIceCount = remaining;
+        batch = NULL;
+    } else {
+        /* A new buffer formed while we were sending: merge survivors into it. */
+        for (UINT32 i = 0; i < remaining; i++) {
+            kvsPendingIcePush(pClientData->pendingIce, &pClientData->pendingIceCount,
+                              batch[i].peer_client_id, batch[i].payload, batch[i].payload_len, batch[i].version);
+        }
+    }
+    MUTEX_UNLOCK(pClientData->signalingSendMessageLock);
+    SAFE_MEMFREE(batch);   /* no-op when reused above */
+}
+
+/**
+ * @brief Work-queue task that runs the ICE re-trickle flush off the signaling
+ *        state callback.
+ *
+ * kvsFlushPendingIceCandidates() does up to KVS_PENDING_ICE_MAX blocking
+ * websocket sends. The CONNECTED edge is delivered from kvsStateChangedCallback,
+ * which runs inside signalingStateMachineIterator with the signaling stateLock
+ * held, so flushing there would stall getIceConfigInfo / disconnect / other
+ * state-machine operations for the whole re-send burst on a degraded link.
+ * Deferring to the work queue lets the state-machine iterator release stateLock
+ * first; the sends then run in the worker task without it held.
+ */
+static void kvs_flush_pending_ice_task(void *arg)
+{
+    if (arg == NULL || !kvsSignalingClientIsLive(arg)) {
+        return;
+    }
+    kvsFlushPendingIceCandidates((KvsSignalingClientData *) arg);
+}
+
+/**
  * @brief KVS signaling state change callback
  */
 static STATUS kvsStateChangedCallback(UINT64 customData, SIGNALING_CLIENT_STATE state)
@@ -366,6 +532,13 @@ static STATUS kvsStateChangedCallback(UINT64 customData, SIGNALING_CLIENT_STATE 
     // Update internal state
     if (state == SIGNALING_CLIENT_STATE_CONNECTED) {
         pClientData->connected = TRUE;
+        // Websocket back up: flush buffered ICE candidates. Deferred to the work
+        // queue since this runs under the state-machine stateLock and the flush does
+        // blocking sends; sendKvsSignalingMessage's drain covers it if queueing fails.
+        esp_err_t queueStatus = esp_work_queue_add_task(&kvs_flush_pending_ice_task, (void *) pClientData);
+        if (queueStatus != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to queue ICE re-trickle flush: %d (will retry on next send)", (int) queueStatus);
+        }
     } else if (state == SIGNALING_CLIENT_STATE_DISCONNECTED) {
         pClientData->connected = FALSE;
     }
@@ -494,6 +667,9 @@ STATUS createKvsSignalingClient(kvs_signaling_config_t *pConfig, PVOID *ppSignal
     // Allocate client data
     pClientData = (KvsSignalingClientData *)MEMCALLOC(1, SIZEOF(KvsSignalingClientData));
     CHK(pClientData != NULL, STATUS_NOT_ENOUGH_MEMORY);
+
+    // Track this client so deferred work-queue tasks can detect teardown.
+    kvsSignalingClientRegister(pClientData);
 
     // Copy configuration
     MEMCPY(&pClientData->config, pConfig, SIZEOF(kvs_signaling_config_t));
@@ -825,14 +1001,45 @@ STATUS sendKvsSignalingMessage(PVOID pSignalingClient, webrtc_message_t *pMessag
     // Send the message with thread safety
     MUTEX_LOCK(pClientData->signalingSendMessageLock);
     locked = TRUE;
-    CHK_STATUS(signalingClientSendMessageSync(pClientData->signalingClientHandle, &signalingMessage));
+    retStatus = signalingClientSendMessageSync(pClientData->signalingClientHandle, &signalingMessage);
+
+    // If a trickle ICE candidate couldn't be sent because the websocket is down
+    // (AWS often FINs it right after the answer, while relay candidates are still
+    // gathering), buffer it for re-send once the client reconnects. Only buffer on
+    // connection loss: a send that fails while still connected is a permanent error
+    // (bad version, too large, OOM) and must propagate to the caller, not be
+    // silently swallowed and retried forever.
+    if (STATUS_FAILED(retStatus) && pMessage->message_type == WEBRTC_MESSAGE_TYPE_ICE_CANDIDATE &&
+        !pClientData->connected) {
+        if (pClientData->pendingIce == NULL) {
+            pClientData->pendingIce = (KvsPendingIceCandidate *) MEMCALLOC(KVS_PENDING_ICE_MAX, SIZEOF(KvsPendingIceCandidate));
+        }
+        if (pClientData->pendingIce != NULL &&
+            kvsPendingIcePush(pClientData->pendingIce, &pClientData->pendingIceCount,
+                              pMessage->peer_client_id, pMessage->payload, pMessage->payload_len, pMessage->version)) {
+            ESP_LOGW(TAG, "Signaling send failed (0x%08" PRIx32 ") for ICE candidate; buffered for re-send on reconnect (pending=%" PRIu32 ")",
+                     (uint32_t) retStatus, pClientData->pendingIceCount);
+            retStatus = STATUS_SUCCESS;  // handled: will retry after reconnect
+        } else {
+            ESP_LOGE(TAG, "ICE candidate re-trickle buffer unavailable/full; candidate dropped (pending=%" PRIu32 ", len=%" PRIu32 ")",
+                     pClientData->pendingIceCount, pMessage->payload_len);
+        }
+    }
     MUTEX_UNLOCK(pClientData->signalingSendMessageLock);
     locked = FALSE;
 
-    // Update metrics for answer messages
-    if (pMessage->message_type == WEBRTC_MESSAGE_TYPE_ANSWER) {
-        // Get updated metrics
+    // Update metrics only after a successful answer send. A real send failure
+    // is left in retStatus and returned via the CleanUp block below.
+    if (STATUS_SUCCEEDED(retStatus) && pMessage->message_type == WEBRTC_MESSAGE_TYPE_ANSWER) {
         CHK_STATUS(signalingClientGetMetrics(pClientData->signalingClientHandle, &pClientData->metrics));
+    }
+
+    // Opportunistically drain buffered candidates once a send goes through while
+    // connected: a transient failure may have buffered a candidate without any
+    // following DISCONNECTED->CONNECTED edge (the state stays CONNECTED), which the
+    // state-callback flush alone would miss. Cheap no-op when nothing is buffered.
+    if (STATUS_SUCCEEDED(retStatus) && pClientData->connected && pClientData->pendingIceCount > 0) {
+        kvsFlushPendingIceCandidates(pClientData);
     }
 
 CleanUp:
@@ -840,6 +1047,39 @@ CleanUp:
         MUTEX_UNLOCK(pClientData->signalingSendMessageLock);
     }
 
+    return retStatus;
+}
+
+/**
+ * @brief Drop any ICE candidates buffered for a departed peer.
+ *
+ * Called from the peer/session teardown path so a viewer that leaves releases
+ * its re-trickle slots immediately, instead of pinning them for the whole
+ * disconnect window (until KVS_PENDING_ICE_MAX_ATTEMPTS drains them). Takes the
+ * send lock, matching the buffer/flush locking discipline, and frees the buffer
+ * if it drains empty (same lazy-allocation policy as the flush path).
+ */
+STATUS kvsSignalingPurgePeerCandidates(PVOID pSignalingClient, const char *peerId)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    KvsSignalingClientData *pClientData = (KvsSignalingClientData *)pSignalingClient;
+
+    CHK(pClientData != NULL && peerId != NULL, STATUS_NULL_ARG);
+
+    MUTEX_LOCK(pClientData->signalingSendMessageLock);
+    if (pClientData->pendingIce != NULL && pClientData->pendingIceCount > 0) {
+        UINT32 removed = kvsPendingIcePurgePeer(pClientData->pendingIce, &pClientData->pendingIceCount, peerId);
+        if (removed > 0) {
+            ESP_LOGI(TAG, "Purged %" PRIu32 " buffered ICE candidate(s) for departed peer %s (pending=%" PRIu32 ")",
+                     removed, peerId, pClientData->pendingIceCount);
+        }
+        if (pClientData->pendingIceCount == 0) {
+            SAFE_MEMFREE(pClientData->pendingIce);   /* buffer empty -> release (lazy alloc) */
+        }
+    }
+    MUTEX_UNLOCK(pClientData->signalingSendMessageLock);
+
+CleanUp:
     return retStatus;
 }
 
@@ -877,6 +1117,24 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
 
     CHK(pClientData != NULL, STATUS_NULL_ARG);
 
+    // Stop new deferred tasks from starting on this client...
+    kvsSignalingClientUnregister(pClientData);
+
+    // ...then drain any in-flight one BEFORE freeing anything it may still touch.
+    // A flush task that already passed its live-guard can be mid-send, holding
+    // signalingSendMessageLock and dereferencing the signaling object / pClientData,
+    // so the barrier must precede every free below (freeSignalingClient included).
+    if (esp_work_queue_sync(2000) != ESP_OK) {
+        // The task is still blocked in a send (on the ESP backend the send can
+        // block until the bounded send-timeout lands) and may hold the send lock
+        // or reference the client. Freeing now would be a use-after-free, so leak
+        // this client rather than crash.
+        ESP_LOGE(TAG, "Work queue drain timed out; leaking signaling client to avoid use-after-free");
+        CHK(FALSE, STATUS_OPERATION_TIMED_OUT);
+    }
+
+    // Safe past this point: no deferred task is running or can start.
+
     // Free the signaling client if initialized
     if (pClientData->signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
         freeSignalingClient(&pClientData->signalingClientHandle);
@@ -894,6 +1152,13 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
         }
     }
 
+    // Free the callback credential-fetch adapter context (allocated in
+    // createCredentialProvider); freed after the provider that referenced it.
+    if (pClientData->pCredFetchAdapterCtx != NULL) {
+        MEMFREE(pClientData->pCredFetchAdapterCtx);
+        pClientData->pCredFetchAdapterCtx = NULL;
+    }
+
     // Free the mutex
     if (IS_VALID_MUTEX_VALUE(pClientData->signalingSendMessageLock)) {
         MUTEX_FREE(pClientData->signalingSendMessageLock);
@@ -903,6 +1168,9 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
     if (pClientData->pCallbackAdapterData != NULL) {
         MEMFREE(pClientData->pCallbackAdapterData);
     }
+
+    // Free the lazily-allocated ICE re-trickle buffer if still resident
+    SAFE_MEMFREE(pClientData->pendingIce);
 
     // Free the client data
     MEMFREE(pClientData);
@@ -984,6 +1252,13 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
              *
              * It's recommended to not pass too many TURN iceServers because it will slow down ice gathering in non-trickle mode.
              */
+
+            /* Skip turns:...transport=udp: the SDK has no TURN-over-DTLS, so this URI yields no
+             * usable relay candidate and its stalled allocation only slows ICE gathering. */
+            if (STRNCMP(pIceConfigInfo->uris[j], "turns:", 6) == 0 && STRSTR(pIceConfigInfo->uris[j], "transport=udp") != NULL) {
+                ESP_LOGI(TAG, "Skipping unusable TURNS-over-UDP URI: %s", pIceConfigInfo->uris[j]);
+                continue;
+            }
 
             strlcpy(iceServers[uriCount + 1].urls, pIceConfigInfo->uris[j], MAX_ICE_CONFIG_URI_LEN);
             strlcpy(iceServers[uriCount + 1].credential, pIceConfigInfo->password, MAX_ICE_CONFIG_CREDENTIAL_LEN);
@@ -1253,6 +1528,15 @@ static WEBRTC_STATUS kvsFreeWrapper(void *pSignalingClient)
 }
 
 /**
+ * @brief Wrapper for purge_peer_candidates to convert return types
+ */
+static WEBRTC_STATUS kvsPurgePeerCandidatesWrapper(void *pSignalingClient, const char *peerId)
+{
+    STATUS retStatus = kvsSignalingPurgePeerCandidates(pSignalingClient, peerId);
+    return (retStatus == STATUS_SUCCESS) ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INTERNAL_ERROR;
+}
+
+/**
  * @brief Wrapper for set_callbacks to convert types
  */
 static WEBRTC_STATUS kvsSetCallbacksWrapper(void *pSignalingClient,
@@ -1511,7 +1795,8 @@ webrtc_signaling_client_if_t* kvs_signaling_client_if_get(void)
         .is_ice_refresh_needed = kvsIsIceRefreshNeededWrapper,
         .refresh_ice_configuration = kvsRefreshIceConfigurationWrapper,
         .set_ice_update_callback = kvsSetIceUpdateCallbackWrapper,
-        .get_state = kvsGetStateWrapper
+        .get_state = kvsGetStateWrapper,
+        .purge_peer_candidates = kvsPurgePeerCandidatesWrapper
     };
 
     return &kvs_signaling_client_if;

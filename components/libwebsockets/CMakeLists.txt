@@ -42,6 +42,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libwebsockets
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE websockets)
 
+# GCC 13+ (IDF v5.5.4 toolchain) flags lws's own mbedtls-client.c ALPN code
+# (temp_alpn stack buffer aliased into alpn_comma, used after its scope ends) —
+# a latent upstream lws issue, not ours to patch. Applied on the websockets
+# target so it lands AFTER lws's own -Werror=all (a global CMAKE_C_FLAGS entry
+# is overridden by lws re-enabling -Werror). Clang ignores the unknown option.
+target_compile_options(websockets PRIVATE -Wno-error=dangling-pointer)
+
 # lws is an add_subdirectory subproject, so it doesn't inherit this component's
 # REQUIRES include dirs; link idf::mbedtls for the mbedtls headers (incl.
 # tf-psa-crypto on mbedTLS 4 / IDF v6).

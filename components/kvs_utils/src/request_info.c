@@ -81,6 +81,74 @@ typedef enum {
 
 } HTTP_STATUS_CODE;
 
+/* Deep-copy AWS credentials into a self-contained blob owned by the request.
+ * The credential provider frees/rewrites its blob on refresh, and requests
+ * are signed asynchronously - borrowing the provider's pointer is a
+ * use-after-free (intermittent crash on credential rotation). Mirrors the
+ * aws_credential_create layout: one allocation, strings packed after the
+ * struct. */
+static STATUS copyAwsCredentials(PAwsCredentials pSrc, PAwsCredentials* ppDst)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    PAwsCredentials pDst = NULL;
+    UINT32 size;
+    PCHAR pCurPtr;
+
+    CHK(ppDst != NULL, STATUS_NULL_ARG);
+    *ppDst = NULL;
+
+    // NULL credentials stay NULL (e.g. cert-authenticated calls)
+    CHK(pSrc != NULL, retStatus);
+    CHK(pSrc->accessKeyId != NULL && pSrc->secretKey != NULL, STATUS_INVALID_ARG);
+
+    size = SIZEOF(AwsCredentials) + SIZEOF(CHAR) * (pSrc->accessKeyIdLen + 1 + pSrc->secretKeyLen + 1);
+    if (pSrc->sessionToken != NULL) {
+        size += SIZEOF(CHAR) * (pSrc->sessionTokenLen + 1);
+    }
+
+    pDst = (PAwsCredentials) MEMCALLOC(1, size);
+    CHK(pDst != NULL, STATUS_NOT_ENOUGH_MEMORY);
+
+    pDst->version = pSrc->version;
+    pDst->size = size;
+    pDst->accessKeyIdLen = pSrc->accessKeyIdLen;
+    pDst->secretKeyLen = pSrc->secretKeyLen;
+    pDst->expiration = pSrc->expiration;
+
+    pCurPtr = (PCHAR)(pDst + 1);
+
+    pDst->accessKeyId = pCurPtr;
+    MEMCPY(pCurPtr, pSrc->accessKeyId, pSrc->accessKeyIdLen * SIZEOF(CHAR));
+    pCurPtr += pSrc->accessKeyIdLen;
+    *pCurPtr++ = '\0';
+
+    pDst->secretKey = pCurPtr;
+    MEMCPY(pCurPtr, pSrc->secretKey, pSrc->secretKeyLen * SIZEOF(CHAR));
+    pCurPtr += pSrc->secretKeyLen;
+    *pCurPtr++ = '\0';
+
+    if (pSrc->sessionToken != NULL) {
+        pDst->sessionTokenLen = pSrc->sessionTokenLen;
+        pDst->sessionToken = pCurPtr;
+        MEMCPY(pCurPtr, pSrc->sessionToken, pSrc->sessionTokenLen * SIZEOF(CHAR));
+        pCurPtr += pSrc->sessionTokenLen;
+        *pCurPtr++ = '\0';
+    } else {
+        pDst->sessionTokenLen = 0;
+        pDst->sessionToken = NULL;
+    }
+
+CleanUp:
+
+    if (STATUS_FAILED(retStatus)) {
+        SAFE_MEMFREE(pDst);
+        pDst = NULL;
+    } else if (ppDst != NULL) {
+        *ppDst = pDst;
+    }
+    return retStatus;
+}
+
 PUBLIC_API STATUS createRequestInfo
         (PCHAR url, PCHAR body, PCHAR region, PCHAR certPath, PCHAR sslCertPath, PCHAR sslPrivateKeyPath,
         SSL_CERTIFICATE_TYPE certType, PCHAR userAgent, UINT64 connectionTimeout, UINT64 completionTimeout, UINT64 lowSpeedLimit,
@@ -103,7 +171,9 @@ PUBLIC_API STATUS createRequestInfo
     pRequestInfo = (PRequestInfo) MEMCALLOC(1, size);
     CHK(pRequestInfo != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
-    pRequestInfo->pAwsCredentials = pAwsCredentials;
+    // Own a copy of the credentials - the provider's blob may be freed on
+    // refresh while this request is still in flight (freed in freeRequestInfo)
+    CHK_STATUS(copyAwsCredentials(pAwsCredentials, &pRequestInfo->pAwsCredentials));
     pRequestInfo->verb = HTTP_REQUEST_VERB_POST;
     pRequestInfo->completionTimeout = completionTimeout;
     pRequestInfo->connectionTimeout = connectionTimeout;
@@ -191,6 +261,9 @@ PUBLIC_API STATUS freeRequestInfo(PRequestInfo* ppRequestInfo)
     // Release the url
     SAFE_MEMFREE(pRequestInfo->url);
 #endif
+
+    // Release the owned credentials copy
+    SAFE_MEMFREE(pRequestInfo->pAwsCredentials);
 
     // Release the object
     MEMFREE(pRequestInfo);
@@ -340,6 +413,10 @@ PUBLIC_API STATUS removeRequestHeader(PRequestInfo pRequestInfo, PCHAR headerNam
         if (STRCMPI(pCurrentHeader->pName, headerName) == 0) {
             CHK_STATUS(singleListDeleteNode(pRequestInfo->pRequestHeaders, pCurNode));
 
+            // Only free the matched header that was just unlinked; leave the
+            // rest of the list intact (freeing a still-linked node dangles it).
+            SAFE_MEMFREE(pCurrentHeader);
+
             // Early return
             CHK(FALSE, retStatus);
         }
@@ -348,8 +425,6 @@ PUBLIC_API STATUS removeRequestHeader(PRequestInfo pRequestInfo, PCHAR headerNam
     }
 
 CleanUp:
-
-    SAFE_MEMFREE(pCurrentHeader);
 
     return retStatus;
 }

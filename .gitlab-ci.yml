@@ -1,4 +1,5 @@
 stages:
+  - test
   - build
   - docs
 
@@ -51,6 +52,28 @@ variables:
   - done
   - done
   - cd $CI_PROJECT_DIR
+
+# Host unit tests (Unity) for the platform-agnostic helpers. Runs on the Linux
+# target — fast, no hardware — and fails the pipeline on any Unity failure.
+test_host:
+  stage: test
+  tags:
+    - build
+  image: espressif/idf:release-v5.5
+  artifacts:
+    when: always
+    reports:
+      junit: test_app/report.xml
+    expire_in: 1 mos
+  script:
+    - pip install pytest-embedded pytest-embedded-idf
+    - cd $CI_PROJECT_DIR/test_app
+    - idf.py --preview -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ci.linux" set-target linux
+    - idf.py build
+    # Linux host target: use only the `idf` service. pytest.ini defaults to
+    # `esp,idf` for on-hardware runs; the `esp` serial service isn't needed on
+    # the host and pulls pytest-embedded-serial-esp, which the image lacks.
+    - pytest pytest_kvs_webrtc.py --target linux --embedded-services idf --junitxml=$CI_PROJECT_DIR/test_app/report.xml
 
 .build_template:
   stage: build

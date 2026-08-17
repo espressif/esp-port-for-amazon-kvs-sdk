@@ -487,7 +487,8 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
     CHK(session != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     session->client = client_data;
-    STRNCPY(session->peer_id, peer_id, SIZEOF(session->peer_id));
+    STRNCPY(session->peer_id, peer_id, SIZEOF(session->peer_id) - 1);
+    session->peer_id[SIZEOF(session->peer_id) - 1] = '\0';
     session->is_initiator = is_initiator;
     session->terminated = FALSE;
     session->start_time = GETTIME();
@@ -1076,7 +1077,7 @@ static VOID onIceCandidateHandler(UINT64 customData, PCHAR candidateJson)
                 answer_msg.message_type = WEBRTC_MESSAGE_TYPE_ANSWER;
                 STRCPY(answer_msg.peer_client_id, session->peer_id);
                 SNPRINTF(answer_msg.correlation_id, MAX_CORRELATION_ID_LEN, "%llu_%zu",
-                         GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
+                         (unsigned long long) GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
                 answer_msg.payload = payload;
                 answer_msg.payload_len = (UINT32)STRLEN(payload);
 
@@ -1452,7 +1453,7 @@ static STATUS kvs_create_and_send_offer(kvs_pc_session_t* session)
 
         // Generate correlation ID using legacy format (timestamp_counter)
         SNPRINTF(offer_msg.correlation_id, APP_WEBRTC_MAX_CORRELATION_ID_LEN, "%llu_%zu",
-                 GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
+                 (unsigned long long) GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
 
         ESP_LOGI(TAG, "Sending SDP offer for peer: %s (len=%" PRIu32 ")", session->peer_id, offer_len);
 
@@ -1881,7 +1882,7 @@ static STATUS kvs_handleOffer(kvs_pc_session_t* session, webrtc_message_t* messa
 
     /* Check if remote supports trickle ICE */
     canTrickle = canTrickleIceCandidates(session->peer_connection);
-    CHECK(!NULLABLE_CHECK_EMPTY(canTrickle));
+    CHK(!NULLABLE_CHECK_EMPTY(canTrickle), STATUS_INVALID_ARG);
     session->remote_can_trickle_ice = canTrickle.value;
 
     ESP_LOGD(TAG, "Remote peer trickle ICE support: %s", session->remote_can_trickle_ice ? "YES" : "NO");
@@ -1907,7 +1908,7 @@ static STATUS kvs_handleOffer(kvs_pc_session_t* session, webrtc_message_t* messa
             STRCPY(answer_msg.peer_client_id, session->peer_id);
             /* Generate fresh correlation ID like legacy respondWithAnswer */
             SNPRINTF(answer_msg.correlation_id, MAX_CORRELATION_ID_LEN, "%llu_%zu",
-                     GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
+                     (unsigned long long) GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
 
             /* Serialize the SDP answer with exact-sized heap buffer */
             UINT32 answer_len = 0;
@@ -2316,7 +2317,7 @@ static VOID kvs_senderBandwidthEstimationHandler(UINT64 customData, UINT32 txByt
 
     ESP_LOGD(TAG, "TWCC adjustment for peer %s: loss=%.2f%%, video=%lluKbps, audio=%lluKbps",
              session->peer_id, session->twcc_metadata.average_packet_loss,
-             videoBitrate / 1000, audioBitrate / 1000);
+             (unsigned long long) (videoBitrate / 1000), (unsigned long long) (audioBitrate / 1000));
 }
 #endif // KVS_ENABLE_SENDER_BANDWIDTH_ESTIMATION
 

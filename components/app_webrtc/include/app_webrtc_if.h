@@ -65,6 +65,12 @@ typedef enum {
 #define APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN     256
 #define APP_WEBRTC_MAX_CORRELATION_ID_LEN          256
 
+// Upper bound on a (peer-controlled) signaling message payload — the SDP/ICE blob.
+// Double the ESP port's 12 KB SDP cap (patch 0003 lowers the SDK's
+// MAX_SESSION_DESCRIPTION_INIT_SDP_LEN to 12000), yet far below any size that could
+// wrap payload_len + 1; used to reject malformed/hostile lengths before allocation.
+#define APP_WEBRTC_MAX_MESSAGE_PAYLOAD_LEN         (24 * 1024)
+
 // ICE Server configuration limits (matching main SDK)
 #define APP_WEBRTC_MAX_ICE_CONFIG_URI_LEN          127
 #define APP_WEBRTC_MAX_ICE_CONFIG_USER_NAME_LEN    256
@@ -249,6 +255,10 @@ typedef struct {
 
     // Get current signaling connection state
     WEBRTC_STATUS (*get_state)(void *pSignalingClient, webrtc_signaling_state_t *pState);
+
+    // Drop candidates buffered for a departed peer (optional; may be NULL) so the
+    // re-trickle buffer frees its slots at teardown, not at the retry cap.
+    WEBRTC_STATUS (*purge_peer_candidates)(void *pSignalingClient, const char *peer_id);
 } webrtc_signaling_client_if_t;
 
 /**

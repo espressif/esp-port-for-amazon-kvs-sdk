@@ -1,7 +1,7 @@
-From 07799fa7b6ee2bc7dd849087b80354a468fa1df4 Mon Sep 17 00:00:00 2001
+From 605ee197a5bfa6b8a4d8561f474dc5fb9089c1b4 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 3 Mar 2026 20:48:28 +0530
-Subject: [PATCH 3/4] ESP-IDF platform adaptations and robustness improvements
+Subject: [PATCH 3/5] ESP-IDF platform adaptations and robustness improvements
 
 - Dtls_mbedtls: Fix for mbedtls 3.x compatibility
 - ConnectionListener: Custom thread for ESP platforms to save memory
@@ -24,10 +24,10 @@ Subject: [PATCH 3/4] ESP-IDF platform adaptations and robustness improvements
  10 files changed, 457 insertions(+), 80 deletions(-)
 
 diff --git a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
-index fd842e86..d0facdf2 100644
+index 3beda9d3..872e366b 100644
 --- a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
 +++ b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
-@@ -841,12 +841,12 @@ extern "C" {
+@@ -843,12 +843,12 @@ extern "C" {
  /**
   * Default minimum number of threads in the threadpool for the SDK
   */
@@ -42,7 +42,7 @@ index fd842e86..d0facdf2 100644
  
  /**
   * Env to set minimum number of threads in the threadpool for the KVS SDK
-@@ -1529,6 +1529,21 @@ typedef struct {
+@@ -1531,6 +1531,21 @@ typedef struct {
                                                                //!<
  } RtcIceCandidateInit, *PRtcIceCandidateInit;
  
@@ -64,7 +64,7 @@ index fd842e86..d0facdf2 100644
  /**
   * @brief Structure defining the basic signaling message
   */
-@@ -1543,7 +1558,11 @@ typedef struct {
+@@ -1545,7 +1560,11 @@ typedef struct {
  
      UINT32 payloadLen; //!< Optional payload length. If 0, the length will be calculated
  
@@ -76,7 +76,7 @@ index fd842e86..d0facdf2 100644
  } SignalingMessage, *PSignalingMessage;
  
  /**
-@@ -2390,6 +2409,16 @@ PUBLIC_API STATUS freeSignalingClient(PSIGNALING_CLIENT_HANDLE);
+@@ -2392,6 +2411,16 @@ PUBLIC_API STATUS freeSignalingClient(PSIGNALING_CLIENT_HANDLE);
   */
  PUBLIC_API STATUS signalingClientSendMessageSync(SIGNALING_CLIENT_HANDLE, PSignalingMessage);
  
@@ -210,11 +210,11 @@ index 3f7f4333..404ae0fd 100644
          ATOMIC_STORE_BOOL(&(ps)->connectionClosed, TRUE);                                                                                            \
      }
 diff --git a/src/source/Sctp/Sctp.c b/src/source/Sctp/Sctp.c
-index 6ee0e5ab..e4e414c2 100644
+index 3c78ab46..da89f5d1 100644
 --- a/src/source/Sctp/Sctp.c
 +++ b/src/source/Sctp/Sctp.c
-@@ -59,7 +59,7 @@ STATUS initSctpSession()
- {
+@@ -146,7 +146,7 @@ STATUS initSctpSession()
+     ENTERS();
      STATUS retStatus = STATUS_SUCCESS;
  
 -    usrsctp_init_nothreads(0, &onSctpOutboundPacket, NULL);
@@ -222,16 +222,16 @@ index 6ee0e5ab..e4e414c2 100644
  
      // Disable Explicit Congestion Notification
      usrsctp_sysctl_set_sctp_ecn_enable(0);
-@@ -99,7 +99,7 @@ STATUS createSctpSession(PSctpSessionCallbacks pSctpSessionCallbacks, PSctpSessi
-     CHK_STATUS(initSctpAddrConn(pSctpSession, &localConn));
-     CHK_STATUS(initSctpAddrConn(pSctpSession, &remoteConn));
+@@ -200,7 +200,7 @@ STATUS createSctpSession(PSctpSessionCallbacks pSctpSessionCallbacks, TIMER_QUEU
+     // queued timer tasks are correctly advanced
+     sctpTimerCallback(0, GETTIME(), (UINT64) pSctpSession);
  
 -    CHK((pSctpSession->socket = usrsctp_socket(AF_CONN, SOCK_STREAM, IPPROTO_SCTP, onSctpInboundPacket, NULL, 0, pSctpSession)) != NULL,
 +    CHK((pSctpSession->socket = usrsctp_socket(AF_CONN, SOCK_STREAM, IPPROTO_SCTP, (int (*)(struct socket *, union sctp_sockstore, void *, size_t, struct sctp_rcvinfo, int, void *))(void*)onSctpInboundPacket, NULL, 0, pSctpSession)) != NULL,
          STATUS_SCTP_SESSION_SETUP_FAILED);
      usrsctp_register_address(pSctpSession);
      CHK_STATUS(configureSctpSocket(pSctpSession->socket));
-@@ -246,10 +246,10 @@ STATUS sctpSessionWriteDcep(PSctpSession pSctpSession, UINT32 streamId, PCHAR pC
+@@ -361,10 +361,10 @@ STATUS sctpSessionWriteDcep(PSctpSession pSctpSession, UINT32 streamId, PCHAR pC
      if (!pRtcDataChannelInit->ordered) {
          pSctpSession->packet[1] |= DCEP_DATA_CHANNEL_RELIABLE_UNORDERED;
      }
