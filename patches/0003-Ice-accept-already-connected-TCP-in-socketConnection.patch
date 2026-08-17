@@ -1,7 +1,7 @@
-From 4bc107534a542728e28ac84f31144fd278165255 Mon Sep 17 00:00:00 2001
+From 5e29f5f6d833fdd4b1ccdbcb5c551380cd5f0f78 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 4 Aug 2026 15:42:52 +0530
-Subject: [PATCH 5/5] Ice: accept already-connected TCP in
+Subject: [PATCH 3/3] Ice: accept already-connected TCP in
  socketConnectionIsConnected via getpeername
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -26,16 +26,16 @@ cd ..
 
 ## Patch ledger
 
-Base: upstream **`release-v1.19.0`** (`190a25abce`). All five patches apply
-cleanly against this base (`git am`, no fuzz).
+Base: upstream `develop` at **`4dd058d5`** (the 1.20.0 version-bump commit,
+awslabs#2382; no release tag yet). All three patches apply cleanly against this
+base (`git am`, no fuzz). The SDP-renegotiation patches were dropped here — that
+flow is now upstream (awslabs#2214, in 1.20.0).
 
 | # | Patch | Category | Upstream PR / status |
 |---|-------|----------|----------------------|
-| 0001 | Added support for SDP re-negotiation flow | aligned | [awslabs#2214](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2214) |
-| 0002 | SDP renegotiation: apply remote offer to transceiver directions and mark removed tracks inactive | aligned | [awslabs#2214](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2214) |
-| 0003 | ESP-IDF platform adaptations + robustness — including the `PREFER_DYNAMIC_ALLOCS` / dynamic-signaling-payload work (heap-allocate the payload in `parseSignalingMessage`) and the IceAgent `turnChannelData` heap-allocation | mixed | partial: [awslabs#2146](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2146) for the dynamic-allocs portion |
-| 0004 | PeerConnection: cap peer Opus encoder at 16kHz mono via `DEFAULT_OPUS_FMTP` | ESP-specific | n/a — narrow-Opus negotiation keeps decode under the 20 ms frame budget on P4 |
-| 0005 | Ice: accept already-connected TCP in `socketConnectionIsConnected` (lwIP reports `EALREADY`, not `EISCONN`; use `getpeername`) | ESP-IDF/lwIP-specific | candidate — low-priority portability PR to upstream; drop if it lands |
+| 0001 | ESP-IDF platform adaptations + robustness — including the `PREFER_DYNAMIC_ALLOCS` / dynamic-signaling-payload work (heap-allocate the payload in `parseSignalingMessage`) and the IceAgent `turnChannelData` heap-allocation | mixed | partial: [awslabs#2146](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2146) for the dynamic-allocs portion |
+| 0002 | PeerConnection: cap peer Opus encoder at 16kHz mono via `DEFAULT_OPUS_FMTP` | ESP-specific | n/a — narrow-Opus negotiation keeps decode under the 20 ms frame budget on P4 |
+| 0003 | Ice: accept already-connected TCP in `socketConnectionIsConnected` (lwIP reports `EALREADY`, not `EISCONN`; use `getpeername`) | ESP-IDF/lwIP-specific | candidate — low-priority portability PR to upstream; drop if it lands |
 
 > **Not carried as patches:** the upstream `Network.c` uses POSIX `getifaddrs()`,
 > which ESP-IDF does not ship, so the ESP-IDF adaptation lives as a full port file
@@ -45,16 +45,7 @@ cleanly against this base (`git am`, no fuzz).
 
 ### Notes per patch
 
-**0001 — SDP re-negotiation (basic flow).** Re-offer from the same peer reuses an
-active session, or replaces a terminated one. Touches `PeerConnection.c` and
-`SessionDescription.c`. Required by the Matter Camera spec. Drops when
-**awslabs#2214** lands.
-
-**0002 — SDP re-negotiation (transceiver directions).** Follow-up to 0001 that
-applies the remote offer to transceiver directions and marks removed tracks
-inactive. Drops together with 0001 once **awslabs#2214** lands.
-
-**0003 — ESP-IDF platform adaptations + robustness.** The largest patch, mixing
+**0001 — ESP-IDF platform adaptations + robustness.** The largest patch, mixing
 two kinds of changes:
 
   - **Aligned-with-upstream:** the `PREFER_DYNAMIC_ALLOCS` /
@@ -67,7 +58,7 @@ two kinds of changes:
     constrained-stack platforms, mbedtls-3.x compatibility shims, robustness
     fixes in `SocketConnection.c`, `Sctp.c` and `LwsApiCalls.c`.
 
-> **SDP buffer cap.** 0003 also lowers `MAX_SESSION_DESCRIPTION_INIT_SDP_LEN`
+> **SDP buffer cap.** 0001 also lowers `MAX_SESSION_DESCRIPTION_INIT_SDP_LEN`
 > 25000 → 12000 to shrink `sendLwsMessage`'s static `encodedMessage` buffer (~13 KB of
 > stack). This bound applies **only** to the upstream lws signaling path (ws-off) when
 > `PREFER_DYNAMIC_ALLOCS` is off; the ESP ws-on port and the dynamic-allocs path serialize
@@ -75,7 +66,7 @@ two kinds of changes:
 > capped. Keep this in mind if a peer's SDP grows large (many ICE candidates): on the capped
 > path a >12 KB SDP is rejected by the SDK rather than silently truncated.
 
-**0004 — Cap peer Opus encoder at 16 kHz mono via `DEFAULT_OPUS_FMTP`.** When
+**0002 — Cap peer Opus encoder at 16 kHz mono via `DEFAULT_OPUS_FMTP`.** When
 the browser/Android peer defaults to 48 kHz stereo Opus (Fullband CELT), the
 P4 software decoder ends up at ~21 ms / 20 ms frame budget — decode queue
 saturates within seconds and every RX audio frame past 50/50 is dropped
@@ -87,7 +78,7 @@ per-frame Opus decode from ~21 ms to ~5 ms at session start and eliminates
 queue-full / mem errors during the first ~15 s of bidir. ESP-specific
 because narrow Opus is a P4 capability trade — keep long-term.
 
-**0005 — Accept already-connected TCP in `socketConnectionIsConnected`.** The
+**0003 — Accept already-connected TCP in `socketConnectionIsConnected`.** The
 function re-`connect()`s the socket and treats only `EISCONN` as connected. On
 lwIP an already-connected TCP socket returns `EALREADY`, not `EISCONN`, so a
 live TCP/TLS TURN channel is wrongly declared dead — TURN stalls and, on
@@ -102,7 +93,6 @@ matching PRs land:
 
 | Local patch | Removed when |
 |-------------|--------------|
-| 0001, 0002 | `awslabs#2214` merges |
-| 0003 (aligned / dynamic-allocs half) | `awslabs#2146` merges |
+| 0001 (aligned / dynamic-allocs half) | `awslabs#2146` merges |
 
 Keep this file up-to-date as patches are added, removed, or split.
