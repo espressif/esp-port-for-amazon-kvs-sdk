@@ -50,6 +50,8 @@ CONFIG_MBEDTLS_SSL_ALPN=y
 # fix build issues on idf master
 # CONFIG_MBEDTLS_X509_CREATE_C=y
 # CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+# Needed for the DTLS-SRTP fingerprint check; ESP-IDF v6 no longer defaults it on.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
 
 #
 # FreeRTOS
