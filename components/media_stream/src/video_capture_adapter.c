@@ -219,6 +219,18 @@ __attribute__((weak)) esp_err_t video_capture_request_keyframe(void)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t video_capture_get_active_resolution(video_resolution_t *resolution)
+{
+    if (resolution == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+#if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_USE_ESP_VIDEO_IF
+    return esp_video_if_get_resolution(resolution);
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 esp_err_t video_capture_release_frame(video_capture_handle_t handle, video_frame_t *frame)
 {
     if (handle == NULL || frame == NULL) {

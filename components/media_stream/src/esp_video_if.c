@@ -28,6 +28,7 @@
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/errno.h>
+#include <sys/time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -38,6 +39,7 @@
 #include "esp_timer.h"
 #include "esp_cache.h"
 #include "esp_heap_caps.h"
+#include "driver/i2c_master.h"
 #include "linux/videodev2.h"
 #include "esp_video_if_cam_sel.h"
 
@@ -45,17 +47,35 @@
 #include "esp_video_device.h"
 #include "esp_video_ioctl.h"
 #include "esp_cam_sensor.h"
+#include "esp_cam_sensor_xclk.h"
 #include "esp_video_if.h"
 #include "esp_h264_hw_enc.h"
-#include "bsp/esp-bsp.h"
 
 /* Forward declaration of internal I2C init function */
 extern esp_err_t media_stream_i2c_init_safe(void);
 
 #define BUFFER_COUNT        3
+/* UVC needs MMAP: esp_video hands uvc_host the element[] pointers as
+ * advanced.user_frame_buffers at stream-open time, and in USERPTR mode those are still
+ * NULL then, so the camera has nowhere to write and streams nothing. CSI/DVP keep
+ * USERPTR, which lets this file own the buffer placement. */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+#define USE_V4L2_USERPTR    0
+#else
 #define USE_V4L2_USERPTR    1
+#endif
 #define USERPTR_ALIGNMENT   64
 #define USERPTR_HEAP_CAPS   (MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA)
+
+/* Default capture size. Passthrough sends the camera's own H.264, whose bitrate the
+ * camera fixes, so the practical ceiling is the uplink rather than USB bandwidth. */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+#define MEDIA_STREAM_CAPTURE_WIDTH   CONFIG_MEDIA_STREAM_UVC_CAPTURE_WIDTH
+#define MEDIA_STREAM_CAPTURE_HEIGHT  CONFIG_MEDIA_STREAM_UVC_CAPTURE_HEIGHT
+#else
+#define MEDIA_STREAM_CAPTURE_WIDTH   WIDTH
+#define MEDIA_STREAM_CAPTURE_HEIGHT  HEIGHT
+#endif
 
 typedef struct v4l2 {
     int cap_fd;
@@ -68,6 +88,7 @@ typedef struct v4l2 {
 } v4l2_src_t;
 
 static v4l2_src_t *g_v4l2 = NULL;
+static uint32_t g_current_pixelformat = 0;
 static video_resolution_t g_current_resolution = {.width = 0, .height = 0, .fps = 0};
 static bool s_sensor_is_ov2710 = false;
 /* esp_video_init() registers the ISP video device as a side-effect that
@@ -127,14 +148,72 @@ static void print_video_device_info(const struct v4l2_capability *capability)
     }
 }
 
+/* Number of VIDIOC_ENUM_FMT indices to probe.
+ *
+ * Deliberately a fixed sweep rather than the conventional
+ * enumerate-until-EINVAL loop: the USB-UVC device assigns V4L2 format indices
+ * from a fixed table (MJPEG=0, YUY2=1, H264=2, H265=3) and advances the index
+ * even for formats the camera does not advertise, so the index space is gapped.
+ * A camera offering only H.264 returns EINVAL for index 0 and the usual loop
+ * would report "no formats" on a perfectly working device. The CSI/DVP devices
+ * enumerate densely, so sweeping a few extra indices costs nothing there. */
+#define ENUM_FMT_PROBE_COUNT    8
+
+/* Log what the device actually offers. Diagnostic only — a mismatch between
+ * this and the format we request is the difference between "S_FMT failed" and
+ * "streaming starts but no frame ever arrives". */
+static void log_supported_formats(int fd)
+{
+    for (uint32_t i = 0; i < ENUM_FMT_PROBE_COUNT; i++) {
+        struct v4l2_fmtdesc fmtdesc = {
+            .index = i,
+            .type  = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+        };
+
+        if (ioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc) != 0) {
+            continue;
+        }
+
+        ESP_LOGI(TAG, "fmt[%" PRIu32 "]: %.4s (%.32s)", i,
+                 (const char *)&fmtdesc.pixelformat, (const char *)fmtdesc.description);
+
+        for (uint32_t j = 0; ; j++) {
+            struct v4l2_frmsizeenum frmsize = {
+                .index         = j,
+                .pixel_format  = fmtdesc.pixelformat,
+                /* esp_video reads `type` as an *input* v4l2_buf_type to look up
+                 * the stream (esp_video.c: esp_video_enum_framesizes), whereas
+                 * mainline V4L2 treats it as output-only. Leaving it zero makes
+                 * every call fail with EINVAL and no size is ever printed. The
+                 * driver overwrites it with V4L2_FRMSIZE_TYPE_DISCRETE on
+                 * success, so the branch below still reads correctly. */
+                .type          = V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            };
+
+            if (ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) != 0) {
+                break;
+            }
+
+            if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+                ESP_LOGI(TAG, "        %" PRIu32 "x%" PRIu32,
+                         frmsize.discrete.width, frmsize.discrete.height);
+            } else {
+                ESP_LOGI(TAG, "        %" PRIu32 "x%" PRIu32 " .. %" PRIu32 "x%" PRIu32,
+                         frmsize.stepwise.min_width, frmsize.stepwise.min_height,
+                         frmsize.stepwise.max_width, frmsize.stepwise.max_height);
+            }
+        }
+    }
+}
+
 static esp_err_t init_camera(v4l2_src_t *v4l2)
 {
     int fd;
     struct v4l2_capability capability;
 
-    fd = open(EXAMPLE_CAM_DEV_PATH, O_RDWR);
+    fd = open(MEDIA_STREAM_CAM_DEV_PATH, O_RDWR);
     if (fd < 0) {
-        ESP_LOGE(TAG, "Failed to open camera device %s, errno: %d", EXAMPLE_CAM_DEV_PATH, errno);
+        ESP_LOGE(TAG, "Failed to open camera device %s, errno: %d", MEDIA_STREAM_CAM_DEV_PATH, errno);
         return ESP_FAIL;
     }
 
@@ -144,6 +223,32 @@ static esp_err_t init_camera(v4l2_src_t *v4l2)
         return ESP_FAIL;
     }
     print_video_device_info(&capability);
+
+    /* Bound VIDIOC_DQBUF. esp_video opens every device with
+     * dqbuf_timeout_ticks = portMAX_DELAY and its VFS layer registers no
+     * start_select and ignores O_NONBLOCK, so select()/poll() cannot be used
+     * to wait with a deadline — a camera that stops completing frames blocks
+     * the caller forever. With a timeout DQBUF instead fails with EPERM,
+     * esp_video_if_get_frame() returns NULL, and the encoder task warns and
+     * retries. The ioctl is esp_video-private; treat its absence as benign.
+     *
+     * Every branch logs, including "disabled": whether a deadline is in force
+     * must be readable from the boot log, not inferred from a missing line. */
+    if (CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS > 0) {
+        struct timeval dqbuf_timeout = {
+            .tv_sec  = CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS / 1000,
+            .tv_usec = (CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS % 1000) * 1000,
+        };
+        if (ioctl(fd, VIDIOC_S_DQBUF_TIMEOUT, &dqbuf_timeout) != 0) {
+            ESP_LOGW(TAG, "VIDIOC_S_DQBUF_TIMEOUT unsupported (errno %d); DQBUF will block indefinitely", errno);
+        } else {
+            ESP_LOGI(TAG, "DQBUF timeout set to %d ms", CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS);
+        }
+    } else {
+        ESP_LOGW(TAG, "DQBUF timeout disabled by configuration; DQBUF will block indefinitely");
+    }
+
+    log_supported_formats(fd);
 
     /* Query sensor chip ID via esp_cam_sensor ioctl to detect OV2710 (PID 0x2710) */
     esp_cam_sensor_id_t chip_id = {0};
@@ -173,7 +278,17 @@ static esp_err_t init_camera(v4l2_src_t *v4l2)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Default: width=%" PRIu32 " height=%" PRIu32, format.fmt.pix.width, format.fmt.pix.height);
+    /* The device's format before we touch it. Worth the fourcc: on the USB-UVC
+     * device this is copied verbatim from the camera's frame_info[0]
+     * (esp_video_usb_uvc_device.c, uvc_video_init), and frame_info[0] is also
+     * the format uvc_host_stream_open() negotiates at STREAMON — which is what
+     * fixes the alternate setting and the ISOC URB geometry for the whole
+     * session. A later S_FMT to a different format does not revisit either, so
+     * when this line disagrees with the format we go on to request, that
+     * mismatch is a prime suspect for a stream that starts but never delivers. */
+    ESP_LOGI(TAG, "Default: width=%" PRIu32 " height=%" PRIu32 " %.4s",
+             format.fmt.pix.width, format.fmt.pix.height,
+             (const char *)&format.fmt.pix.pixelformat);
 
     v4l2->cap_fd = fd;
 
@@ -274,7 +389,18 @@ static video_fb_t *video_fb_get_cb(void *cb_ctx)
             };
             int ret = ioctl(v4l2->cap_fd, VIDIOC_DQBUF, &buf);
             if (ret != 0) {
-                ESP_LOGE(TAG, "failed to receive video frame ret %d", ret);
+                /* Rate-limited: a camera that has stopped delivering fails here
+                 * on every poll, and one line per DQBUF drowns the log.
+                 * esp_video maps its DQBUF timeout onto EPERM — call that out,
+                 * since "no frame within the deadline" and "the ioctl was
+                 * rejected" want very different debugging. */
+                static uint32_t dqbuf_fail_count;
+                dqbuf_fail_count++;
+                if (dqbuf_fail_count == 1 || (dqbuf_fail_count & 0x1F) == 0) {
+                    ESP_LOGE(TAG, "failed to receive video frame: %s (errno %d, count=%" PRIu32 ")",
+                             errno == EPERM ? "timed out waiting for the driver" : "ioctl error",
+                             errno, dqbuf_fail_count);
+                }
                 return NULL;
             }
 
@@ -294,7 +420,14 @@ static video_fb_t *video_fb_get_cb(void *cb_ctx)
             v4l2->fb.height = g_current_resolution.height;
             v4l2->v4l2_buf[buf.index] = buf;
 
-            esp_cache_msync(v4l2->fb.buf, v4l2->fb.len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+            /* Compressed frames have arbitrary lengths and esp_cache_msync() requires a
+             * cache-line-aligned size, but the rounded-up length must not run past the
+             * buffer or the sync covers memory that is not ours. */
+            size_t sync_len = ((size_t)v4l2->fb.len + 63U) & ~63U;
+            if (sync_len > v4l2->buffer_size[buf.index]) {
+                sync_len = v4l2->buffer_size[buf.index] & ~63U;
+            }
+            esp_cache_msync(v4l2->fb.buf, sync_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
             us = esp_timer_get_time();
             v4l2->fb.timestamp.tv_sec = us / 1000000UL;
@@ -381,7 +514,10 @@ esp_err_t esp_video_if_stop(void)
     if (g_v4l2) {
         requeue_used_buffers(g_v4l2);
         video_stop_cb(g_v4l2);
-        /* Keep buffers allocated to avoid fragmentation - they'll be reused on next start */
+        /* Keep buffers allocated to avoid fragmentation - they'll be reused on next
+         * start. UVC cannot reuse them at all, but that release happens in
+         * esp_video_if_start(): doing it here races the USB host task, which may still
+         * be delivering frames while the stream is being stopped. */
         ESP_LOGD(TAG, "Streaming stopped (buffers kept allocated for reuse)");
         return ESP_OK;
     }
@@ -443,7 +579,7 @@ static esp_err_t reopen_camera_for_userptr(v4l2_src_t *v4l2)
     format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     format.fmt.pix.width = g_current_resolution.width;
     format.fmt.pix.height = g_current_resolution.height;
-    format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+    format.fmt.pix.pixelformat = g_current_pixelformat;
     if (ioctl(v4l2->cap_fd, VIDIOC_S_FMT, &format) != 0) {
         ESP_LOGE(TAG, "Failed to set format on reopen");
         return ESP_FAIL;
@@ -566,6 +702,14 @@ static esp_err_t allocate_and_queue_buffers(v4l2_src_t *v4l2)
         v4l2->v4l2_buf[i] = buf;
         v4l2->buffer_size[i] = buf.length;
 
+        if (i == 0) {
+            /* The driver's required buffer size, once. Worth seeing: it is what
+             * the capture device will refuse to overflow, so a compressed frame
+             * larger than this is dropped rather than truncated. */
+            ESP_LOGI(TAG, "Driver requires %u bytes per capture buffer (%d buffers)",
+                     (unsigned)buf.length, BUFFER_COUNT);
+        }
+
 #if USE_V4L2_USERPTR
         /* Allocate user buffer */
         v4l2->cap_buffer[i] = heap_caps_aligned_alloc(USERPTR_ALIGNMENT, buf.length, USERPTR_HEAP_CAPS);
@@ -632,12 +776,26 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
     } resolution_t;
 
     resolution_t fallback_resolutions[] = {
-        {g_desired_resolution.width ? g_desired_resolution.width : WIDTH,
-         g_desired_resolution.height ? g_desired_resolution.height : HEIGHT},
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+        /* Uncompressed capture is bounded by the USB isochronous budget, not by the
+         * sensor: the endpoint carries 3060 B/microframe = ~24 MB/s, while YUY2 needs
+         * w*h*2 per frame - 18.4 MB/s at 640x480@30 but 124 MB/s at 1080p@30, which the
+         * camera simply cannot deliver. Ask for sizes that fit; the encoder scales the
+         * bitrate afterwards. (Passthrough has no such limit - see above.) */
+        {320, 240},
+        {640, 360},
+        {640, 480},
+#else
+        /* What the app/menuconfig asked for comes first; the rest are fallbacks in
+         * descending order for cameras that reject it. */
+        {g_desired_resolution.width ? g_desired_resolution.width : MEDIA_STREAM_CAPTURE_WIDTH,
+         g_desired_resolution.height ? g_desired_resolution.height : MEDIA_STREAM_CAPTURE_HEIGHT},
+        {1920, 1080},
         {1280, 720},
         {800, 600},
         {640, 480},
         {320, 240}
+#endif
     };
     int num_fallbacks = sizeof(fallback_resolutions) / sizeof(fallback_resolutions[0]);
 
@@ -661,8 +819,34 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
         }
 
         if (ioctl(v4l2->cap_fd, VIDIOC_S_FMT, &format) == 0) {
-            ESP_LOGI(TAG, "Successfully set format: %dx%d", (int)format.fmt.pix.width, (int)format.fmt.pix.height);
+            /* Report the fourcc and the driver's own sizing, not just what we
+             * asked for: S_FMT is free to adjust every field, and the pixel
+             * format it settled on decides both what the frame grabber must do
+             * with the data and how esp_video sized the capture buffers. */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_TARGET_FPS > 0
+            /* Ask for a lower frame interval. A UVC camera picks its own H.264 bitrate
+             * and we have no encoding-unit control to change it, so frame rate is the
+             * only lever we have over how much data lands on the uplink. */
+            struct v4l2_streamparm parm = {0};
+            parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            parm.parm.capture.timeperframe.numerator = 1;
+            parm.parm.capture.timeperframe.denominator = CONFIG_MEDIA_STREAM_UVC_TARGET_FPS;
+            if (ioctl(v4l2->cap_fd, VIDIOC_S_PARM, &parm) == 0) {
+                ESP_LOGI(TAG, "Requested %d fps, driver granted %" PRIu32 "/%" PRIu32 " s",
+                         CONFIG_MEDIA_STREAM_UVC_TARGET_FPS,
+                         (uint32_t) parm.parm.capture.timeperframe.numerator,
+                         (uint32_t) parm.parm.capture.timeperframe.denominator);
+            } else {
+                ESP_LOGW(TAG, "VIDIOC_S_PARM for %d fps rejected (errno %d); camera keeps its default",
+                         CONFIG_MEDIA_STREAM_UVC_TARGET_FPS, errno);
+            }
+#endif
+            ESP_LOGI(TAG, "Successfully set format: %dx%d %.4s (sizeimage=%" PRIu32 " bytesperline=%" PRIu32 ")",
+                     (int)format.fmt.pix.width, (int)format.fmt.pix.height,
+                     (const char *)&format.fmt.pix.pixelformat,
+                     format.fmt.pix.sizeimage, format.fmt.pix.bytesperline);
             /* Track actual resolution that was set (V4L2 may adjust it) */
+            g_current_pixelformat = format.fmt.pix.pixelformat;
             g_current_resolution.width = format.fmt.pix.width;
             g_current_resolution.height = format.fmt.pix.height;
             g_current_resolution.fps = g_desired_resolution.fps ? g_desired_resolution.fps : 30;
@@ -691,13 +875,15 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
     struct v4l2_format current_format = {0};
     current_format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(v4l2->cap_fd, VIDIOC_G_FMT, &current_format) == 0) {
+        g_current_pixelformat = current_format.fmt.pix.pixelformat;
         g_current_resolution.width = current_format.fmt.pix.width;
         g_current_resolution.height = current_format.fmt.pix.height;
         g_current_resolution.fps = g_desired_resolution.fps ? g_desired_resolution.fps : 30;
         ESP_LOGW(TAG,
-                 "Could not set any requested resolution; using the sensor's current format %dx%d "
+                 "Could not set any requested resolution; using the sensor's current format %dx%d %.4s "
                  "(check the camera resolution in menuconfig if this is unexpected)",
-                 (int) g_current_resolution.width, (int) g_current_resolution.height);
+                 (int) g_current_resolution.width, (int) g_current_resolution.height,
+                 (const char *)&current_format.fmt.pix.pixelformat);
         return ESP_OK;
     }
 
@@ -745,13 +931,55 @@ esp_err_t esp_video_if_start(void)
     ESP_LOGD(TAG, "Starting video (buffers_allocated=%d, fd=%d, mode=%s)",
              v4l2->buffers_allocated, v4l2->cap_fd, USE_V4L2_USERPTR ? "USERPTR" : "MMAP");
 
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+    /* UVC always re-inits. Stopping the stream makes esp_video close the underlying
+     * uvc_host stream and tear its queues down, so buffers carried over from a previous
+     * session reference a dead stream and the next QBUF asserts inside
+     * xQueueGenericSend(). Released here rather than in stop() so it runs with the USB
+     * host task idle. */
+    if (v4l2->buffers_allocated) {
+        ESP_LOGD(TAG, "UVC: releasing previous session's buffers before restart");
+        free_mapped_buffers(v4l2);
+        if (v4l2->cap_fd >= 0) {
+            close(v4l2->cap_fd);
+            v4l2->cap_fd = -1;
+        }
+        if (init_camera(v4l2) != ESP_OK) {
+            ESP_LOGE(TAG, "UVC: failed to reopen the camera device");
+            return ESP_FAIL;
+        }
+    }
+#endif
+
     /* Fast path: buffers already allocated, just restart streaming */
     if (v4l2->buffers_allocated) {
         return restart_streaming_with_existing_buffers(v4l2);
     }
 
     /* Slow path: First-time setup or after cleanup */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+#if CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+    /* Pass the camera's own H.264 through untouched: no ISP, no hardware encoder, and
+     * PSRAM traffic drops by orders of magnitude versus raw capture.
+     *
+     * Only usable when the uplink can carry whatever bitrate the camera decides on. A
+     * UVC camera picks its own rate and the host driver exposes no encoding-unit control
+     * to change it - the camera measured here holds ~3 Mbps at every resolution from
+     * 320x240 to 1080p - so on a constrained link most frames lose a packet and the
+     * viewer's jitter buffer discards them. Prefer the raw path below unless the link is
+     * known to be fat. */
+    uint32_t capture_fmt = V4L2_PIX_FMT_H264;
+#else
+    /* Capture raw and encode locally, so bitrate, GOP length and PLI-driven keyframes
+     * are ours to control - which is what makes the stream survive a lossy uplink.
+     * YUY2 is what a UVC camera offers as its uncompressed format and the P4 encoder
+     * takes it directly (ESP_H264_RAW_FMT_YUYV), so nothing has to convert. */
+    uint32_t capture_fmt = V4L2_PIX_FMT_YUYV;
+#endif
+#else
+    /* CSI/DVP/SPI sensors deliver raw frames for the hardware encoder. */
     uint32_t capture_fmt = V4L2_PIX_FMT_YUV420;
+#endif
 
     /* Configure camera format with fallback resolution support */
     if (configure_camera_format(v4l2, capture_fmt) != ESP_OK) {
@@ -767,8 +995,409 @@ esp_err_t esp_video_if_start(void)
     return start_streaming(v4l2);
 }
 
+/* -------------------------------------------------------------------------- */
+/*  esp_video hardware bring-up                                               */
+/* -------------------------------------------------------------------------- */
+
+/* Which I2C bus the camera SCCB (sensor control) traffic rides on.
+ *
+ * CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP — default y whenever a BSP is selected —
+ * means esp_video is handed an already-open bus instead of opening one itself.
+ * With a BSP that bus is the BSP's shared one, which the ES8311 audio codec
+ * also sits on, so esp_video must not own it. Without a BSP there is nobody
+ * else to open it, so we do, from the pins the board header exports. */
+#if CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+#if !CONFIG_BSP_SELECT_NONE
+#define SCCB_I2C_HANDLE()   bsp_i2c_get_handle()
+#else
+static i2c_master_bus_handle_t s_sccb_i2c_handle;
+#define SCCB_I2C_HANDLE()   s_sccb_i2c_handle
+#endif
+
+static esp_err_t sccb_i2c_bus_init(void)
+{
+#if !CONFIG_BSP_SELECT_NONE
+    /* media_stream_init() already brought the BSP I2C bus up; bsp_i2c_init()
+     * itself is idempotent, so call it again defensively in case this path
+     * is reached without media_stream_init() running first. */
+    esp_err_t ret = bsp_i2c_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_i2c_init failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+#else
+    if (s_sccb_i2c_handle) {
+        return ESP_OK;
+    }
+
+    const i2c_master_bus_config_t bus_config = {
+        .i2c_port = MEDIA_STREAM_SCCB_I2C_PORT_INIT_BY_APP,
+        .scl_io_num = MEDIA_STREAM_SCCB_I2C_SCL_PIN_INIT_BY_APP,
+        .sda_io_num = MEDIA_STREAM_SCCB_I2C_SDA_PIN_INIT_BY_APP,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+
+    esp_err_t ret = i2c_new_master_bus(&bus_config, &s_sccb_i2c_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "failed to open the SCCB I2C bus: %s", esp_err_to_name(ret));
+    }
+    return ret;
+#endif
+}
+#endif /* CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP */
+
+#if defined(MEDIA_STREAM_MIPI_CSI_XCLK_PIN) && MEDIA_STREAM_MIPI_CSI_XCLK_PIN > 0
+#if !CONFIG_CAMERA_XCLK_USE_ESP_CLOCK_ROUTER
+#error "This board drives the MIPI-CSI sensor clock from a GPIO — enable CONFIG_CAMERA_XCLK_USE_ESP_CLOCK_ROUTER"
+#endif
+
+static esp_cam_sensor_xclk_handle_t s_xclk_handle;
+
+/* Boards that fit no crystal to the camera module (ESP32-P4-EYE: XCLK on GPIO
+ * 11 at 24 MHz) need the SoC to drive the sensor's input clock *before*
+ * esp_video probes it over SCCB — an unclocked sensor never answers, so
+ * auto-detect fails and the session comes up audio-only. Boards with their own
+ * oscillator define MEDIA_STREAM_MIPI_CSI_XCLK_PIN as -1 and this compiles out. */
+static esp_err_t mipi_csi_xclk_start(void)
+{
+    const esp_cam_sensor_xclk_config_t xclk_config = {
+        .esp_clock_router_cfg = {
+            .xclk_pin     = MEDIA_STREAM_MIPI_CSI_XCLK_PIN,
+            .xclk_freq_hz = MEDIA_STREAM_MIPI_CSI_XCLK_FREQ,
+        },
+    };
+
+    ESP_LOGI(TAG, "MIPI-CSI xclk pin=%d, freq=%d",
+             (int) MEDIA_STREAM_MIPI_CSI_XCLK_PIN, (int) MEDIA_STREAM_MIPI_CSI_XCLK_FREQ);
+
+    esp_err_t ret = esp_cam_sensor_xclk_allocate(ESP_CAM_SENSOR_XCLK_ESP_CLOCK_ROUTER, &s_xclk_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "failed to allocate the sensor xclk: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_cam_sensor_xclk_start(s_xclk_handle, &xclk_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start the sensor xclk: %s", esp_err_to_name(ret));
+        esp_cam_sensor_xclk_free(s_xclk_handle);
+        s_xclk_handle = NULL;
+        return ret;
+    }
+
+    return ESP_OK;
+}
+#endif /* MEDIA_STREAM_MIPI_CSI_XCLK_PIN > 0 */
+
+/* Register the video devices esp_video exposes as /dev/videoN.
+ *
+ * The whole configuration comes out of esp_video_if_cam_sel.h, which picks a
+ * header from src/boards/<board>/ off the bsp_selector choice — so supporting a
+ * new board or camera interface is a header, not a change here. This mirrors
+ * esp_video's own reference implementation
+ * (examples/common_components/example_video_common/example_init_video.c).
+ *
+ * Each interface arm is compiled out unless the board and the esp_video Kconfig
+ * both enable it. On every P4 board shipped in this repo only MIPI-CSI is on,
+ * so this reduces to the CSI-only config it replaced, plus the sensor XCLK. */
+static esp_err_t esp_video_hw_init(void)
+{
+#if CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+    esp_err_t sccb_ret = sccb_i2c_bus_init();
+    if (sccb_ret != ESP_OK) {
+        return sccb_ret;
+    }
+#endif
+
+/* The pin-based CSI config only compiles when Kconfig defines the pins, which it does
+ * only under BSP_SELECT_NONE (Kconfig.projbuild: `if BSP_SELECT_NONE`). With a BSP
+ * selected the board owns power, reset, XCLK and SCCB, and bsp_camera_start() below
+ * performs the bring-up instead. */
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+    const esp_video_init_csi_config_t csi_config = {
+        .sccb_config = {
+#if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+            .init_sccb = true,
+            .i2c_config = {
+                .port    = MEDIA_STREAM_MIPI_CSI_SCCB_I2C_PORT,
+                .scl_pin = MEDIA_STREAM_MIPI_CSI_SCCB_I2C_SCL_PIN,
+                .sda_pin = MEDIA_STREAM_MIPI_CSI_SCCB_I2C_SDA_PIN,
+            },
+#else
+            .init_sccb  = false,
+            .i2c_handle = SCCB_I2C_HANDLE(),
+#endif
+            .freq = MEDIA_STREAM_MIPI_CSI_SCCB_I2C_FREQ,
+        },
+        .reset_pin = MEDIA_STREAM_MIPI_CSI_CAM_SENSOR_RESET_PIN,
+        .pwdn_pin  = MEDIA_STREAM_MIPI_CSI_CAM_SENSOR_PWDN_PIN,
+#if CONFIG_MEDIA_STREAM_MIPI_CSI_VIDEO_DEVICE_DONT_INIT_LDO
+        .dont_init_ldo = true,
+#endif
+    };
+
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR
+    const esp_video_init_cam_motor_config_t cam_motor_config = {
+        .sccb_config = {
+#if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+            .init_sccb = true,
+            .i2c_config = {
+                .port    = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_SCCB_I2C_PORT,
+                .scl_pin = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_SCCB_I2C_SCL_PIN,
+                .sda_pin = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_SCCB_I2C_SDA_PIN,
+            },
+#else
+            .init_sccb  = false,
+            .i2c_handle = SCCB_I2C_HANDLE(),
+#endif
+            .freq = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_SCCB_I2C_FREQ,
+        },
+        .reset_pin  = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_RESET_PIN,
+        .pwdn_pin   = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_PWDN_PIN,
+        .signal_pin = MEDIA_STREAM_MIPI_CSI_CAM_MOTOR_SIGNAL_PIN,
+    };
+#endif /* MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR */
+#endif /* MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR */
+
+#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR
+    const esp_video_init_dvp_config_t dvp_config = {
+        .sccb_config = {
+#if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+            .init_sccb = true,
+            .i2c_config = {
+                .port    = MEDIA_STREAM_DVP_SCCB_I2C_PORT,
+                .scl_pin = MEDIA_STREAM_DVP_SCCB_I2C_SCL_PIN,
+                .sda_pin = MEDIA_STREAM_DVP_SCCB_I2C_SDA_PIN,
+            },
+#else
+            .init_sccb  = false,
+            .i2c_handle = SCCB_I2C_HANDLE(),
+#endif
+            .freq = MEDIA_STREAM_DVP_SCCB_I2C_FREQ,
+        },
+        .reset_pin = MEDIA_STREAM_DVP_CAM_SENSOR_RESET_PIN,
+        .pwdn_pin  = MEDIA_STREAM_DVP_CAM_SENSOR_PWDN_PIN,
+        .dvp_pin = {
+            .data_width = CAM_CTLR_DATA_WIDTH_8,
+            .data_io = {
+                MEDIA_STREAM_DVP_D0_PIN, MEDIA_STREAM_DVP_D1_PIN, MEDIA_STREAM_DVP_D2_PIN, MEDIA_STREAM_DVP_D3_PIN,
+                MEDIA_STREAM_DVP_D4_PIN, MEDIA_STREAM_DVP_D5_PIN, MEDIA_STREAM_DVP_D6_PIN, MEDIA_STREAM_DVP_D7_PIN,
+            },
+            .vsync_io = MEDIA_STREAM_DVP_VSYNC_PIN,
+            .de_io    = MEDIA_STREAM_DVP_DE_PIN,
+            .pclk_io  = MEDIA_STREAM_DVP_PCLK_PIN,
+            .xclk_io  = MEDIA_STREAM_DVP_XCLK_PIN,
+        },
+        .xclk_freq = MEDIA_STREAM_DVP_XCLK_FREQ,
+    };
+#endif /* MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR */
+
+#if MEDIA_STREAM_ENABLE_SPI_CAM_SENSOR
+    const esp_video_init_spi_config_t spi_config[] = {
+        {
+            .sccb_config = {
+#if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+                .init_sccb = true,
+                .i2c_config = {
+                    .port    = MEDIA_STREAM_SPI_CAM_0_SCCB_I2C_PORT,
+                    .scl_pin = MEDIA_STREAM_SPI_CAM_0_SCCB_I2C_SCL_PIN,
+                    .sda_pin = MEDIA_STREAM_SPI_CAM_0_SCCB_I2C_SDA_PIN,
+                },
+#else
+                .init_sccb  = false,
+                .i2c_handle = SCCB_I2C_HANDLE(),
+#endif
+                .freq = MEDIA_STREAM_SPI_CAM_0_SCCB_I2C_FREQ,
+            },
+            .intf    = MEDIA_STREAM_SPI_CAM_0_INTERFACE,
+            .io_mode = MEDIA_STREAM_SPI_CAM_0_IO_MODE,
+
+            .spi_port         = MEDIA_STREAM_SPI_CAM_0_SPI_PORT,
+            .spi_cs_pin       = MEDIA_STREAM_SPI_CAM_0_CS_PIN,
+            .spi_sclk_pin     = MEDIA_STREAM_SPI_CAM_0_SCLK_PIN,
+            .spi_data0_io_pin = MEDIA_STREAM_SPI_CAM_0_DATA0_IO_PIN,
+            .spi_data1_io_pin = MEDIA_STREAM_SPI_CAM_0_DATA1_IO_PIN,
+
+            .reset_pin = MEDIA_STREAM_SPI_CAM_0_SENSOR_RESET_PIN,
+            .pwdn_pin  = MEDIA_STREAM_SPI_CAM_0_SENSOR_PWDN_PIN,
+
+            .xclk_source = MEDIA_STREAM_SPI_CAM_0_XCLK_RESOURCE,
+            .xclk_freq   = MEDIA_STREAM_SPI_CAM_0_XCLK_FREQ,
+            .xclk_pin    = MEDIA_STREAM_SPI_CAM_0_XCLK_PIN,
+            /* Upstream's reference guards this on CONFIG_MEDIA_STREAM_SPI_CAM_XCLK_USE_LEDC,
+             * which no Kconfig defines — the per-camera symbol is the _0_ one, and the
+             * struct member only exists under CONFIG_CAMERA_XCLK_USE_LEDC (which the
+             * Kconfig entry depends on), so both have to hold. */
+#if CONFIG_MEDIA_STREAM_SPI_CAM_0_XCLK_USE_LEDC
+            .xclk_ledc_cfg = {
+                .timer   = MEDIA_STREAM_SPI_CAM_0_XCLK_TIMER,
+                .clk_cfg = LEDC_AUTO_CLK,
+                .channel = MEDIA_STREAM_SPI_CAM_0_XCLK_TIMER_CHANNEL,
+            },
+#endif
+        },
+#if MEDIA_STREAM_ENABLE_SPI_CAM_1_SENSOR
+        {
+            .sccb_config = {
+#if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
+                .init_sccb = true,
+                .i2c_config = {
+                    .port    = MEDIA_STREAM_SPI_CAM_1_SCCB_I2C_PORT,
+                    .scl_pin = MEDIA_STREAM_SPI_CAM_1_SCCB_I2C_SCL_PIN,
+                    .sda_pin = MEDIA_STREAM_SPI_CAM_1_SCCB_I2C_SDA_PIN,
+                },
+#else
+                .init_sccb  = false,
+                .i2c_handle = SCCB_I2C_HANDLE(),
+#endif
+                .freq = MEDIA_STREAM_SPI_CAM_1_SCCB_I2C_FREQ,
+            },
+            .intf    = ESP_CAM_CTLR_SPI_CAM_INTF_SPI,
+            .io_mode = ESP_CAM_CTLR_SPI_CAM_IO_MODE_1BIT,
+
+            .spi_port         = MEDIA_STREAM_SPI_CAM_1_SPI_PORT,
+            .spi_cs_pin       = MEDIA_STREAM_SPI_CAM_1_CS_PIN,
+            .spi_sclk_pin     = MEDIA_STREAM_SPI_CAM_1_SCLK_PIN,
+            .spi_data0_io_pin = MEDIA_STREAM_SPI_CAM_1_DATA0_IO_PIN,
+            .spi_data1_io_pin = MEDIA_STREAM_SPI_CAM_1_DATA1_IO_PIN,
+
+            .reset_pin = MEDIA_STREAM_SPI_CAM_1_SENSOR_RESET_PIN,
+            .pwdn_pin  = MEDIA_STREAM_SPI_CAM_1_SENSOR_PWDN_PIN,
+
+            .xclk_source = MEDIA_STREAM_SPI_CAM_1_XCLK_RESOURCE,
+            .xclk_freq   = MEDIA_STREAM_SPI_CAM_1_XCLK_FREQ,
+            .xclk_pin    = MEDIA_STREAM_SPI_CAM_1_XCLK_PIN,
+#if CONFIG_MEDIA_STREAM_SPI_CAM_1_XCLK_USE_LEDC
+            .xclk_ledc_cfg = {
+                .timer   = MEDIA_STREAM_SPI_CAM_1_XCLK_TIMER,
+                .clk_cfg = LEDC_AUTO_CLK,
+                .channel = MEDIA_STREAM_SPI_CAM_1_XCLK_TIMER_CHANNEL,
+            },
+#endif
+        },
+#endif /* MEDIA_STREAM_ENABLE_SPI_CAM_1_SENSOR */
+    };
+#endif /* MEDIA_STREAM_ENABLE_SPI_CAM_SENSOR */
+
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+    const esp_video_init_usb_uvc_config_t usb_uvc_config = {
+        .uvc = {
+            .uvc_dev_num   = CONFIG_MEDIA_STREAM_USB_UVC_DEVICES_NUM,
+            .task_stack    = CONFIG_MEDIA_STREAM_USB_UVC_TASK_STACK_SIZE,
+            .task_priority = CONFIG_MEDIA_STREAM_USB_UVC_TASK_PRIORITY,
+            .task_affinity = CONFIG_MEDIA_STREAM_USB_UVC_TASK_AFFINITY,
+        },
+        .usb = {
+            .init_usb_host_lib = true,
+            .peripheral_map    = CONFIG_MEDIA_STREAM_USB_PERIPHERAL_MAP,
+            .task_stack        = CONFIG_MEDIA_STREAM_USB_LIB_TASK_STACK_SIZE,
+            .task_priority     = CONFIG_MEDIA_STREAM_USB_LIB_TASK_PRIORITY,
+            .task_affinity     = CONFIG_MEDIA_STREAM_USB_LIB_TASK_AFFINITY,
+        },
+    };
+#endif /* MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR */
+
+    const esp_video_init_config_t cam_config = {
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+        .csi = &csi_config,
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR
+        .cam_motor = &cam_motor_config,
+#endif
+#endif
+#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR
+        .dvp = &dvp_config,
+#endif
+#if MEDIA_STREAM_ENABLE_SPI_CAM_SENSOR
+        .spi = spi_config,
+#endif
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+        .usb_uvc = &usb_uvc_config,
+#endif
+    };
+
+#if defined(MEDIA_STREAM_MIPI_CSI_XCLK_PIN) && MEDIA_STREAM_MIPI_CSI_XCLK_PIN > 0
+    esp_err_t xclk_ret = mipi_csi_xclk_start();
+    if (xclk_ret != ESP_OK) {
+        return xclk_ret;
+    }
+#endif
+
+    /* Mark registered before the call: esp_video_init() registers the ISP
+     * device even when it then fails to detect the sensor, and that can't
+     * be undone — so a retry must never call it again. */
+    s_esp_video_registered = true;
+
+#if !CONFIG_BSP_SELECT_NONE && !MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+    /* BSP path: the selected board's BSP owns the camera pins, power and XCLK and
+     * registers the CSI sensor with esp_video itself. Boards whose camera enable sits
+     * behind an I2C IO expander (M5Stack Tab5) or a power switch (P4-EYE) only come up
+     * through that sequencing, so the generic pin-based init below cannot replace it.
+     * UVC needs the generic path: there is no BSP camera to start. */
+    esp_err_t ret = bsp_camera_start(NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_camera_start failed: %s", esp_err_to_name(ret));
+    }
+#else
+    esp_err_t ret = esp_video_init(&cam_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize video: %s", esp_err_to_name(ret));
+#if defined(MEDIA_STREAM_MIPI_CSI_XCLK_PIN) && MEDIA_STREAM_MIPI_CSI_XCLK_PIN > 0
+        esp_cam_sensor_xclk_stop(s_xclk_handle);
+        esp_cam_sensor_xclk_free(s_xclk_handle);
+        s_xclk_handle = NULL;
+#endif
+        return ret;
+    }
+#endif /* BSP vs generic camera bring-up */
+
+    return ESP_OK;
+}
+
+#if CONFIG_ESP_VIDEO_IF_VERBOSE_DRIVER_LOGS
+/* Raise the capture stack's own logging.
+ *
+ * Almost every frame-drop path below us is ESP_LOGD or silent: esp_video
+ * reports UVC frame-buffer overflow/underflow at DEBUG, and the USB-UVC host
+ * stack rejects malformed ISOC payload headers at DEBUG and drops skipped or
+ * timed-out packets with no log at all. A camera that delivers zero frames is
+ * therefore indistinguishable in a default-level log from one that was never
+ * started, so raise the tags rather than guess. */
+static void enable_verbose_driver_logs(void)
+{
+    static const char *const tags[] = {
+        "esp_video",        /* generic buffer/stream layer */
+        "usb_uvc_device",   /* esp_video's UVC capture device: frame over/underflow */
+        "uvc",              /* usb_host_uvc: stream open/negotiation, alt switches */
+        "uvc-frame",
+        "uvc-control",
+    };
+
+    for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++) {
+        esp_log_level_set(tags[i], ESP_LOG_DEBUG);
+    }
+
+    /* uvc-isoc logs once per isochronous packet at DEBUG — 8000 lines/second on
+     * a high-speed endpoint, which buries every app-level message and is slow
+     * enough to perturb the timing it is meant to observe. INFO keeps the
+     * once-per-second packet/frame counter and the warnings ("usb err",
+     * "frame error", "missed EoF") while dropping the per-packet spam. Raise it
+     * to DEBUG by hand when individual payload headers are genuinely needed. */
+    esp_log_level_set("uvc-isoc", ESP_LOG_INFO);
+
+#if !defined(CONFIG_LOG_MAXIMUM_LEVEL) || CONFIG_LOG_MAXIMUM_LEVEL < 4
+    ESP_LOGW(TAG, "verbose driver logs requested but DEBUG statements are compiled out; "
+                  "set CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y");
+#endif
+}
+#endif /* CONFIG_ESP_VIDEO_IF_VERBOSE_DRIVER_LOGS */
+
 esp_err_t esp_video_if_init(void)
 {
+#if CONFIG_ESP_VIDEO_IF_VERBOSE_DRIVER_LOGS
+    enable_verbose_driver_logs();
+#endif
+
     if (g_v4l2) {
         ESP_LOGD(TAG, "video interface already initialized, restarting streaming");
         return esp_video_if_start();
@@ -790,53 +1419,7 @@ esp_err_t esp_video_if_init(void)
     // been registered". A flag is more reliable than probing /dev/video0, which
     // is absent when a prior attempt registered the ISP but failed sensor detect.
     if (!s_esp_video_registered) {
-        /* media_stream_init() already brought the BSP I2C bus up; bsp_i2c_init()
-         * itself is idempotent, so call it again defensively in case this path
-         * is reached without media_stream_init() running first. */
-        /* Mark registered before the call: esp_video_init() (called directly
-         * below or inside bsp_camera_start()) registers the ISP device even when
-         * it then fails to detect the sensor, and that can't be undone — so a
-         * retry must never register again. */
-        s_esp_video_registered = true;
-
-#if CONFIG_BSP_SELECT_NONE
-        /* No BSP selected: bring the CSI sensor up directly using the pins from
-         * the customized board header (boards/customized/). */
-        esp_err_t i2c_ret = bsp_i2c_init();
-        if (i2c_ret != ESP_OK) {
-            ESP_LOGE(TAG, "bsp_i2c_init failed: %s", esp_err_to_name(i2c_ret));
-            free(v4l2);
-            return ESP_FAIL;
-        }
-
-        i2c_master_bus_handle_t i2c_handle = bsp_i2c_get_handle();
-
-        esp_video_init_csi_config_t csi_config[] = {
-            {
-                .sccb_config = {
-                    .init_sccb = false,
-                    .i2c_handle = i2c_handle,
-                    .freq = EXAMPLE_MIPI_CSI_SCCB_I2C_FREQ,
-                },
-                .reset_pin = EXAMPLE_MIPI_CSI_CAM_SENSOR_RESET_PIN,
-                .pwdn_pin  = EXAMPLE_MIPI_CSI_CAM_SENSOR_PWDN_PIN,
-            },
-        };
-
-        esp_video_init_config_t cam_config = {
-            .csi      = csi_config,
-        };
-
-        esp_err_t video_init_ret = esp_video_init(&cam_config);
-#else
-        /* BSP path: the selected board's BSP owns the camera pins, power and
-         * XCLK and registers the CSI sensor with esp_video. New BSP-backed
-         * boards (e.g. M5Stack Tab5, whose camera-enable is behind an I2C IO
-         * expander) work here with no media_stream change. */
-        esp_err_t video_init_ret = bsp_camera_start(NULL);
-#endif
-        if (video_init_ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to initialize video: %s", esp_err_to_name(video_init_ret));
+        if (esp_video_hw_init() != ESP_OK) {
             free(v4l2);
             return ESP_FAIL;
         }
@@ -878,6 +1461,21 @@ esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution)
     return ESP_OK;
 }
 
+esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat)
+{
+    if (!pixelformat) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!g_v4l2 || g_current_resolution.width == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    *pixelformat = g_current_pixelformat;
+    return ESP_OK;
+}
+
+
 esp_err_t esp_video_if_set_desired_resolution(const video_resolution_t *resolution)
 {
     if (!resolution) {
@@ -909,6 +1507,7 @@ esp_err_t esp_video_if_cleanup(void)
     heap_caps_free(g_v4l2);
     g_v4l2 = NULL;
 
+    g_current_pixelformat = 0;
     g_current_resolution.width = 0;
     g_current_resolution.height = 0;
     g_current_resolution.fps = 0;

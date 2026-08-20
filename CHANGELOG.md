@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Camera interface selection** — `media_stream` can bring up MIPI-CSI, DVP,
   SPI or USB-UVC cameras, chosen in menuconfig. BSP boards still go through
   `bsp_camera_start()`.
+- **UVC H.264 passthrough** on ESP32-P4 — a UVC camera's own H.264 is sent
+  without re-encoding (`CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264`).
 
 ### Changed
 

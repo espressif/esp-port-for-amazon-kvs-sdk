@@ -7,6 +7,12 @@
 #include "sdkconfig.h"
 
 #if CONFIG_IDF_TARGET_ESP32P4
+
+/* Inside the target guard: linux/videodev2.h comes from esp_video, which only exists
+ * for the P4, and this file is expected to compile to an empty object elsewhere. */
+#include "H264FrameGrabber.h"
+#include "linux/videodev2.h"
+
 #if CONFIG_USE_ESP_VIDEO_IF
 #define USE_ESP_VIDEO_IF 1
 #endif
@@ -23,6 +29,7 @@
 
 #include "esp_dma_utils.h"
 #include "video_rate_ctrl.h"
+#include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR selection */
 
 #include "bsp/esp-bsp.h"
 #if !USE_ESP_VIDEO_IF
@@ -51,6 +58,159 @@
 static const char *TAG = "esp32p4_frame_grabber";
 #define H264_ENCODE     1
 // #define SDCARD_SAVE     1
+
+/* Annex-B helpers for camera-supplied H.264 (UVC passthrough).
+ *
+ * The camera emits SPS/PPS only every few seconds, so a viewer that joins in
+ * between has nothing to initialise its decoder with and shows a black frame even
+ * though RTP is flowing. Cache the parameter sets and prepend them to every IDR. */
+#define H264_PS_MAX 128
+
+static uint8_t s_sps[H264_PS_MAX], s_pps[H264_PS_MAX];
+static uint32_t s_sps_len, s_pps_len;
+
+/* Parameter sets describe one specific format/resolution, so they must not outlive it:
+ * a stale SPS prepended after a resolution change tells the viewer the wrong geometry. */
+/* True while the encoder task sits blocked on its run semaphore holding no capture
+ * buffer. esp32p4_frame_grabber_stop() waits for this before returning so that whoever
+ * tears the capture buffers down next cannot unmap memory the task is still reading. */
+static volatile bool s_task_parked = true;
+
+
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+/* YUY2 -> O_UYY_E_VYY, the only raw layout the P4 hardware encoder accepts.
+ *
+ * Both formats carry one chroma pair per two pixels, so this is a repack rather than a
+ * resample: YUY2 stores Y0 U Y1 V, and the encoder wants U,Y0,Y1 on odd lines and
+ * V,Y0,Y1 on even lines. Dropping the unused chroma of each line is what turns 4:2:2
+ * into the encoder's 4:2:0-equivalent input. */
+static void yuy2_to_o_uyy_e_vyy(const uint8_t *src, uint8_t *dst, uint32_t width, uint32_t height)
+{
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *s = src + (size_t) y * width * 2;
+        uint8_t *d = dst + (size_t) y * width * 3 / 2;
+        const bool odd_line = ((y & 1u) == 0u);   /* line 0 is the first "odd" line */
+
+        for (uint32_t x = 0; x < width; x += 2) {
+            const uint8_t y0 = s[0];
+            const uint8_t u  = s[1];
+            const uint8_t y1 = s[2];
+            const uint8_t v  = s[3];
+            s += 4;
+
+            *d++ = odd_line ? u : v;
+            *d++ = y0;
+            *d++ = y1;
+        }
+    }
+}
+#endif
+
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+static uint8_t *s_conv_buf;
+static size_t s_conv_buf_len;
+#endif
+
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+static int64_t s_last_key_frame_us;
+static bool s_key_frame_ctrl_supported = true;
+#endif
+
+/* Camera bring-up can miss a transient window (USB enumeration in particular). */
+#define CAMERA_INIT_MAX_ATTEMPTS     3
+#define CAMERA_INIT_RETRY_DELAY_MS   500
+
+/* Set while the pipeline waits for a key frame to resync on (see the encoder task). */
+static volatile bool s_wait_for_idr = true;
+static uint32_t s_resync_dropped;
+
+static void h264_forget_parameter_sets(void)
+{
+    s_sps_len = 0;
+    s_pps_len = 0;
+}
+
+typedef struct {
+    bool has_idr;
+    bool has_sps;
+    bool has_pps;
+} h264_au_info_t;
+
+static void h264_scan_au(const uint8_t *buf, uint32_t len, h264_au_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+
+    for (uint32_t i = 0; i + 4 < len; i++) {
+        if (buf[i] != 0x00 || buf[i + 1] != 0x00) {
+            continue;
+        }
+        uint32_t sc_len;
+        if (buf[i + 2] == 0x01) {
+            sc_len = 3;
+        } else if (buf[i + 2] == 0x00 && buf[i + 3] == 0x01) {
+            sc_len = 4;
+        } else {
+            continue;
+        }
+        const uint32_t nal_off = i + sc_len;
+        if (nal_off >= len) {
+            break;
+        }
+        const uint8_t nal_type = buf[nal_off] & 0x1f;
+
+        /* Find the next start code so parameter sets can be cached whole. */
+        uint32_t next = len;
+        for (uint32_t j = nal_off + 1; j + 3 < len; j++) {
+            if (buf[j] == 0x00 && buf[j + 1] == 0x00 &&
+                    (buf[j + 2] == 0x01 || (buf[j + 2] == 0x00 && buf[j + 3] == 0x01))) {
+                next = j;
+                break;
+            }
+        }
+
+        switch (nal_type) {
+        case 5:
+            info->has_idr = true;
+            break;
+        case 7: {
+            info->has_sps = true;
+            const uint32_t nal_len = next - i;
+            if (nal_len > H264_PS_MAX) {
+                ESP_LOGW(TAG, "SPS of %" PRIu32 " bytes exceeds the %d-byte cache; joining viewers"
+                              " will wait for the camera to resend it", nal_len, H264_PS_MAX);
+            } else {
+                memcpy(s_sps, buf + i, nal_len);
+                s_sps_len = nal_len;
+                /* profile_idc / level_idc sit right after the NAL header. */
+                if (nal_off + 3 < len) {
+                    static uint8_t logged_profile, logged_level;
+                    if (logged_profile != buf[nal_off + 1] || logged_level != buf[nal_off + 3]) {
+                        logged_profile = buf[nal_off + 1];
+                        logged_level = buf[nal_off + 3];
+                        ESP_LOGW(TAG, "camera H.264 SPS: profile_idc=0x%02x level_idc=0x%02x (profile-level-id %02x%02x%02x)",
+                                 logged_profile, logged_level, logged_profile, buf[nal_off + 2], logged_level);
+                    }
+                }
+            }
+            break;
+        }
+        case 8: {
+            info->has_pps = true;
+            const uint32_t nal_len = next - i;
+            if (nal_len > H264_PS_MAX) {
+                ESP_LOGW(TAG, "PPS of %" PRIu32 " bytes exceeds the %d-byte cache", nal_len, H264_PS_MAX);
+            } else {
+                memcpy(s_pps, buf + i, nal_len);
+                s_pps_len = nal_len;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        i = nal_off;
+    }
+}
 
 #if H264_ENCODE
 #include "esp_h264_hw_enc.h"
@@ -121,6 +281,9 @@ static esp_err_t camera_init(void)
 #if H264_ENCODE
 
 // Data read callback to read raw data
+
+
+
 static void data_read_callback(void *ctx, esp_h264_buf_t *in_data)
 {
     if (jpeg_next_buf != jpeg_last_buf) {
@@ -144,7 +307,7 @@ static void data_write_callback(void *ctx, esp_h264_out_buf_t *out_data)
 
 #if SDCARD_SAVE
     if (f264) {
-        esp_cache_msync(out_data->buffer, out_data->len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+        esp_cache_msync(out_data->buffer, (out_data->len + 63) & ~63U, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
         int wr_len = fwrite(out_data->buffer, 1, out_data->len, f264);
         if (wr_len != out_data->len) {
             ESP_LOGW(TAG, "expected wr: %" PRIu32 " actual: %d", out_data->len, wr_len);
@@ -294,8 +457,12 @@ static void video_encoder_task(void *arg)
         // Check if encoding should be running
         if (!s_p4_enc_data.running) {
             ESP_LOGD(TAG, "Video encoder paused, waiting for start signal...");
+            /* Published before blocking: it tells esp32p4_frame_grabber_stop() that no
+             * capture buffer is held any more, so the caller may unmap them. */
+            s_task_parked = true;
             // Wait for start signal (blocking)
             xSemaphoreTake(s_p4_enc_data.run_semaphore, portMAX_DELAY);
+            s_task_parked = false;
             ESP_LOGD(TAG, "Video encoder resumed");
         }
 
@@ -315,8 +482,16 @@ static void video_encoder_task(void *arg)
             continue;
         }
 
+        /* What the camera actually hands us decides everything below: a UVC camera
+         * delivering H.264 gives a compressed access unit, not a YUV420 surface. */
+        uint32_t capture_pixfmt = 0;
+        const bool is_passthrough = (esp_video_if_get_pixel_format(&capture_pixfmt) == ESP_OK &&
+                                     capture_pixfmt == V4L2_PIX_FMT_H264);
+
         // Snapshot interceptor: if a snapshot is requested, copy the raw frame
-        if (s_snapshot.requested && s_snapshot.buffer) {
+        /* Not for passthrough: consumers expect a raw surface of w*h*3/2 and would
+         * read a compressed buffer as YUV420. */
+        if (!is_passthrough && s_snapshot.requested && s_snapshot.buffer) {
             video_resolution_t snap_res = {0};
             esp_video_if_get_resolution(&snap_res);
 
@@ -334,8 +509,8 @@ static void video_encoder_task(void *arg)
             }
         }
 
-        // This assumes frame is YUV420
-        if (frame_preprocess_fn)
+        // This assumes frame is YUV420, so it cannot run on a passthrough (H.264) buffer
+        if (!is_passthrough && frame_preprocess_fn)
         {
             video_resolution_t resolution;
             esp_err_t err = esp_video_if_get_resolution(&resolution);
@@ -352,23 +527,95 @@ static void video_encoder_task(void *arg)
             }
         }
 
-        /* Congestion control stage 2: apply any pending encoder bitrate
-         * change requested by the rate controller. */
-        uint32_t new_bitrate = video_rate_ctrl_pull_bitrate_bps();
-        if (new_bitrate) {
-            esp_h264_hw_enc_set_bitrate(new_bitrate);
-        }
-
-        /* Congestion control stage 1: skip this frame to lower effective
-         * fps (snapshot + preprocess above still ran). Releasing without
-         * encoding saves both encoder CPU and uplink bandwidth. */
-        if (!video_rate_ctrl_should_encode()) {
+        /* Both congestion-control stages assume we own the encoder, which is not the
+         * case when the camera hands us H.264 directly: its bitrate is not ours to set,
+         * and dropping individual frames from a compressed stream breaks the reference
+         * chain, so every skip would cost a full GOP of resync. Leave the passthrough
+         * stream alone and let the queue and IDR resync absorb congestion. */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+        /* No encoder exists in this build; start() already refuses a raw format, this
+         * only covers a format change behind its back. */
+        if (!is_passthrough) {
             esp_video_if_release_frame(raw_frame);
             continue;
         }
+#endif
 
-        // Encode the raw frame
-        esp_h264_out_buf_t *frame = esp_h264_hw_enc_encode_frame(raw_frame->buf, raw_frame->len);
+        if (!is_passthrough) {
+            /* Congestion control stage 2: apply any pending encoder bitrate
+             * change requested by the rate controller. */
+            uint32_t new_bitrate = video_rate_ctrl_pull_bitrate_bps();
+            if (new_bitrate) {
+                esp_h264_hw_enc_set_bitrate(new_bitrate);
+            }
+
+            /* Congestion control stage 1: skip this frame to lower effective
+             * fps (snapshot + preprocess above still ran). Releasing without
+             * encoding saves both encoder CPU and uplink bandwidth. */
+            if (!video_rate_ctrl_should_encode()) {
+                esp_video_if_release_frame(raw_frame);
+                continue;
+            }
+        }
+
+        // Encode the raw frame, or pass it through if the camera already encoded it
+        esp_h264_out_buf_t *frame = NULL;
+        {
+            if (!is_passthrough) {
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+                /* A UVC camera delivers YUY2; the hardware encoder only takes
+                 * O_UYY_E_VYY, so repack before handing it over. */
+                video_resolution_t enc_res = {0};
+                if (esp_video_if_get_resolution(&enc_res) == ESP_OK && enc_res.width && enc_res.height) {
+                    const size_t need = (size_t) enc_res.width * enc_res.height * 3 / 2;
+                    if (s_conv_buf_len < need) {
+                        if (s_conv_buf) {
+                            heap_caps_free(s_conv_buf);
+                        }
+                        s_conv_buf = heap_caps_aligned_calloc(64, 1, need, MALLOC_CAP_SPIRAM);
+                        s_conv_buf_len = s_conv_buf ? need : 0;
+                    }
+                    if (s_conv_buf) {
+                        yuy2_to_o_uyy_e_vyy(raw_frame->buf, s_conv_buf, enc_res.width, enc_res.height);
+                        frame = esp_h264_hw_enc_encode_frame(s_conv_buf, need);
+                    }
+                }
+#else
+                frame = esp_h264_hw_enc_encode_frame(raw_frame->buf, raw_frame->len);
+#endif
+            } else {
+                /* Camera already delivers H.264: pass it through. */
+                frame = heap_caps_aligned_calloc(64, 1, sizeof(esp_h264_out_buf_t), MALLOC_CAP_SPIRAM);
+                if (frame != NULL) {
+                    h264_au_info_t au;
+                    h264_scan_au(raw_frame->buf, raw_frame->len, &au);
+
+                    /* A keyframe without parameter sets is undecodable for a viewer
+                     * that joined after the camera last sent them, so prepend the
+                     * cached copies. */
+                    const bool prepend_ps = (au.has_idr && (!au.has_sps || !au.has_pps) &&
+                                             s_sps_len && s_pps_len);
+                    const uint32_t ps_len = prepend_ps ? (s_sps_len + s_pps_len) : 0;
+
+                    frame->buffer = heap_caps_aligned_calloc(64, 1, ps_len + raw_frame->len, MALLOC_CAP_SPIRAM);
+                    if (frame->buffer == NULL) {
+                        heap_caps_free(frame);
+                        frame = NULL;
+                    } else {
+                        if (prepend_ps) {
+                            memcpy(frame->buffer, s_sps, s_sps_len);
+                            memcpy(frame->buffer + s_sps_len, s_pps, s_pps_len);
+                        }
+                        memcpy(frame->buffer + ps_len, raw_frame->buf, raw_frame->len);
+                        frame->len = ps_len + raw_frame->len;
+                        /* Classify from the bitstream: the RTP packetizer uses this for
+                         * IDR handling, and marking every frame IDR leaves joining
+                         * viewers without parameter sets. */
+                        frame->type = au.has_idr ? ESP_H264_FRAME_TYPE_IDR : ESP_H264_FRAME_TYPE_P;
+                    }
+                }
+            }
+        }
 
         // Release the raw frame as we're done with it
         esp_video_if_release_frame(raw_frame);
@@ -433,10 +680,59 @@ static void video_encoder_task(void *arg)
         frame->type = h264_out_data.type;
 #endif
         bool queue_full = false;
+
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+        /* Bound the key-frame interval ourselves. The camera's own is multi-second (~12 s
+         * measured), and since a key frame is the largest frame it is also the least
+         * likely to survive a lossy uplink intact - so a viewer can wait a very long time
+         * for something decodable. Asking on a timer keeps parameter sets and IDRs
+         * flowing often enough to recover. */
+        if (frame->type == ESP_H264_FRAME_TYPE_IDR) {
+            s_last_key_frame_us = esp_timer_get_time();
+        } else if (s_key_frame_ctrl_supported &&
+                   CONFIG_MEDIA_STREAM_UVC_KEY_FRAME_INTERVAL_MS > 0 &&
+                   (esp_timer_get_time() - s_last_key_frame_us) >
+                   (int64_t) CONFIG_MEDIA_STREAM_UVC_KEY_FRAME_INTERVAL_MS * 1000) {
+            extern esp_err_t esp_video_uvc_request_key_frame(void);
+            const esp_err_t kf_ret = esp_video_uvc_request_key_frame();
+            if (kf_ret != ESP_OK) {
+                /* Cameras that do not implement the control STALL EP0 on every attempt,
+                 * so ask once and then stop rather than hammering the control endpoint. */
+                ESP_LOGW(TAG, "camera does not support on-demand key frames (%s); "
+                              "recovery stays bounded by its own GOP", esp_err_to_name(kf_ret));
+                s_key_frame_ctrl_supported = false;
+            }
+            if (kf_ret == ESP_OK) {
+                /* Reset now, not on arrival: the camera takes a few frames to comply and
+                 * we must not ask again on every frame in between. */
+                s_last_key_frame_us = esp_timer_get_time();
+            }
+        }
+#endif
+
+        /* A P-frame that references a frame the viewer never got decodes to garbage,
+         * so once anything is dropped we resync on the next IDR. Re-armed per session by
+         * esp32p4_frame_grabber_start(), so the first frame handed downstream is an IDR. */
+        if (s_wait_for_idr) {
+            if (frame->type != ESP_H264_FRAME_TYPE_IDR) {
+                s_resync_dropped++;
+                if ((s_resync_dropped % 30u) == 1u) {
+                    ESP_LOGW(TAG, "waiting for IDR to resync, dropped %" PRIu32 " frame(s)", s_resync_dropped);
+                }
+                free(frame->buffer);
+                free(frame);
+                continue;
+            }
+            ESP_LOGI(TAG, "resynced on IDR after %" PRIu32 " dropped frame(s)", s_resync_dropped);
+            s_resync_dropped = 0;
+            s_wait_for_idr = false;
+        }
+
         if (xQueueSend(s_p4_enc_data.frame_queue, frame, pdMS_TO_TICKS(QUEUE_SEND_WAIT_MS)) != pdTRUE) {
             free(frame->buffer);
             vTaskDelay(pdMS_TO_TICKS(10));
             queue_full = true;
+            s_wait_for_idr = true;   /* resync: the stream now has a hole */
         }
         free(frame);
 
@@ -498,9 +794,27 @@ void esp32p4_frame_grabber_init(video_frame_preprocess_fn_t frame_preprocess_fn)
         goto cleanup;
     }
 #if USE_ESP_VIDEO_IF
-    esp_err_t ret = esp_video_if_init();
+    /* Retry: a USB camera may not have finished enumerating when the first session
+     * starts (the UVC device waits ~10 s for it, then open() returns ENODEV). Failing
+     * outright here kills the whole session for what is often a transient miss. */
+    esp_err_t ret = ESP_FAIL;
+    for (int attempt = 1; attempt <= CAMERA_INIT_MAX_ATTEMPTS; attempt++) {
+        ret = esp_video_if_init();
+        if (ret == ESP_OK) {
+            if (attempt > 1) {
+                ESP_LOGW(TAG, "video interface initialized on attempt %d", attempt);
+            }
+            break;
+        }
+        ESP_LOGW(TAG, "video interface init attempt %d/%d failed: %s",
+                 attempt, CAMERA_INIT_MAX_ATTEMPTS, esp_err_to_name(ret));
+        if (attempt < CAMERA_INIT_MAX_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(CAMERA_INIT_RETRY_DELAY_MS));
+        }
+    }
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize video interface");
+        ESP_LOGE(TAG, "Failed to initialize video interface after %d attempts",
+                 CAMERA_INIT_MAX_ATTEMPTS);
         goto cleanup;
     }
     ESP_LOGD(TAG, "video interface initialized");
@@ -590,6 +904,18 @@ void esp32p4_frame_grabber_init(video_frame_preprocess_fn_t frame_preprocess_fn)
     cfg.write_cb = &data_write_callback,
 #endif
 
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+    /* The camera encodes for us, so neither the hardware encoder nor the rate
+     * controller has anything to do: setting the encoder up would open the H.264
+     * hardware and reserve a w*h*1.5 PSRAM output buffer (~3 MB at 1080p) that is never
+     * written, and the controller can only throttle by dropping frames, which breaks a
+     * compressed stream's reference chain.
+     *
+     * Consequence worth knowing: the PLI -> force-IDR path lives in that encoder, so a
+     * viewer's PLI cannot shorten the wait for a key frame here - recovery is bounded by
+     * the camera's own GOP until the driver exposes UVC encoding-unit controls. */
+    ESP_LOGI(TAG, "UVC passthrough: hardware encoder and rate control stay idle");
+#else
     esp_h264_setup_encoder(&cfg);
 
     /* Congestion-adaptive rate control: fps-first degradation (floor 12),
@@ -597,6 +923,7 @@ void esp32p4_frame_grabber_init(video_frame_preprocess_fn_t frame_preprocess_fn)
      * from kvs_media. */
     video_rate_ctrl_init(cfg.enc_cfg.fps, cfg.enc_cfg.rc.bitrate,
                          cfg.enc_cfg.res.width, cfg.enc_cfg.res.height);
+#endif
 
 #define ENC_TASK_STACK_SIZE     (5 * 1024)
 #define ENC_TASK_PRIO           CONFIG_VIDEO_ENCODER_TASK_PRIORITY
@@ -655,10 +982,27 @@ esp_err_t esp32p4_frame_grabber_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    /* Each session starts from a key frame, and the previous session's parameter sets
+     * may describe a different format. */
+    s_wait_for_idr = true;
+    s_resync_dropped = 0;
+    h264_forget_parameter_sets();
+
     if (s_p4_enc_data.running) {
         ESP_LOGD(TAG, "ESP32P4 frame grabber already running");
         return ESP_OK;
     }
+
+#if USE_ESP_VIDEO_IF && MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+    /* A passthrough build never sets up the encoder, but the format fallback list can
+     * still land on a raw format. Refuse here rather than crash on the first frame. */
+    uint32_t pixfmt = 0;
+    if (esp_video_if_get_pixel_format(&pixfmt) != ESP_OK || pixfmt != V4L2_PIX_FMT_H264) {
+        ESP_LOGE(TAG, "UVC passthrough needs H.264 but the camera negotiated 0x%08" PRIx32
+                 "; disable MEDIA_STREAM_UVC_PASSTHROUGH_H264 to encode locally", pixfmt);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+#endif
 
     s_p4_enc_data.running = true;
     xSemaphoreGive(s_p4_enc_data.run_semaphore);  // Signal encoder to start
@@ -680,6 +1024,24 @@ esp_err_t esp32p4_frame_grabber_stop(void)
     }
 
     s_p4_enc_data.running = false;
+
+    /* Wait for the task to park for longer that one DQBUF. Without this, stop() can return
+     * while the task is still mid-DQBUF or holding a raw frame, and a caller that then releases
+     * the capture buffers (the UVC re-init path does) unmaps memory still in use. */
+#if USE_ESP_VIDEO_IF
+    const int park_timeout_ms = CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS > 0
+                                ? CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS + 500 : 1000;
+#else
+    const int park_timeout_ms = 1000;
+#endif
+    for (int waited = 0; !s_task_parked && waited < park_timeout_ms; waited += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!s_task_parked) {
+        ESP_LOGW(TAG, "encoder task did not park within %d ms; capture buffers stay mapped",
+                 park_timeout_ms);
+    }
+
     ESP_LOGD(TAG, "ESP32P4 frame grabber stopped");
 
     return ESP_OK;
@@ -720,6 +1082,15 @@ esp_err_t esp32p4_frame_grabber_deinit(void)
 
     // Singleton pattern: encoder task remains running but paused
     ESP_LOGD(TAG, "ESP32P4 frame grabber is singleton - task remains paused until start() is called");
+
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+    /* Only once the task has parked; stop() may have timed out with it still converting. */
+    if (s_conv_buf && s_task_parked) {
+        heap_caps_free(s_conv_buf);
+        s_conv_buf = NULL;
+        s_conv_buf_len = 0;
+    }
+#endif
 
 #if USE_ESP_VIDEO_IF
     esp_video_if_deinit();
