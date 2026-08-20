@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -80,6 +81,18 @@ typedef struct {
         frame_preprocess_fn;    /* Callback to preprocess raw frame */
     void *codec_specific;       /* Codec-specific parameters if needed */
 } video_capture_config_t;
+
+/**
+ * @brief Get the resolution the capture pipeline is currently running at
+ *
+ * Reflects what the camera actually negotiated, which can differ from the requested
+ * resolution when the sensor or UVC camera rejects it. Needed by consumers that must
+ * describe the stream to a peer (for example choosing an H.264 level for SDP).
+ *
+ * @param[out] resolution Filled in on success
+ * @return ESP_OK, or ESP_ERR_INVALID_STATE if capture has not started yet
+ */
+esp_err_t video_capture_get_active_resolution(video_resolution_t *resolution);
 
 /**
  * @brief Video frame buffer structure
