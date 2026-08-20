@@ -967,7 +967,12 @@ esp_err_t esp_video_if_start(void)
      * to change it - the camera measured here holds ~3 Mbps at every resolution from
      * 320x240 to 1080p - so on a constrained link most frames lose a packet and the
      * viewer's jitter buffer discards them. Prefer the raw path below unless the link is
-     * known to be fat. */
+     * known to be fat.
+     *
+     * Against stock registry components this is the whole story on esp32p4: no camera-side
+     * bitrate or key-frame period, no on-demand key frames, and a camera that never sets
+     * the EoF payload flag delivers no frames at all. See the limitations section in the
+     * MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR help text. */
     uint32_t capture_fmt = V4L2_PIX_FMT_H264;
 #else
     /* Capture raw and encode locally, so bitrate, GOP length and PLI-driven keyframes
@@ -1281,6 +1286,12 @@ static esp_err_t esp_video_hw_init(void)
 #endif /* MEDIA_STREAM_ENABLE_SPI_CAM_SENSOR */
 
 #if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+#if CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE < 4096
+#error "Set CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=4096: a UVC configuration descriptor \
+enumerates every format, frame size and frame interval, so it runs past the default and \
+enumeration fails with \"Configuration descriptor larger than control transfer max length\"."
+#endif
+
     const esp_video_init_usb_uvc_config_t usb_uvc_config = {
         .uvc = {
             .uvc_dev_num   = CONFIG_MEDIA_STREAM_USB_UVC_DEVICES_NUM,
@@ -1475,6 +1486,24 @@ esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat)
     return ESP_OK;
 }
 
+
+esp_err_t esp_video_if_get_expected_resolution(video_resolution_t *resolution)
+{
+    if (!resolution) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The first entry configure_camera_format() will try. */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+    resolution->width = 320;
+    resolution->height = 240;
+#else
+    resolution->width = g_desired_resolution.width ? g_desired_resolution.width : MEDIA_STREAM_CAPTURE_WIDTH;
+    resolution->height = g_desired_resolution.height ? g_desired_resolution.height : MEDIA_STREAM_CAPTURE_HEIGHT;
+#endif
+    resolution->fps = g_desired_resolution.fps ? g_desired_resolution.fps : 30;
+    return ESP_OK;
+}
 
 esp_err_t esp_video_if_set_desired_resolution(const video_resolution_t *resolution)
 {

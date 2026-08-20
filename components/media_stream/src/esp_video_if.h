@@ -101,6 +101,17 @@ esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution);
 esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat);
 
 /**
+ * @brief Get the resolution capture will first ask the camera for
+ *
+ * Usable before capture starts. The camera may still settle on a fallback, so prefer
+ * esp_video_if_get_resolution() once it is running.
+ *
+ * @param resolution Pointer to store the expected resolution
+ * @return ESP_OK, or ESP_ERR_INVALID_ARG if resolution is NULL
+ */
+esp_err_t esp_video_if_get_expected_resolution(video_resolution_t *resolution);
+
+/**
  * @brief Set desired resolution before init (called by video_capture_adapter)
  *
  * @param resolution Desired resolution (width, height, fps). Use 0 for width/height to use defaults.

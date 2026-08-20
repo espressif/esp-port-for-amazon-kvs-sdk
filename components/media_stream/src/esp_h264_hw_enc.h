@@ -8,6 +8,7 @@
 
 #include "H264FrameGrabber.h"
 #include "esp_h264_types.h"
+#include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR */
 
 #define WIDTH               (1920)
 #define HEIGHT              (1080)
@@ -23,6 +24,11 @@ typedef void data_read_cb_t(void *ctx, esp_h264_buf_t *in_data);
 // Data write callback to output encoded frames
 typedef void data_write_cb_t(void *ctx, esp_h264_out_buf_t *out_data);
 
+/* The P4 hardware encoder accepts exactly one raw layout - O_UYY_E_VYY - per
+ * esp_h264_types.h (YUYV and I420 are software-encoder only). The ISP produces it
+ * natively; a UVC camera's YUY2 is repacked into it in the grabber. */
+#define MEDIA_STREAM_H264_ENC_PIC_TYPE  ESP_H264_RAW_FMT_O_UYY_E_VYY
+
 #define DEFAULT_ENCODER_CFG() { \
     .gop = 10, \
     .fps = 22, \
@@ -33,7 +39,7 @@ typedef void data_write_cb_t(void *ctx, esp_h264_out_buf_t *out_data);
     .rc.bitrate = (512 * 1024), \
     .rc.qp_min = 30, \
     .rc.qp_max = 40, \
-    .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY, \
+    .pic_type = MEDIA_STREAM_H264_ENC_PIC_TYPE, \
 }
 
 typedef struct {

@@ -111,11 +111,6 @@ static uint8_t *s_conv_buf;
 static size_t s_conv_buf_len;
 #endif
 
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
-static int64_t s_last_key_frame_us;
-static bool s_key_frame_ctrl_supported = true;
-#endif
-
 /* Camera bring-up can miss a transient window (USB enumeration in particular). */
 #define CAMERA_INIT_MAX_ATTEMPTS     3
 #define CAMERA_INIT_RETRY_DELAY_MS   500
@@ -680,35 +675,6 @@ static void video_encoder_task(void *arg)
         frame->type = h264_out_data.type;
 #endif
         bool queue_full = false;
-
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
-        /* Bound the key-frame interval ourselves. The camera's own is multi-second (~12 s
-         * measured), and since a key frame is the largest frame it is also the least
-         * likely to survive a lossy uplink intact - so a viewer can wait a very long time
-         * for something decodable. Asking on a timer keeps parameter sets and IDRs
-         * flowing often enough to recover. */
-        if (frame->type == ESP_H264_FRAME_TYPE_IDR) {
-            s_last_key_frame_us = esp_timer_get_time();
-        } else if (s_key_frame_ctrl_supported &&
-                   CONFIG_MEDIA_STREAM_UVC_KEY_FRAME_INTERVAL_MS > 0 &&
-                   (esp_timer_get_time() - s_last_key_frame_us) >
-                   (int64_t) CONFIG_MEDIA_STREAM_UVC_KEY_FRAME_INTERVAL_MS * 1000) {
-            extern esp_err_t esp_video_uvc_request_key_frame(void);
-            const esp_err_t kf_ret = esp_video_uvc_request_key_frame();
-            if (kf_ret != ESP_OK) {
-                /* Cameras that do not implement the control STALL EP0 on every attempt,
-                 * so ask once and then stop rather than hammering the control endpoint. */
-                ESP_LOGW(TAG, "camera does not support on-demand key frames (%s); "
-                              "recovery stays bounded by its own GOP", esp_err_to_name(kf_ret));
-                s_key_frame_ctrl_supported = false;
-            }
-            if (kf_ret == ESP_OK) {
-                /* Reset now, not on arrival: the camera takes a few frames to comply and
-                 * we must not ask again on every frame in between. */
-                s_last_key_frame_us = esp_timer_get_time();
-            }
-        }
-#endif
 
         /* A P-frame that references a frame the viewer never got decodes to garbage,
          * so once anything is dropped we resync on the next IDR. Re-armed per session by

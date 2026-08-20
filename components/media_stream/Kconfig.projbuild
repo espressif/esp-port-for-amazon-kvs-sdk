@@ -264,20 +264,6 @@ menu "Media Stream Configuration"
                 Leave this off to capture raw and encode locally, which keeps rate control,
                 a short GOP and PLI-driven keyframes.
 
-        config MEDIA_STREAM_UVC_KEY_FRAME_INTERVAL_MS
-            int "Key-frame interval to request from the UVC camera (ms, 0 = never ask)"
-            depends on MEDIA_STREAM_UVC_PASSTHROUGH_H264
-            default 1000
-            help
-                How often to issue the UVC Generate Key Frame control while passing the
-                camera's H.264 through.
-
-                A camera's own key-frame interval is often several seconds. Every key frame
-                carries the parameter sets a decoder needs to start, and key frames are the
-                largest frames - so on a lossy uplink a viewer may wait a very long time for
-                one to arrive intact. 1000 ms keeps join and recovery latency bounded at a
-                modest bitrate cost.
-
         config MEDIA_STREAM_UVC_CAPTURE_WIDTH
             int "UVC capture width"
             depends on MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
@@ -1041,7 +1027,8 @@ menu "Media Stream Configuration"
 
             menuconfig MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
                 bool "USB-UVC"
-                depends on ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
+                depends on SOC_USB_OTG_SUPPORTED
+                select ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE
                 help
                     USB Video Class (UVC) interface for standard USB cameras.
 
@@ -1058,6 +1045,24 @@ menu "Media Stream Configuration"
 
                     Ideal for applications requiring external camera connectivity,
                     webcam integration, or when GPIO pins are limited.
+
+                    Also set CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=4096. A UVC
+                    configuration descriptor enumerates every format, frame size and frame
+                    interval, so it runs well past the 256-byte default and enumeration
+                    fails.
+
+                    Limitations on esp32p4
+                    ----------------------
+                    This branch builds against uvc components without support for rate control
+                    (usb_host_uvc, esp_video), so some things do not work as expected:
+
+                    - No camera-side rate control.
+                    - No on-demand key frames.
+                    - Cameras that never set the EoF payload flag deliver no frames at all.
+
+                    CONFIG_MEDIA_STREAM_UVC_TARGET_FPS (VIDIOC_S_PARM) and the capture
+                    resolution are the only levers left, and with passthrough the camera's
+                    fixed bitrate makes resolution a weak one.
 
             if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
                 config MEDIA_STREAM_USB_UVC_DEVICES_NUM

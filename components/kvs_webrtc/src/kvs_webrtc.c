@@ -1854,6 +1854,32 @@ static STATUS kvs_setupMediaTracks(kvs_pc_session_t* session)
     STRCPY(videoTrack.trackId, "myVideoTrack");
     CHK_STATUS(addTransceiver(session->peer_connection, &videoTrack, &videoRtpTransceiverInit, &session->video_transceiver));
 
+    /* Advertise an H.264 level that actually covers what we send.
+     *
+     * The SDK default is profile-level-id=42e01f - Constrained Baseline level 3.1,
+     * whose ceiling is 1280x720. Sending 1080p under it makes browsers negotiate a
+     * decoder they then refuse to feed: RTP arrives, nothing ever renders. Our own
+     * capture reports level_idc=0x28 (4.0) in its SPS at 1080p, so say so. Level
+     * asymmetry stays allowed, so a viewer may still answer with a lower level.
+     * Only a positive answer from the capture layer upgrades the level: targets that
+     * cannot report a resolution keep the conservative 3.1. */
+    if (videoTrack.codec == RTC_CODEC_H264_PROFILE_42E01F_LEVEL_ASYMMETRY_ALLOWED_PACKETIZATION_MODE) {
+        video_resolution_t active = {0};
+        const char *fmtp;
+
+        if (video_capture_get_active_resolution(&active) != ESP_OK) {
+            active.height = 0;
+        }
+
+        if (active.height > 720) {
+            fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e028";  /* 4.0 */
+        } else {
+            fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";  /* 3.1 */
+        }
+        ESP_LOGI(TAG, "H.264 SDP fmtp: %s (capture height %" PRIu32 ")", fmtp, (uint32_t)active.height);
+        CHK_STATUS(transceiverSetFmtp(session->video_transceiver, (PCHAR) fmtp));
+    }
+
     // Set up bandwidth estimation for video transceiver
     CHK_STATUS(transceiverOnBandwidthEstimation(session->video_transceiver, POINTER_TO_HANDLE(session), kvs_videoBandwidthEstimationHandler));
 
