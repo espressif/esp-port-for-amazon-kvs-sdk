@@ -1680,6 +1680,40 @@ CleanUp:
 }
 
 /**
+ * @brief Report whether a cached ICE configuration can be read without going on the wire
+ *
+ * Used by callers that want STUN+TURN before they create a peer connection but must
+ * not block. Answering TRUE means signalingClientGetIceConfigInfo() will be served
+ * from the cache; see signaling_has_valid_ice_config() for why the negation of
+ * is_ice_refresh_needed is not a substitute.
+ */
+static WEBRTC_STATUS kvsHasValidIceConfigWrapper(void *pSignalingClient, bool *pHasValidConfig)
+{
+    if (pHasValidConfig == NULL) {
+        return WEBRTC_STATUS_NULL_ARG;
+    }
+
+    *pHasValidConfig = false;
+
+    KvsSignalingClientData *pClientData = (KvsSignalingClientData *)pSignalingClient;
+    if (pClientData == NULL || pClientData->signalingClientHandle == INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
+        return WEBRTC_STATUS_SUCCESS;
+    }
+
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    *pHasValidConfig =
+        (signaling_has_valid_ice_config((PSignalingClient) pClientData->signalingClientHandle) == TRUE);
+#else
+    /* Without the ESP port layer there is no way to inspect the cached config's
+     * expiry without a call that may refresh it, so report FALSE and let the
+     * caller take its non-blocking path. */
+    *pHasValidConfig = false;
+#endif
+
+    return WEBRTC_STATUS_SUCCESS;
+}
+
+/**
  * @brief Wrapper for is_ice_refresh_needed to convert return types
  */
 static WEBRTC_STATUS kvsIsIceRefreshNeededWrapper(void *pSignalingClient, bool *refreshNeeded)
@@ -1793,6 +1827,7 @@ webrtc_signaling_client_if_t* kvs_signaling_client_if_get(void)
         .get_ice_servers = kvsGetIceServersWrapper,
         .get_ice_server_by_idx = kvsQueryServerGetByIdxWrapper,
         .is_ice_refresh_needed = kvsIsIceRefreshNeededWrapper,
+        .has_valid_ice_config = kvsHasValidIceConfigWrapper,
         .refresh_ice_configuration = kvsRefreshIceConfigurationWrapper,
         .set_ice_update_callback = kvsSetIceUpdateCallbackWrapper,
         .get_state = kvsGetStateWrapper,

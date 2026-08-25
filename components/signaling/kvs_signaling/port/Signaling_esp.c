@@ -887,6 +887,27 @@ CleanUp:
     return retStatus;
 }
 
+/*
+ * Is there a cached ICE configuration that can be handed out right now without
+ * going on the wire?
+ *
+ * Do not substitute !signaling_is_ice_config_refresh_needed() for this: that
+ * function also answers FALSE when a refresh is merely rate-limited, which can
+ * happen with iceConfigCount == 0 after a failed fetch.
+ */
+BOOL signaling_has_valid_ice_config(PSignalingClient pSignalingClient)
+{
+    UINT64 curTime;
+
+    if (pSignalingClient == NULL) {
+        return FALSE;
+    }
+
+    curTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient);
+
+    return (pSignalingClient->iceConfigCount > 0 && curTime <= pSignalingClient->iceConfigExpiration);
+}
+
 BOOL signaling_is_ice_config_refresh_needed(PSignalingClient pSignalingClient)
 {
     ENTERS();
