@@ -54,7 +54,7 @@ static void esp_work_queue_task(void *param)
     vTaskDelete(NULL);
 }
 
-esp_err_t esp_work_queue_add_task(esp_work_fn_t work_fn, void *priv_data)
+esp_err_t esp_work_queue_add_task_timeout(esp_work_fn_t work_fn, void *priv_data, uint32_t timeout_ms)
 {
     if (!work_queue) {
         ESP_LOGE(TAG, "Cannot enqueue function as Work Queue hasn't been created.");
@@ -65,13 +65,20 @@ esp_err_t esp_work_queue_add_task(esp_work_fn_t work_fn, void *priv_data)
         .priv_data = priv_data,
     };
 
-    // The wait time is 0, so the function should return immediately
-    if (xQueueSend(work_queue, &work_queue_entry, pdMS_TO_TICKS(0)) == pdTRUE) {
+    if (xQueueSend(work_queue, &work_queue_entry, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
         return ESP_OK;
     }
 
-    ESP_LOGW(TAG, "Failed to add work task");
+    ESP_LOGW(TAG, "Failed to add work task (queue full: %u/%u pending, waited %u ms)",
+             (unsigned) uxQueueMessagesWaiting(work_queue), (unsigned) queue_config.size,
+             (unsigned) timeout_ms);
     return ESP_FAIL;
+}
+
+esp_err_t esp_work_queue_add_task(esp_work_fn_t work_fn, void *priv_data)
+{
+    /* Non-blocking by design: most callers are on paths that must not stall. */
+    return esp_work_queue_add_task_timeout(work_fn, priv_data, 0);
 }
 
 /* Barrier task: signals the caller once the single FIFO worker reaches it,

@@ -34,6 +34,12 @@
 // Define constants needed for ESP implementation
 #define WS_TASK_STACK_SIZE  (6 * 1024)
 #define WS_BUFFER_SIZE      (4 * 1024)
+/* How long the websocket task waits for room on the work queue before it has to
+ * give up on an inbound signaling message.
+ *
+ * Kept deliberately short. Every millisecond spent
+ * waiting here also delays outbound signaling. */
+#define WS_DISPATCH_ENQUEUE_TIMEOUT_MS 200
 
 // Bounded WS send timeout: a portMAX_DELAY send on a wedged socket parks the shared worker forever.
 #define WS_SEND_TIMEOUT_MS  10000
@@ -99,6 +105,8 @@ static PEspSignalingClientWrapper gEspSignalingClientWrapper = NULL;
 
 // Data buffer for reassembling WebSocket chunks
 static PDataBuffer gWebSocketDataBuffer = NULL;
+/* Inbound signaling messages lost because the work queue stayed full. */
+static UINT32 gWebSocketDroppedMessageCount = 0;
 
 // Global flag to track if we've initialized the CA store
 static BOOL gCaStoreInitialized = FALSE;
@@ -530,10 +538,19 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
                     gWebSocketDataBuffer->buffer = NULL;
                     freeWebSocketBuffer();
 
-                    // Schedule message processing in the work queue
-                    esp_err_t err = esp_work_queue_add_task(processWebSocketMessage, pMsgData);
+                    /* Schedule message processing in the work queue.
+                     *
+                     * A brief wait rather than an instant drop */
+                    esp_err_t err = esp_work_queue_add_task_timeout(processWebSocketMessage, pMsgData,
+                                                                    WS_DISPATCH_ENQUEUE_TIMEOUT_MS);
                     if (err != ESP_OK) {
-                        ESP_LOGE(TAG, "Failed to add task to work queue: %s", esp_err_to_name(err));
+                        /* Still a drop, but never a silent one - identify what was lost
+                         * and keep a running count so it shows up in a normal log. */
+                        gWebSocketDroppedMessageCount++;
+                        ESP_LOGE(TAG, "DROPPED inbound signaling message (%s): %" PRIu32 " bytes, drop #%" PRIu32 ", starts: %.*s",
+                                 esp_err_to_name(err), pMsgData->messageLen, gWebSocketDroppedMessageCount,
+                                 (int) (pMsgData->messageLen > 80 ? 80 : pMsgData->messageLen),
+                                 pMsgData->message != NULL ? pMsgData->message : "");
                         SAFE_MEMFREE(pMsgData->message);
                         SAFE_MEMFREE(pMsgData);
                     }
@@ -909,6 +926,16 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
 
     // Update diagnostics
     ATOMIC_INCREMENT(&pSignalingClient->diagnostics.numberOfMessagesReceived);
+
+    /* numberOfMessagesReceived was already tracked but never surfaced
+     * anywhere. Dropped messages are still reported unconditionally
+     * at the enqueue site, as an error. */
+    ESP_LOGD(TAG, "Signaling message #%" PRIu64 " received: type=%d, peer=%s, payload=%" PRIu32 " bytes, dropped so far=%" PRIu32,
+             (UINT64) ATOMIC_LOAD(&pSignalingClient->diagnostics.numberOfMessagesReceived),
+             (int) pRecvMsg->signalingMessage.messageType,
+             pRecvMsg->signalingMessage.peerClientId,
+             pRecvMsg->signalingMessage.payloadLen,
+             gWebSocketDroppedMessageCount);
 
     // Call the message received callback if registered
     // IMPORTANT: We call this with no locks held to avoid deadlocks
