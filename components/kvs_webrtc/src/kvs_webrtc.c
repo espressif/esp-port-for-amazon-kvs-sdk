@@ -234,6 +234,7 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
             }
             client_data->config.ice_servers = dst;
             client_data->config.ice_server_count = ice_count;
+            client_data->ice_servers_cleared = false;
 
             ESP_LOGI(TAG, "Updated ICE server configuration: %" PRIu32 " servers", ice_count);
         } else {
@@ -245,6 +246,7 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
     } else {
         client_data->config.ice_servers = NULL;
         client_data->config.ice_server_count = 0;
+        client_data->ice_servers_cleared = true;
         ESP_LOGI(TAG, "Cleared ICE servers for KVS peer connection client");
     }
 
@@ -1776,9 +1778,10 @@ static STATUS kvs_initializePeerConnection(kvs_pc_client_t* client, PRtcPeerConn
             }
             ESP_LOGI(TAG, "ICE server %" PRIu32 ": %s", i, configuration.iceServers[i].urls);
         }
-    } else if (client->config.ice_server_count == 0 && client->config.ice_servers == NULL) {
-        /* ICE servers explicitly cleared (e.g. local LAN session) — host candidates only */
-        ESP_LOGI(TAG, "Creating peer connection without ICE servers (host candidates only)");
+    } else if (client->ice_servers_cleared) {
+        /* ICE servers explicitly cleared (e.g. local LAN session) — host candidates only.
+         * Only ever reached when set_ice_servers(client, NULL, 0) called */
+        ESP_LOGI(TAG, "Creating peer connection without ICE servers (host candidates only, explicitly cleared)");
     } else {
         // Fallback to hardcoded STUN server
         SNPRINTF(configuration.iceServers[0].urls, MAX_ICE_CONFIG_URI_LEN, APP_WEBRTC_DEFAULT_STUN_SERVER);
