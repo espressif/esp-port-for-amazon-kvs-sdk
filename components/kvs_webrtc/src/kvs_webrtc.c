@@ -70,6 +70,9 @@ static const kvs_liveness_cfg_t gKvsLivenessCfg = {
 #define KVS_ACTIVE_SESSIONS_HASH_TABLE_BUCKET_COUNT   32   // Support up to 32 concurrent sessions efficiently
 #define KVS_ACTIVE_SESSIONS_HASH_TABLE_BUCKET_LENGTH  2    // Average 2 sessions per bucket
 
+// Truncation length for ICE candidate strings in logs - enough for type, address and port
+#define KVS_ICE_CANDIDATE_LOG_LEN 96
+
 // Forward declarations for KVS SDK callbacks
 static VOID onIceCandidateHandler(UINT64 customData, PCHAR candidateJson);
 static STATUS kvs_pregenerateCertTimerCallback(UINT32 timerId, UINT64 currentTime, UINT64 customData);
@@ -1128,7 +1131,14 @@ static VOID onIceCandidateHandler(UINT64 customData, PCHAR candidateJson)
             ice_msg.payload_len = (UINT32)STRLEN(candidateJson);
             ice_msg.correlation_id[0] = '\0';
 
+            ESP_LOGD(TAG, "Local ICE candidate trickled to peer %s: %.*s%s", session->peer_id,
+                     KVS_ICE_CANDIDATE_LOG_LEN, candidateJson,
+                     STRLEN(candidateJson) > KVS_ICE_CANDIDATE_LOG_LEN ? "..." : "");
+
             session->on_message_received(session->custom_data, &ice_msg);
+        } else {
+            ESP_LOGD(TAG, "Local ICE candidate NOT sent to peer %s (trickle disabled on %s side)",
+                     session->peer_id, session->is_initiator ? "local" : "remote");
         }
     }
 
@@ -2086,7 +2096,7 @@ static STATUS kvs_handleRemoteCandidate(kvs_pc_session_t* session, webrtc_messag
     CHK(session != NULL && message != NULL, STATUS_NULL_ARG);
     CHK(message->message_type == WEBRTC_MESSAGE_TYPE_ICE_CANDIDATE, STATUS_INVALID_ARG);
 
-    ESP_LOGD(TAG, "Handling ICE candidate from peer: %s", session->peer_id);
+    ESP_LOGD(TAG, "Remote ICE candidate from peer %s", session->peer_id);
 
     MEMSET(&iceCandidate, 0x00, SIZEOF(RtcIceCandidateInit));
 
@@ -2094,41 +2104,39 @@ static STATUS kvs_handleRemoteCandidate(kvs_pc_session_t* session, webrtc_messag
     CHK_STATUS(deserializeRtcIceCandidateInit(message->payload, message->payload_len, &iceCandidate));
 
     if (iceCandidate.candidate[0] == '\0') {
-        ESP_LOGD(TAG, "Ignoring empty ICE candidate");
+        ESP_LOGD(TAG, "Remote ICE candidate ignored: empty (end-of-candidates)");
         CHK(FALSE, STATUS_SUCCESS);
     }
 
     // Basic validation: candidate should contain the attribute prefix
     if (STRSTR(iceCandidate.candidate, "candidate:") == NULL && STRSTR(iceCandidate.candidate, "candidate ") == NULL) {
         ESP_LOGW(TAG, "Skipping non-standard ICE candidate: %.*s%s",
-                 64, iceCandidate.candidate, STRLEN(iceCandidate.candidate) > 64 ? "..." : "");
+                 KVS_ICE_CANDIDATE_LOG_LEN, iceCandidate.candidate,
+                 STRLEN(iceCandidate.candidate) > KVS_ICE_CANDIDATE_LOG_LEN ? "..." : "");
         CHK(FALSE, STATUS_SUCCESS);
     }
 
-    // Skip TCP candidates – ESP flow typically uses UDP only
-    if (STRSTR(iceCandidate.candidate, " tcp ") != NULL) {
-        ESP_LOGD(TAG, "Skipping TCP ICE candidate");
-        CHK(FALSE, STATUS_SUCCESS);
-    }
-
-    // Ensure UDP appears as protocol token
-    if (STRSTR(iceCandidate.candidate, " udp ") == NULL) {
-        ESP_LOGD(TAG, "Skipping non-UDP ICE candidate");
-        CHK(FALSE, STATUS_SUCCESS);
-    }
-
-    // Add the candidate
+    /* Do not pre-filter on the transport token here as it already happens
+     * in addIceCandidate(...) */
     {
         STATUS s = addIceCandidate(session->peer_connection, iceCandidate.candidate);
+        if (s == STATUS_ICE_CANDIDATE_STRING_IS_TCP) {
+            /* Expected and harmless: this port only gathers UDP locally, so a TCP
+             * remote candidate could not pair with anything anyway. */
+            ESP_LOGD(TAG, "Remote ICE candidate skipped: TCP transport");
+            CHK(FALSE, STATUS_SUCCESS);
+        }
         if (STATUS_FAILED(s)) {
             ESP_LOGE(TAG, "addIceCandidate failed: 0x%08" PRIx32 " for '%.*s%s'", (UINT32) s,
-                     64, iceCandidate.candidate,
-                     STRLEN(iceCandidate.candidate) > 64 ? "..." : "");
+                     KVS_ICE_CANDIDATE_LOG_LEN, iceCandidate.candidate,
+                     STRLEN(iceCandidate.candidate) > KVS_ICE_CANDIDATE_LOG_LEN ? "..." : "");
             retStatus = s;
             goto CleanUp;
         }
     }
-    ESP_LOGD(TAG, "Added ICE candidate OK");
+
+    ESP_LOGD(TAG, "Remote ICE candidate added: %.*s%s", KVS_ICE_CANDIDATE_LOG_LEN, iceCandidate.candidate,
+             STRLEN(iceCandidate.candidate) > KVS_ICE_CANDIDATE_LOG_LEN ? "..." : "");
 
 CleanUp:
     return retStatus;
