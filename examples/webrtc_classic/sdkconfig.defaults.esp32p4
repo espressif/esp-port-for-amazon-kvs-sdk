@@ -105,6 +105,20 @@ CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
 CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
 CONFIG_APP_NETWORK_PROV_BLE=y
 
+# Make BSP errors non-fatal. bsp_display_indev_init() ESP_ERROR_CHECKs on
+# bsp_touch_new(), so a board with a display but no GT911 touch controller
+# aborts the whole app the moment rendering starts. video_render_display.c
+# already recovers from the NULL return and carries on without touch — it just
+# never gets the chance while the BSP aborts first.
+CONFIG_BSP_ERROR_CHECK=n
+
+# MIPI auto-detect enumerates whichever sensor is wired, so keep every candidate
+# the P4 boards ship with enabled. OV2710 modules are common on the EV Function
+# Board; leaving it out makes the camera simply not come up there.
+CONFIG_CAMERA_OV2710=y
+CONFIG_CAMERA_OV2710_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+
 CONFIG_CAMERA_SC2336=y
 CONFIG_CAMERA_SC2336_AUTO_DETECT=y
 CONFIG_CAMERA_SC2336_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
