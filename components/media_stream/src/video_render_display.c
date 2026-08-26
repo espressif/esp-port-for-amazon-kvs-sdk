@@ -267,13 +267,18 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
             },
             .buffer_size   = BSP_LCD_DRAW_BUFF_SIZE,
             .double_buffer = BSP_LCD_DRAW_BUFF_DOUBLE,
-#ifdef BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS
+#if CONFIG_BSP_SELECT_ESP32_P4_FUNCTION_EV_BOARD && defined(BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS)
             /* The 5.x EV Function Board BSP requires the DSI bus's
              * lane_bit_rate_mbps to be populated by the caller, otherwise
              * esp_lcd_new_dsi_bus() rejects the config as "invalid lane
              * bit rate 0.00" and bsp_display_new_with_handles() aborts.
              * Pull the rate from the BSP's own macro so this stays in
-             * sync with whatever DSI panel is selected via Kconfig. */
+             * sync with whatever DSI panel is selected via Kconfig.
+             *
+             * Gate on the EV board select, not the macro alone: other DSI
+             * BSPs (e.g. m5stack_tab5) define the same macro but their
+             * bsp_display_cfg_t has no hw_cfg member - they configure the
+             * DSI bus internally in bsp_display_lcd_init(). */
             .hw_cfg = {
                 .hdmi_resolution = BSP_HDMI_RES_NONE,
                 .dsi_bus = {

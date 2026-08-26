@@ -22,6 +22,7 @@
 #include "iot_knob.h"
 #include "esp_lvgl_port.h"
 #include "bsp/display.h"
+#include "esp_video_device.h"
 
 /**************************************************************************************************
  *  BSP Capabilities
@@ -80,6 +81,11 @@
 #define BSP_CAMERA_RST_PIN      (GPIO_NUM_26)
 #define BSP_CAMERA_XCLK_PIN     (GPIO_NUM_11)
 
+/* esp_video (V4L2) capture device for this board's MIPI-CSI sensor.
+ * Lets board-agnostic consumers open the camera via BSP_CAMERA_DEVICE
+ * instead of a hard-coded per-board path. */
+#define BSP_CAMERA_DEVICE       (ESP_VIDEO_MIPI_CSI_DEVICE_NAME)
+
 /* C6 */
 #define BSP_C6_EN_PIN           (GPIO_NUM_9)
 
@@ -137,6 +143,26 @@ typedef enum {
  * @return esp_err_t 
  */
 esp_err_t bsp_p4_eye_init(void);
+
+/**
+ * @brief BSP camera configuration (reserved for future options)
+ */
+typedef struct {
+    uint8_t dummy;
+} bsp_camera_cfg_t;
+
+/**
+ * @brief Bring up the MIPI-CSI camera sensor via esp_video
+ *
+ * Registers the CSI sensor with esp_video (V4L2). Camera power, XCLK and
+ * reset are configured by bsp_p4_eye_init(); this only binds the sensor so
+ * board-agnostic consumers can then open(BSP_CAMERA_DEVICE). Must be called
+ * at most once per boot (esp_video has no deinit).
+ *
+ * @param[in] cfg Camera configuration (may be NULL)
+ * @return esp_err_t
+ */
+esp_err_t bsp_camera_start(const bsp_camera_cfg_t *cfg);
 
 /**
  * @brief Initialize sleep IO

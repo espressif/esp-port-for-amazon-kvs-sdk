@@ -1,0 +1,25 @@
+#
+# signaling_only overlay for the C6 co-processor paired with the M5Stack Tab5
+# host (network-split: the C6 runs the network stack + KVS signaling).
+#
+# Layer order:
+#   sdkconfig.defaults + sdkconfig.defaults.esp32c6 + this file
+#
+# Build with:
+#   idf.py set-target esp32c6
+#   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.m5stack_tab5_pair.esp32c6' reconfigure
+#
+# REQUIRES esp_hosted_mcu slave-side Tab5 support (feature/tab5_slave_support,
+# MR !272) — the ESP32P4_TAB5_C6_BOARD slave board option. Until that MR is
+# merged and the esp_hosted submodule bumped past it, this board symbol is
+# unresolved and the C6 will not enumerate over SDIO on the Tab5.
+#
+
+#
+# Board selector — Tab5-specific SDIO slave pinout for the on-board C6.
+#
+CONFIG_ESP32P4_TAB5_C6_BOARD=y
+# CONFIG_ESP_HOST_DEV_BOARD_NONE is not set
+# CONFIG_ESP_HOST_DEV_BOARD_P4_FUNC_BOARD is not set
+# CONFIG_ESP_HOST_DEV_BOARD_P4_C6_CORE is not set
+# CONFIG_ESP32P4_EYE_C6_BOARD is not set

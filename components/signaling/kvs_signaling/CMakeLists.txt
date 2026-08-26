@@ -127,7 +127,7 @@ endif()
 # or struct layouts silently fork across components. Keep in sync with
 # kvs_webrtc and apprtc_signaling (canonical value + rationale in
 # kvs_webrtc/CMakeLists.txt).
-target_compile_definitions(${COMPONENT_LIB} PUBLIC -DKVS_SIGNALING_MESSAGE_LEN=17024)
+target_compile_definitions(${COMPONENT_LIB} PUBLIC -DKVS_SIGNALING_MESSAGE_LEN=18432)
 
 # Suppress warnings for KVS code
 target_compile_options(${COMPONENT_LIB} PRIVATE

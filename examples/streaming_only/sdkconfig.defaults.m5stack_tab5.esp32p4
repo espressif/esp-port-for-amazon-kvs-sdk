@@ -1,0 +1,93 @@
+#
+# M5Stack Tab5 (ESP32-P4 + on-board ESP32-C6-MINI-1U) board config for the
+# streaming_only example. Layered on sdkconfig.defaults + sdkconfig.defaults.esp32p4.
+#
+# Build with:
+#   idf.py set-target esp32p4
+#   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.m5stack_tab5.esp32p4' build
+#
+# The on-board C6 must be flashed separately with the Tab5 slave firmware
+# (esp_hosted_mcu feature/tab5_slave_support, MR !272) via the J1 header —
+# there is no P4<->C6 UART on Tab5 for the in-app slave flasher.
+#
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# BSP: M5Stack Tab5. Camera sensor pins, power (I2C IO-expander enable) and
+# DSI display come from the Tab5 BSP; media_stream defines no board pins
+# (camera bring-up via the BSP's bsp_camera_start()).
+# Tab5 has its own SDIO pinout, so disable the P4 Function v12 board hint the
+# base config sets.
+#
+CONFIG_BSP_SELECT_M5STACK_TAB5=y
+CONFIG_BSP_BOARD_TYPE_SAMPLE_V12=n
+
+#
+# esp_hosted board select: Tab5 SDIO pinout for the on-board C6
+# (CLK12/CMD13/D0-3=11/10/9/8, RESET15). Host side merged via esp_hosted !247.
+#
+CONFIG_ESP32P4_TAB5_C6_BOARD=y
+
+#
+# Camera sensor: SC202CS (marketed SC2356 on Tab5), MIPI-CSI 1280x720 RAW8 @
+# 30fps. Disable the base-P4 sensors that do not populate on Tab5.
+#
+CONFIG_CAMERA_SC202CS=y
+CONFIG_CAMERA_SC202CS_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+CONFIG_CAMERA_SC202CS_MIPI_RAW8_1280X720_30FPS=y
+CONFIG_CAMERA_SC2336=n
+CONFIG_CAMERA_OV2710=n
+CONFIG_CAMERA_OV5647=n
+
+#
+# Chip revision - Tab5 samples ship with pre-v3 P4 silicon (avoids v3-only
+# timing; without it call_start_cpu0 hangs before any console output).
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_0=y
+
+#
+# Flash - Tab5 has 16 MB QIO flash.
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+# streaming_only ships a single custom table (partitions.csv - factory app +
+# storage + slave). It fits the 16 MB flash as-is; the slave partition is
+# unused on Tab5 (slave flasher off). No 16 MB-specific table exists here,
+# matching the p4_eye overlay convention.
+
+#
+# Console on UART0 - Tab5 routes UART0 to an external USB-UART chip
+# (/dev/cu.usbserial-*). The P4 native USB Serial/JTAG produces silent boots
+# on Tab5, so do NOT use it here.
+#
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+#
+# Slave flasher OFF - no P4<->C6 UART on Tab5; the on-board C6 is programmed
+# via the J1 download header with an external USB-TTL. Keeps the C6 firmware
+# and slave SPIFFS partition out of the P4 image.
+#
+CONFIG_SLAVE_FLASHER_ENABLE=n
+
+#
+# Inbound video player (RX H.264 decode + LCD render). The Tab5 BSP configures
+# its DSI bus internally, so no hw_cfg is needed from media_stream. Canvas
+# capped at 320x240 - the SW decoder + CPU YUV->RGB565 path tops out around
+# there; video_render_display centers the canvas on the 720x1280 panel.
+#
+CONFIG_MEDIA_STREAM_PLAYER_MAX_WIDTH=320
+CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
+
+#
+# Workaround: m5stack_tab5 BSP 1.2.0 misuses BSP_ERROR_CHECK_RETURN_NULL in
+# int bsp_get_board_version() (src/bsp_display.c). With BSP_ERROR_CHECK=n
+# (this example's base default) that macro expands to `return NULL` inside an
+# int-returning function -> -Wint-conversion build error. Force abort-style
+# BSP error checks on Tab5 until the BSP is fixed upstream.
+#
+CONFIG_BSP_ERROR_CHECK=y

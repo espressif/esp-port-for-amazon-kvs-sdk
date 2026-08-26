@@ -33,6 +33,7 @@
 
 #include "esp_cam_sensor_xclk.h"
 #include "esp_codec_dev_defaults.h"
+#include "esp_video_init.h"
 
 static const char *TAG = "p4-eye";
 
@@ -341,6 +342,33 @@ esp_err_t bsp_p4_eye_init(void)
 #endif
 
     return ESP_OK;
+}
+
+esp_err_t bsp_camera_start(const bsp_camera_cfg_t *cfg)
+{
+    (void) cfg;
+
+    /* Power, XCLK and reset for the camera are configured by bsp_p4_eye_init().
+     * Here we only register the MIPI-CSI sensor with esp_video. The SCCB bus is
+     * the shared BSP I2C bus (bsp_i2c_init() is idempotent). pwdn is the
+     * camera-enable GPIO, matching the pins media_stream drove previously so the
+     * sensor bring-up is unchanged. */
+    BSP_ERROR_CHECK_RETURN_ERR(bsp_i2c_init());
+
+    const esp_video_init_csi_config_t csi_config = {
+        .sccb_config = {
+            .init_sccb = false,
+            .i2c_handle = i2c_bus_handle,
+            /* Follow the BSP I2C speed; some sensors need 100 kHz SCCB. */
+            .freq = CONFIG_BSP_I2C_CLK_SPEED_HZ,
+        },
+        .reset_pin = BSP_CAMERA_RST_PIN,
+        .pwdn_pin  = BSP_CAMERA_EN_PIN,
+    };
+    const esp_video_init_config_t cam_config = {
+        .csi = &csi_config,
+    };
+    return esp_video_init(&cam_config);
 }
 
 esp_err_t bsp_enter_sleep_init(void)
