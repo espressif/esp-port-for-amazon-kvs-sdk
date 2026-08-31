@@ -130,9 +130,13 @@ set(priv_requires
     esp_pm
 )
 
-# Public requirements
+# Public requirements. esp_driver_sdio is public, not private: the slave
+# interface.h we expose includes driver/sdio_slave.h. IDF v5.x got away with it
+# because the legacy driver component re-exported esp_driver_sdio publicly for
+# backward compatibility; v6 dropped that, so dependents no longer see the header.
 set(requires
     esp_wifi
+    esp_driver_sdio
     nvs_flash
     protocomm
     esp_webrtc_utils

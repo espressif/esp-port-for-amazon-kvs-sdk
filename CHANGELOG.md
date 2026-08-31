@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
+  alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
+  stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from
+  esp-protocols#1114), and `KVS_USE_MBEDTLS4` is defined for IDF >= 6 so signaling
+  stops sending an OpenSSL-style cipher list. No `USE_LIBSRTP3` is required; two
+  webrtc-c patches are: `patches/0004` (entropy-less RNG from PSA, upstream
+  awslabs#2385) and `patches/0005` (fingerprint via `mbedtls_md()`).
+
 - **SDP re-negotiation** — re-offer from the same peer re-uses an active
   session or replaces a terminated one.
 - **BLE Wi-Fi provisioning** via the `network_provisioning` component in a
@@ -89,5 +97,4 @@ Tracked for follow-up PRs:
   is currently a stub).
 - First-class M5Stack Tab5 support (partial commits already on `main`).
 - Acoustic Echo Cancellation in the audio send path.
-- ESP-IDF `release/v6.0` upgrade and CI coverage.
 - Consolidation of signaling implementations into `components/`.

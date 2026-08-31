@@ -139,3 +139,9 @@ CONFIG_ESP_HOSTED_REUSE_WIFI_STA_DEF_NETIF_INSTANCE=y
 
 # Hosted - Re-use CLI instance
 CONFIG_ESP_HOSTED_CLI_NEW_INSTANCE=n
+
+#
+# BLE provisioning security v1 (x25519 + PoP); IDF v6 gates the
+# NETWORK_PROV_SECURITY_1 enum behind this (default off).
+#
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y

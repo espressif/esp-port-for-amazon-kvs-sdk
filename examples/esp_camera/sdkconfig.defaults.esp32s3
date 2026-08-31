@@ -40,3 +40,8 @@ CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=16384
 #
 CONFIG_ESP_GDBSTUB_ENABLED=y
 CONFIG_ESP_SYSTEM_PANIC_GDBSTUB=y
+
+# esp_hosted defaults its co-processor choice to ESP32, which is BLE 4.2 only, and
+# errors out if BLE 5 is on. The s3 has native Wi-Fi (no co-processor) and uses
+# NimBLE only for provisioning, so the BLE 5 features are not needed here.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n

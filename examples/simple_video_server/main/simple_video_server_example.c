@@ -18,6 +18,14 @@
 #include "mdns.h"
 #include "lwip/apps/netbiosns.h"
 
+/* lwip sockets.h (pulled in by netbiosns.h above) defines BSD-style _IO/_IOR/_IOW;
+ * the V4L2 headers below define the Linux-style encodings this file actually uses.
+ * Neither header guards them, so drop the lwip ones before including V4L2. */
+#undef _IO
+#undef _IOR
+#undef _IOW
+#undef _IOWR
+
 #if CONFIG_CAPTURE_DIRECT_V4L2
 #include "example_video_common.h"
 #include "esp_video_device.h"

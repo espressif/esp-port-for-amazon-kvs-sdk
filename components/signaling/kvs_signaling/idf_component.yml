@@ -24,7 +24,7 @@ dependencies:
   # Header-only: the upstream KVS SDK's shared Include_i.h (#include
   # <srtp2/srtp.h>) is compiled into the signaling sources, so srtp2/srtp.h
   # must be on the include path even though signaling uses no SRTP itself.
-  espressif/libsrtp: "2.8.*"
+  espressif/libsrtp: ">=2.8.0~1,<3.0.0"
 
   esp_usrsctp:
     path: ../../esp_usrsctp

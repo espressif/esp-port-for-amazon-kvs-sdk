@@ -96,6 +96,14 @@ if(CONFIG_USE_ESP_WEBSOCKET_CLIENT)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC -DUSE_ESP_WEBSOCKET -DESP_PLATFORM)
 endif()
 
+# IDF v6 ships mbedTLS 4 (TF-PSA-Crypto). KVS_USE_MBEDTLS4 switches Signaling.c off
+# the OpenSSL-style cipher-list string ("HIGH:!PSK:...") that a mbedTLS-4 lws backend
+# rejects, failing vhost creation. Signaling.c is only compiled on the libwebsockets
+# path (CONFIG_USE_ESP_WEBSOCKET_CLIENT=n), which is the only build that needs this.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC -DKVS_USE_MBEDTLS4)
+endif()
+
 # Add the necessary compile definitions for KVS signaling
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DKVS_USE_MBEDTLS

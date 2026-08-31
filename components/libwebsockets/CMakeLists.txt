@@ -8,6 +8,11 @@ idf_component_register(
         freertos
         esp_timer
         driver
+        # lws-freertos.h (a public header) includes driver/gpio.h. IDF v5.x resolved
+        # that through the legacy driver component, which publicly re-exported the
+        # esp_driver_* components for backward compatibility; v6 dropped that, so name
+        # it directly. Present in both majors, so no version gate needed.
+        esp_driver_gpio
     )
 
 # Add libwebsockets as a subdirectory with custom options.
@@ -61,6 +66,11 @@ if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
     target_compile_definitions(websockets PUBLIC LWS_HAVE_MBEDTLS_V4=1)
     target_compile_definitions(${COMPONENT_LIB} INTERFACE LWS_HAVE_MBEDTLS_V4=1)
 endif()
+
+# Same reason for spi_flash: lws romfs.c includes esp_flash.h, whose v6 header
+# chain (esp_hal_mspi, esp_blockdev) an add_subdirectory subproject cannot see
+# through the component REQUIRES.
+target_link_libraries(websockets PRIVATE idf::spi_flash)
 
 # Supply our own dependency-free UTC timegm() (picolibc's symbol isn't linkable here)
 # so lws's date.c resolves it under LWS_HAVE_TIMEGM.

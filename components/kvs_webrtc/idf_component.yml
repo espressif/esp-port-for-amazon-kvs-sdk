@@ -3,7 +3,9 @@ dependencies:
     path: ../esp_webrtc_utils
     version: "*"
 
-  espressif/libsrtp: "2.8.*"
+  # >=2.8.0~1 carries the mbedTLS 4 / PSA crypto backend (esp-protocols#1114),
+  # needed on ESP-IDF v6; major pinned to 2 (the 3.x line renames the library).
+  espressif/libsrtp: ">=2.8.0~1,<3.0.0"
 
   esp_usrsctp:
     path: ../esp_usrsctp

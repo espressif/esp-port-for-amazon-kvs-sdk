@@ -40,7 +40,7 @@ typedef struct {
     esp_h264_frame_type_t type; /* Frame type */
 } esp_h264_out_buf_t;
 
-esp_h264_out_buf_t *get_h264_encoded_frame();
+esp_h264_out_buf_t *get_h264_encoded_frame(void);
 
 /* Explicitly initialize camera and encoder */
 esp_err_t camera_and_encoder_init(video_capture_config_t *config);
