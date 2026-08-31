@@ -35,6 +35,9 @@
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
 #include "slave_flasher.h"
 #endif
+/* Recovery is universal (called unconditionally in app_main), not gated on the
+ * in-system slave flasher — EV builds the C6 as a separate bin (flasher off). */
+#include "hosted_recovery.h"
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
 static vprintf_like_t s_original_vprintf = NULL;
 
@@ -234,6 +237,39 @@ static void wifi_init_sta(void)
     } else {
         ESP_LOGE(TAG, "Failed to connect to WiFi");
     }
+}
+
+/* hosted_recovery hooks: the P4's Wi-Fi rides the C6 over ESP-Hosted, so stop it
+ * before the transport is torn down and bring it back after it re-establishes. */
+static esp_err_t on_hosted_teardown(void)
+{
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    return ESP_OK;
+}
+
+static esp_err_t on_hosted_restore(void)
+{
+    xEventGroupClearBits(s_wifi_event_group, GOT_IP_BIT);
+    esp_err_t err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_start failed after transport recovery: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_wifi_connect();
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, GOT_IP_BIT, pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(20000));
+    if (!(bits & GOT_IP_BIT)) {
+        /* No IP means the C6 is still not usable. Report it so hosted_recovery
+         * retries instead of declaring the link restored. */
+        ESP_LOGE(TAG, "no IP after transport recovery - co-processor still down");
+        return ESP_ERR_TIMEOUT;
+    }
+    /* Re-announce readiness so the C6 leaves WAITING_FOR_WAKEUP; the reactive
+     * READY_QUERY path also works again now that the bridge RX was re-armed. */
+    send_ready_signal_to_c6();
+    return ESP_OK;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -511,6 +547,10 @@ void app_main(void)
 
     // Start webrtc bridge
     webrtc_bridge_start();
+
+    /* Detect a C6 reboot/hang and re-establish the ESP-Hosted transport (p4x has
+     * no C6->P4 reset line, so a C6 self-reboot would otherwise orphan the link). */
+    hosted_recovery_start(on_hosted_teardown, on_hosted_restore);
 
     /* ice_bridge_client_init() is handled internally by bridge_signaling
      * during app_webrtc_init(). Time sync response handler (esp_webrtc_time)

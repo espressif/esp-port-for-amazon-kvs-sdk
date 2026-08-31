@@ -12,4 +12,48 @@ menu "Example Configuration"
 
             This feature is only available for ESP32-P4 target.
 
+    menu "Co-processor (C6) recovery"
+
+        config STREAMING_HEARTBEAT_INTERVAL_SEC
+            int "Co-processor heartbeat interval (seconds)"
+            default 5
+            help
+                How often the C6 co-processor emits an ESP-Hosted heartbeat.
+
+        config STREAMING_ENABLE_HEARTBEAT_MONITOR
+            bool "Detect co-processor hang via heartbeat timeout"
+            default y
+            help
+                Trip recovery if no heartbeat arrives within the timeout below
+                (catches a hung C6; a C6 reboot is caught by its re-INIT event).
+
+        config STREAMING_HEARTBEAT_TIMEOUT_SEC
+            int "Heartbeat timeout (seconds)"
+            depends on STREAMING_ENABLE_HEARTBEAT_MONITOR
+            range 2 600
+            default 15
+            help
+                Must be larger than STREAMING_HEARTBEAT_INTERVAL_SEC - a timeout at
+                or below the interval trips recovery on a healthy co-processor and
+                loops forever. hosted_recovery.c fails the build if it is not.
+
+        choice STREAMING_HOSTED_RECOVERY_METHOD
+            bool "Action when the C6 reboots or hangs"
+            default STREAMING_DO_HOSTED_RECOVERY
+            help
+                On p4x/p4_eye the C6 cannot reset the P4, so a C6 self-reboot
+                orphans the P4<->C6 SDIO link. Pick how the P4 recovers.
+
+            config STREAMING_DO_HOSTED_RECOVERY
+                bool "Re-establish the ESP-Hosted transport (recommended)"
+
+            config STREAMING_DO_HOST_RESET
+                bool "Reboot the P4 host"
+
+            config STREAMING_DO_NOTHING
+                bool "Do nothing"
+        endchoice
+
+    endmenu
+
 endmenu
