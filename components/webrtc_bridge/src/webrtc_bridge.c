@@ -128,6 +128,35 @@ static void webrtc_bridge_receive_callback(uint32_t msg_id, const uint8_t *data,
     }
     hosted_chunked_process_chunk(WEBRTC_MSG_ID, data, data_len);
 }
+
+#if CONFIG_ESP_HOSTED_ENABLED
+/* The C6 reboots after provisioning: the esp_hosted transport bounces DOWN->UP
+ * and the one-time custom-callback registration in webrtc_bridge_start() is not
+ * re-armed, so the P4 stops receiving bridge messages (READY_QUERY) and the C6
+ * wedges in WAITING_FOR_WAKEUP. Re-arm the RX whenever the transport comes up. */
+static void webrtc_bridge_hosted_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (id != ESP_HOSTED_EVENT_TRANSPORT_UP) {
+        return;
+    }
+    ESP_LOGI(TAG, "esp_hosted transport up - re-arming bridge RX");
+
+    hosted_chunked_register(WEBRTC_MSG_ID, webrtc_bridge_on_hosted_message);
+    esp_err_t ret = esp_hosted_register_custom_callback(WEBRTC_MSG_ID, webrtc_bridge_receive_callback, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to re-arm WebRTC RX (msg_id 0x%" PRIx32 "): %s - P4 stays deaf to the C6",
+                 WEBRTC_MSG_ID, esp_err_to_name(ret));
+    }
+
+    /* bridge_cmd lives in the same esp_hosted custom-callback table, so its
+     * registration is lost by the same bounce; without this, C6-issued commands
+     * (GET_RESOLUTION/GET_SNAPSHOT) stay dead until the P4 reboots. */
+    ret = bridge_cmd_rearm_rx();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to re-arm bridge_cmd RX: %s", esp_err_to_name(ret));
+    }
+}
+#endif /* CONFIG_ESP_HOSTED_ENABLED */
 #endif /* CONFIG_ESP_WEBRTC_BRIDGE_HOSTED */
 
 void webrtc_bridge_send_message(const char *data, int len)
@@ -239,6 +268,12 @@ void webrtc_bridge_start(void)
         return;
     }
     ESP_LOGI(TAG, "WebRTC bridge callback registered successfully (msg_id: 0x%" PRIx32 ")", WEBRTC_MSG_ID);
+
+#if CONFIG_ESP_HOSTED_ENABLED
+    /* Re-arm the RX on later transport bounces (C6 reboot after provisioning). */
+    esp_event_handler_register(ESP_HOSTED_EVENT, ESP_HOSTED_EVENT_TRANSPORT_UP,
+                               webrtc_bridge_hosted_event_handler, NULL);
+#endif
 #else
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = BROKER_URI,

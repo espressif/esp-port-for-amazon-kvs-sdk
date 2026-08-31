@@ -83,6 +83,10 @@ typedef esp_err_t (*bridge_cmd_handler_t)(uint32_t cmd_id,
  */
 esp_err_t bridge_cmd_init(void);
 
+/* Re-register the bridge_cmd RX callback after an esp_hosted transport bounce.
+ * Returns ESP_ERR_INVALID_STATE if bridge_cmd_init() was never called. */
+esp_err_t bridge_cmd_rearm_rx(void);
+
 /**
  * @brief Response callback type for registered response handlers
  *
