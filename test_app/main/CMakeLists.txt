@@ -7,12 +7,15 @@ set(srcs
     "test_state_machine.c"
     "test_aws_signer_v4.c"
     "test_pending_ice.c"
+    "test_stale_peer_watchdog.c"
     # SigV4 signer compiled standalone: the credential component pulls esp_http_client
     # (no linux-host build), but the signer itself only needs kvs_utils + mbedtls.
     "../../components/credential/src/aws_signer_v4.c"
     # ICE re-trickle buffer compiled standalone: it is dependency-free (stdint
     # only), so the host test links it without the KVS signaling client.
-    "../../components/signaling/kvs_signaling/port/kvs_pending_ice.c")
+    "../../components/signaling/kvs_signaling/port/kvs_pending_ice.c"
+    # Liveness watchdog: dependency-free (stdint only), linked standalone for host test.
+    "../../components/kvs_webrtc/src/kvs_liveness.c")
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "."
@@ -20,5 +23,6 @@ idf_component_register(SRCS ${srcs}
                            "../../components/credential/src"
                            "../../components/kvs_utils/src"
                            "../../components/signaling/kvs_signaling/port"
+                           "../../components/kvs_webrtc/src"
                        PRIV_REQUIRES "unity" "kvs_utils" "mbedtls"
                        WHOLE_ARCHIVE)

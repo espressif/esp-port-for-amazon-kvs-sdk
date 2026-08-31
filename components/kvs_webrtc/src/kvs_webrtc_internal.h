@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2025-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -164,6 +164,19 @@ typedef struct kvs_pc_session_s {
     uint64_t start_time;
     PeerConnectionMetrics pc_metrics;
     KvsIceAgentMetrics ice_metrics;
+
+    // Liveness watchdog: track advancement of the selected pair's byte counters so
+    // a dead-but-CONNECTED peer (SDK never fires DISCONNECTED) can be evicted.
+    uint64_t wd_last_sent;            // last observed selected-pair bytesSent
+    uint64_t wd_last_recvd;           // last observed selected-pair bytesReceived
+    uint64_t wd_last_send_time;       // GETTIME when bytesSent last advanced
+    uint64_t wd_last_recv_time;       // GETTIME when bytesReceived last advanced
+    bool wd_ever_connected;           // latched once CONNECTED is seen (never cleared)
+    bool wd_ever_sent;                // latched once bytesSent advances
+    bool wd_ever_recvd;               // latched once bytesReceived advances
+    // One-shot guard for the disconnect teardown, so a watchdog eviction and an
+    // SDK-delivered DISCONNECTED for the same session can't both run it.
+    volatile ATOMIC_BOOL wd_disconnect_done;
 
     // RTC Stats and Metrics History for comprehensive metrics tracking
     RtcStats rtc_stats;

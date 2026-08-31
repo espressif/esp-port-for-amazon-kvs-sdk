@@ -33,7 +33,8 @@ idf_component_register(
     SRCS
         "${component_srcs}"
     INCLUDE_DIRS "${component_add_includedirs}"
-    PRIV_INCLUDE_DIRS "${KVS_WEBRTC_ROOT}/src/source"
+    PRIV_INCLUDE_DIRS
+        "${KVS_WEBRTC_ROOT}/src/source"
     REQUIRES "${component_requires}"
 )
 
