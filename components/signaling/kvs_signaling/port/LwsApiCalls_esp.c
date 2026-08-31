@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2025-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -31,6 +31,9 @@
 // Define constants needed for ESP implementation
 #define WS_TASK_STACK_SIZE  (6 * 1024)
 #define WS_BUFFER_SIZE      (4 * 1024)
+
+// Bounded WS send timeout: a portMAX_DELAY send on a wedged socket parks the shared worker forever.
+#define WS_SEND_TIMEOUT_MS  10000
 
 // HTTP-specific constants
 #define HTTP_RESPONSE_MAX_BUFFER_SIZE (4 * 1024) // Buffer to hold complete response
@@ -1389,10 +1392,16 @@ STATUS sendEspWebSocketMessage(PSignalingClient pSignalingClient, PCHAR pMessage
     // ESP_LOGI(TAG, "Message content (first 50 bytes): %.50s%s",
     //          pMessage, msgLen > 50 ? "..." : "");
 
-    // Send the message using ESP WebSocket client (no locks needed during actual send)
-    result = esp_websocket_client_send_text(gEspSignalingClientWrapper->wsClient, pMessage, msgLen, portMAX_DELAY);
-    if (result < 0) {
-        ESP_LOGE(TAG, "Failed to send WebSocket message, error: %d", result);
+    // Bounded timeout (WS_SEND_TIMEOUT_MS) so a wedged socket can't hang the signaling
+    // worker forever. Anything short of a full-length write is a failure: a timeout
+    // mid-message returns 0, which a `< 0` check would report as a successful send.
+    // No close needed here — esp_websocket_client aborts the connection itself on a
+    // write error, so a half-written frame is never followed by a fresh frame header.
+    result = esp_websocket_client_send_text(gEspSignalingClientWrapper->wsClient, pMessage, msgLen,
+                                            pdMS_TO_TICKS(WS_SEND_TIMEOUT_MS));
+    if (result != (int) msgLen) {
+        ESP_LOGE(TAG, "Failed to send WebSocket message (%d of %u bytes after up to %d ms)", result, (unsigned) msgLen,
+                 WS_SEND_TIMEOUT_MS);
         CHK_STATUS(STATUS_SIGNALING_SEND_MESSAGE_FAILED);
     } else {
         ESP_LOGD(TAG, "Successfully sent %d bytes", result);
