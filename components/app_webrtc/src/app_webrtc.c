@@ -25,6 +25,10 @@ static const char *TAG = "app_webrtc";
 // Event handling - fixed-size array of callbacks
 #define MAX_EVENT_CALLBACKS CONFIG_APP_WEBRTC_MAX_EVENT_CALLBACKS
 
+/* How long app_webrtc_terminate() waits for an in-flight signaling reconnect in
+ * sessionCleanupWait() to finish before it starts freeing what that loop uses. */
+#define APP_WEBRTC_RECONNECT_DRAIN_TIMEOUT_MS  30000
+
 typedef struct {
     app_webrtc_event_callback_t callback;
     void* user_ctx;
@@ -304,6 +308,7 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
         case WEBRTC_PEER_STATE_CONNECTED:
             if (pAppWebRTCSession != NULL) {
                 ESP_LOGI(TAG, "Peer connection state for %s: %d", pAppWebRTCSession->peerId, state);
+                ATOMIC_STORE_BOOL(&pAppWebRTCSession->connectedAnnounced, TRUE);
                 raiseEvent(APP_WEBRTC_EVENT_PEER_CONNECTED, 0, pAppWebRTCSession->peerId, "Peer connected");
             } else {
                 ESP_LOGI(TAG, "Peer connection state (bridge): %d", state);
@@ -316,7 +321,17 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
             if (pAppWebRTCSession != NULL) {
                 // FIXED: Mark only the specific session that failed, not the first one found!
                 ESP_LOGI(TAG, "Peer %s failed/disconnected - marking for cleanup", pAppWebRTCSession->peerId);
-                raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, pAppWebRTCSession->peerId, "Peer disconnected");
+                // Only report a disconnect for a peer we reported as connected. A session
+                // evicted before it ever connected (liveness watchdog, or an SDK-delivered
+                // FAILED) was never announced, and an unpaired PEER_DISCONNECTED walks the
+                // app's peer count down for a connection it never counted up -- power_save
+                // then arms deep sleep while another viewer is still streaming.
+                if (ATOMIC_EXCHANGE_BOOL(&pAppWebRTCSession->connectedAnnounced, FALSE)) {
+                    raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, pAppWebRTCSession->peerId, "Peer disconnected");
+                }
+                // Outside that gate on purpose: STREAMING_STOPPED pairs with
+                // STREAMING_STARTED, which is raised on MEDIA_STARTING while the offer is
+                // handled -- before ICE completes and so before connectedAnnounced is set.
                 raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, pAppWebRTCSession->peerId, "Media streaming stopped");
                 ATOMIC_STORE_BOOL(&pAppWebRTCSession->terminateFlag, TRUE);  // Mark THIS session
                 CVAR_BROADCAST(pSampleConfiguration->cvar);
@@ -878,7 +893,29 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                       retryCount + 1, (unsigned long long) (retryDelay / HUNDREDS_OF_NANOS_IN_A_SECOND));
 
                 // Disconnect and reconnect (don't abort loop on disconnect failure —
-                // the connection may already be broken, which is why we're reconnecting)
+                // the connection may already be broken, which is why we're reconnecting).
+                // Drop the lock across the blocking disconnect()/connect() so a slow reconnect
+                // can't starve the worker that needs it to answer inbound offers.
+                //
+                // reconnectInProgress is the handshake with app_webrtc_terminate(): with the
+                // lock released it can no longer infer that this loop is parked, so it waits
+                // on this flag before freeing the signaling client and this context.
+                ATOMIC_STORE_BOOL(&pSampleConfiguration->reconnectInProgress, TRUE);
+
+                // Terminate stores appTerminateFlag before it loads reconnectInProgress,
+                // so with this load one of the two always sees the other: either we bail
+                // out here, or terminate waits for the reconnect to finish.
+                if (ATOMIC_LOAD_BOOL(&pSampleConfiguration->appTerminateFlag)) {
+                    DLOGI("Terminate requested before signaling reconnect - leaving cleanup loop");
+                    ATOMIC_STORE_BOOL(&pSampleConfiguration->reconnectInProgress, FALSE);
+                    MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+                    sampleConfigurationObjLockLocked = FALSE;
+                    break;
+                }
+
+                MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+                sampleConfigurationObjLockLocked = FALSE;
+
                 retStatus = gWebRtcAppConfig.signaling_client_if->disconnect(gSignalingClientData);
                 if (STATUS_FAILED(retStatus)) {
                     DLOGW("Signaling disconnect failed: 0x%08x (continuing with reconnect)", retStatus);
@@ -890,6 +927,22 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                 connectionStartTime = currentTime;
 
                 retStatus = gWebRtcAppConfig.signaling_client_if->connect(gSignalingClientData);
+
+                // Release the handshake before re-locking. A terminate that arrived
+                // during the reconnect is blocked on this flag, so it has not freed
+                // the mutex or the context yet and the re-lock below is safe.
+                ATOMIC_STORE_BOOL(&pSampleConfiguration->reconnectInProgress, FALSE);
+                MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
+                sampleConfigurationObjLockLocked = TRUE;
+
+                // Terminate may have been requested while we were unlocked. Bail out
+                // now rather than carrying on against a context about to be freed.
+                if (ATOMIC_LOAD_BOOL(&pSampleConfiguration->appTerminateFlag)) {
+                    DLOGI("Terminate requested during signaling reconnect - leaving cleanup loop");
+                    MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+                    sampleConfigurationObjLockLocked = FALSE;
+                    break;
+                }
 
                 if (STATUS_FAILED(retStatus)) {
                     // Immediate failure - update retry tracking
@@ -2044,6 +2097,29 @@ WEBRTC_STATUS app_webrtc_terminate(void)
     if (gSampleConfiguration != NULL) {
         // Kick off the termination sequence
         ATOMIC_STORE_BOOL(&gSampleConfiguration->appTerminateFlag, TRUE);
+
+        // Wait out an in-flight signaling reconnect. sessionCleanupWait() runs
+        // disconnect()/connect() with sampleConfigurationObjLock released, so the
+        // lock/unlock handshake in freeAppWebRTCContext() cannot detect it; freeing
+        // the signaling client and the context underneath it is a use-after-free on
+        // both. Bounded so a wedged reconnect degrades to a warning, not a hang —
+        // the signaling send timeout and connect timeout keep this well short of
+        // the cap in practice.
+        if (ATOMIC_LOAD_BOOL(&gSampleConfiguration->reconnectInProgress)) {
+            UINT32 waited_ms = 0;
+            DLOGI("Terminate: waiting for in-flight signaling reconnect to finish");
+            while (ATOMIC_LOAD_BOOL(&gSampleConfiguration->reconnectInProgress) &&
+                   waited_ms < APP_WEBRTC_RECONNECT_DRAIN_TIMEOUT_MS) {
+                THREAD_SLEEP(20 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
+                waited_ms += 20;
+            }
+            if (ATOMIC_LOAD_BOOL(&gSampleConfiguration->reconnectInProgress)) {
+                DLOGW("Terminate: signaling reconnect still in flight after %u ms - proceeding",
+                      APP_WEBRTC_RECONNECT_DRAIN_TIMEOUT_MS);
+            } else {
+                DLOGI("Terminate: reconnect drained after %u ms", waited_ms);
+            }
+        }
 
         // Disconnect signaling client if available
         if (gWebRtcAppConfig.signaling_client_if != NULL &&
