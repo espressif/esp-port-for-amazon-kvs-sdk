@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
   repository. The upstream SDK is now a git submodule with platform patches
   applied via `git am patches/*.patch`.
+- Bumped the webrtc-c submodule to **1.20.0** (`4dd058d5`) and dropped the two
+  SDP-renegotiation patches — that flow is now upstream (awslabs#2214). The
+  patch set is down to three (ESP platform, Opus cap, ICE EALREADY). 1.20.0 also
+  brings opt-in mbedTLS 4 support (awslabs#2325), unused on IDF 5.5.
 
 ### Added
 
