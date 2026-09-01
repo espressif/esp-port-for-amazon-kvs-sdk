@@ -63,14 +63,10 @@ dependencies:
     rules:
       - if: "target not in [esp32c5, esp32c6]"
 
-  # esp_lvgl_port 2.8.0 carries the upstream lvgl8 DMA+SPIRAM gate
-  # (esp-bsp PR #783, merged 2026-05-15). Without it the BSP's loose
-  # transitive pin can bring an older esp_lvgl_port that rejects
-  # MALLOC_CAP_DMA|MALLOC_CAP_SPIRAM on PSRAM-DMA-capable SoCs (e.g.
-  # ESP32-P4) — the render backend then fails to allocate its
-  # SPIRAM-backed draw buffer.
+  # >=2.9.0: has the esp-bsp lvgl8 DMA+SPIRAM gate (PR #783) older versions
+  # lack, and drops the DPI callback IDF v5.5 deprecated (keeps -Werror clean).
   espressif/esp_lvgl_port:
-    version: "~2.8.0"
+    version: "~2.9.0"
     rules:
       - if: "target not in [esp32c5, esp32c6]"
 

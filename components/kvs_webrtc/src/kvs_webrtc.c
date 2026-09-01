@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2025-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -23,6 +23,7 @@
 #include "kvs_peer_connection.h"
 #include "app_webrtc_if.h"
 #include "kvs_webrtc_internal.h"
+#include "kvs_liveness.h"
 #include "kvs_media.h"
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 #include "esp_log.h"
@@ -56,6 +57,14 @@ static struct {
 
 // ICE candidate pair statistics settings
 #define KVS_ICE_STATS_DURATION (20 * HUNDREDS_OF_NANOS_IN_A_SECOND)  // 20 seconds
+
+// Liveness watchdog thresholds (evaluated on the KVS_ICE_STATS_DURATION tick).
+#define KVS_LIVENESS_CONNECT_DEADLINE (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)  // reach CONNECTED within 30s
+#define KVS_LIVENESS_STALL_DEADLINE   (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)  // once up, send bytes must advance within 30s
+static const kvs_liveness_cfg_t gKvsLivenessCfg = {
+    .connect_deadline = KVS_LIVENESS_CONNECT_DEADLINE,
+    .stall_deadline   = KVS_LIVENESS_STALL_DEADLINE,
+};
 
 // Active sessions hash table configuration
 #define KVS_ACTIVE_SESSIONS_HASH_TABLE_BUCKET_COUNT   32   // Support up to 32 concurrent sessions efficiently
@@ -1153,6 +1162,10 @@ static VOID onConnectionStateChangeHandler(UINT64 customData, RTC_PEER_CONNECTIO
             peer_state = WEBRTC_PEER_STATE_CONNECTED;
             ESP_LOGI(TAG, "Media started for peer=%s", session->peer_id);
             ATOMIC_STORE_BOOL(&session->media_started, TRUE);
+            // Latched for the liveness watchdog: last_kvs_state is current state, so
+            // any later re-entry into CONNECTING (SDK bump, restartIce) would other-
+            // wise make an established session look like it never connected.
+            session->wd_ever_connected = true;
 
             // Start media reception for this session if needed (transmission is global)
             if (session->client->config.receive_media && !session->media_threads_started) {
@@ -1188,6 +1201,18 @@ static VOID onConnectionStateChangeHandler(UINT64 customData, RTC_PEER_CONNECTIO
             peer_state = WEBRTC_PEER_STATE_DISCONNECTED;
             ESP_LOGI(TAG, "Media stopped for peer=%s (state=%d)", session->peer_id, newState);
             ATOMIC_STORE_BOOL(&session->media_started, FALSE);
+
+            // Run the teardown at most once per session. The liveness watchdog can
+            // drive this handler from the stats thread at the same moment the SDK
+            // delivers a real DISCONNECTED, and kvs_media_stop_session()'s
+            // check-then-NULL of the media players is not atomic — without this
+            // guard both callers can reach a double stop/deinit.
+            // Returning here also suppresses the duplicate peer-state notification
+            // below — the app was already told on the first disconnect.
+            if (ATOMIC_EXCHANGE_BOOL(&session->wd_disconnect_done, TRUE)) {
+                ESP_LOGD(TAG, "Disconnect teardown already done for peer %s - skipping", session->peer_id);
+                return;
+            }
 
             ESP_LOGI(TAG, "Connection ended for peer: %s - marking for cleanup", session->peer_id);
             session->terminated = TRUE;
@@ -2676,6 +2701,57 @@ static STATUS kvs_metricsCollectionCallback(UINT64 callerData, PHashEntry pHashE
         ESP_LOGV(TAG, "Failed to collect ICE stats for session %s: 0x%08" PRIx32 " - skipping session",
                 pSession->peer_id, (UINT32) statsStatus);
         CHK(FALSE, retStatus);  // Continue to next session - don't try other metrics
+    }
+
+    // Liveness watchdog. The SDK only fires DISCONNECTED off a passive inbound
+    // receive-timeout that a dead relay peer keeps "fresh" with stray bytes; when
+    // it never fires, the dead peer holds its viewer slot forever (iceAgentSendPacket
+    // "Invalid state" spam, video stops, reboot-only recovery). Detect it here with
+    // a send-side signal — a live send-only camera advances the selected pair's
+    // bytesSent every tick; a dead send path freezes it — and drive the normal
+    // DISCONNECTED teardown so the slot frees on its own.
+    {
+        UINT64 now = GETTIME();
+        // Track the directions separately. bytesSent only advances once the pair is
+        // SUCCEEDED, so a frozen send counter is exactly the failure we hunt for;
+        // bytesReceived advances for any non-STUN packet on the 5-tuple, so a viewer's
+        // RTCP would otherwise mask a rejected send path. Receive is therefore only
+        // used to judge a session that has never sent (receive/data-channel only).
+        UINT64 sent = pSession->rtc_stats.rtcStatsObject.iceCandidatePairStats.bytesSent;
+        UINT64 recvd = pSession->rtc_stats.rtcStatsObject.iceCandidatePairStats.bytesReceived;
+        if (sent > pSession->wd_last_sent) {
+            pSession->wd_last_sent = sent;
+            pSession->wd_last_send_time = now;
+            pSession->wd_ever_sent = true;
+        }
+        if (recvd > pSession->wd_last_recvd) {
+            pSession->wd_last_recvd = recvd;
+            pSession->wd_last_recv_time = now;
+            pSession->wd_ever_recvd = true;
+        }
+        kvs_liveness_health_t health = {
+            .terminate_flag     = pSession->terminated,
+            .ever_connected     = pSession->wd_ever_connected,
+            .ever_sent          = pSession->wd_ever_sent,
+            .ever_recvd         = pSession->wd_ever_recvd,
+            .offer_time         = pSession->start_time,
+            .last_send_progress = pSession->wd_last_send_time,
+            .last_recv_progress = pSession->wd_last_recv_time,
+        };
+        if (kvs_liveness_should_evict(&health, &gKvsLivenessCfg, now)) {
+            ESP_LOGW(TAG, "Liveness watchdog: peer %s is dead (ever_connected=%d) -- forcing disconnect to free the slot",
+                     pSession->peer_id, health.ever_connected);
+            // The handler's teardown path is one-shot (wd_disconnect_done), so this
+            // cannot race a concurrent SDK-delivered DISCONNECTED into a double
+            // media stop/deinit. It runs inline on the stats thread: it stops this
+            // session's media and raises the app's peer-disconnect events, which run
+            // every registered app callback inline before terminateFlag is set. Those
+            // callbacks must not re-enter a destroy API from here. app_webrtc only
+            // reports a disconnect for a peer it previously reported connected, so an
+            // eviction before CONNECT raises nothing at all.
+            onConnectionStateChangeHandler(POINTER_TO_HANDLE(pSession), RTC_PEER_CONNECTION_STATE_DISCONNECTED);
+            CHK(FALSE, retStatus);  // now terminated; skip the rest, continue to next session
+        }
     }
 
     // Also collect general peer connection and ICE agent metrics if enabled

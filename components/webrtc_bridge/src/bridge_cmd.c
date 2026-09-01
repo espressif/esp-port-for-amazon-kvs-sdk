@@ -760,10 +760,29 @@ esp_err_t bridge_cmd_send_event(uint32_t cmd_id,
 /* -------------------------------------------------------------------------- */
 
 /**
+ * Re-register the RX callback after the peer chip has rebooted and the esp_hosted
+ * transport has been re-established.
+ */
+esp_err_t bridge_cmd_rearm_rx(void)
+{
+#if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
+    if (s_handler_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE; /* bridge_cmd_init() has not run on this device */
+    }
+    return esp_hosted_register_custom_callback(BRIDGE_CMD_MSG_ID, bridge_cmd_receive_cb, NULL);
+#else
+    return ESP_OK;
+#endif
+}
+
+/**
  * esp_hosted RX callback.  Each incoming message is a self-contained
  * BridgeCommand protobuf (no transport-level CHNK reassembly needed).
  * protobuf-c unpack copies all data it needs, so the transient esp_hosted
  * buffer is safe to use directly.
+ *
+ * Both call sites are inside CONFIG_ESP_WEBRTC_BRIDGE_HOSTED while this file is
+ * compiled unconditionally, so the MQTT-bridge build needs the unused attribute.
  */
 __attribute__((unused))
 static void bridge_cmd_receive_cb(uint32_t msg_id, const uint8_t *data, size_t data_len, void *local_context)

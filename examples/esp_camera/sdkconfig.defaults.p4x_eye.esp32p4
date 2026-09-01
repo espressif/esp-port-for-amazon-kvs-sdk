@@ -28,6 +28,11 @@ CONFIG_ESP32P4_EYE_C6_BOARD=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
+# Only the 16 MB table carries the `slave` SPIFFS partition holding the C6
+# images for SLAVE_FLASHER_ENABLE below; without this the esp32p4 defaults keep
+# partitions.8mb.csv and the slave image cannot be created.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"
+
 #
 # Chip revision - P4-EYE engineering samples ship with pre-v3 P4 silicon.
 # Must be y so the bootloader/cache avoid v3-only timing. Without this the

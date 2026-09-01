@@ -178,9 +178,10 @@ void app_main(void)
     // Perform the time sync
     esp_webrtc_time_sntp_time_sync_and_wait();
 
-    // Initialize work queue in advance with lower (than default) stack size
+    /* Init early (before app_webrtc's 32 KB default) to keep this shared task
+     * small on the C6. Measured peak on the signaling path is ~4 KB. */
     esp_work_queue_config_t work_queue_config = ESP_WORK_QUEUE_CONFIG_DEFAULT();
-    work_queue_config.stack_size = 12 * 1024;
+    work_queue_config.stack_size = 8 * 1024;
     if (esp_work_queue_init_with_config(&work_queue_config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize work queue");
         return;

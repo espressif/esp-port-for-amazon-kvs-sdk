@@ -47,9 +47,12 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 # connector (customer should set this per the sensor module they wire in).
 # TX preset: 1080p @ 25 fps for customer-facing demo.
 #
-# CONFIG_CAMERA_OV2710 is not set
-CONFIG_CAMERA_SC2336=y
-CONFIG_CAMERA_SC2336_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+# OV2710 / SC2336 / OV5647 are all enabled with MIPI auto-detect in
+# sdkconfig.defaults.esp32p4 — the board enumerates whichever is wired.
+# (Do NOT disable OV2710 here; that broke OV2710 modules on the EV board.)
+# Pin each candidate's TX preset to 1080p @ 25 fps for the customer demo.
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+CONFIG_CAMERA_OV2710_STATS_UPDATE_INTERVAL=500
 CONFIG_CAMERA_SC2336_MIPI_RAW10_1920X1080_25FPS=y
 CONFIG_CAMERA_SC2336_STATS_UPDATE_INTERVAL=500
 
@@ -92,14 +95,15 @@ CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP=100
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 
 #
-# Pin-conflict / power-save fix — same rationale as P4-EYE: disable host
-# power-save so the wakeup-GPIO ISR doesn't get registered. slave_flasher
-# is the actual recovery path for the C6 slave anyway. Belt-and-suspenders
-# also pins HOST_WAKEUP_GPIO=-1.
+# Host power-save on, so esp_hosted registers the wake-up GPIO — the EV board
+# routes the C6 reset/wake pin to the P4, so a C6 reset reboots the host over
+# it. Unlike P4-EYE, GPIO 6 is free here (no audio-subboard I2S BCLK), so the
+# base esp32p4 chain's HOST_WAKEUP_GPIO=6 applies as-is. Do not pin the GPIO to
+# -1 while deep sleep is allowed: esp_hosted #errors on that combination.
+# The board never actually deep-sleeps (EXAMPLE_ENABLE_POWER_SAVE is off).
 #
-# CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED is not set
-# CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED is not set
-CONFIG_ESP_HOSTED_HOST_WAKEUP_GPIO=-1
+CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED=y
+CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED=y
 
 #
 # Performance knobs (proven-good on P4-EYE; should carry over cleanly).

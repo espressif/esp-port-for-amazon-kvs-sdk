@@ -118,12 +118,13 @@ esp_err_t esp_work_queue_init(void)
 
 esp_err_t esp_work_queue_init_with_config(esp_work_queue_config_t *config)
 {
-    queue_config = *config; // Copy the config
-
+    /* Bail before copying: a later caller must not overwrite the config of an
+     * already-running task (split mode inits this early with a smaller stack). */
     if (queue_state != WORK_QUEUE_STATE_DEINIT) {
         ESP_LOGW(TAG, "Work Queue already initialiased/started.");
         return ESP_OK;
     }
+    queue_config = *config; // Copy the config
     work_queue = xQueueCreate(queue_config.size, sizeof(esp_work_queue_entry_t));
     if (!work_queue) {
         ESP_LOGE(TAG, "Failed to create Work Queue.");

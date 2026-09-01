@@ -94,6 +94,7 @@ set(kvs_webrtc_include_dirs
 list(APPEND kvs_webrtc_srcs
     "${CMAKE_CURRENT_SOURCE_DIR}/src/kvs_media.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/WebRtcLogging.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/kvs_liveness.c"
 )
 
 # Conditionally add TLS implementation

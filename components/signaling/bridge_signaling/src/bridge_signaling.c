@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2025-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -57,14 +57,9 @@ void bridge_message_handler(const void* data, int len)
 {
     ESP_LOGI(TAG, "bridge_message_handler called with %d bytes", len);  // diag: trace each RX
 
-    if (g_bridge_client == NULL || g_bridge_client->on_msg_received == NULL) {
-        ESP_LOGW(TAG, "Bridge message received but no client or callback registered");
-        return;
-    }
-
-    // Deserialize the message
+    // Deserialize first so control messages (e.g. READY_QUERY) can be answered
+    // even before the client is fully initialized.
     signaling_msg_t signaling_msg = {0};
-    ESP_LOGD(TAG, "Processing bridge message (%d bytes)", len);
     esp_err_t deserialize_result = deserialize_signaling_message(data, len, &signaling_msg);
     if (deserialize_result != ESP_OK) {
         ESP_LOGE(TAG, "Failed to deserialize bridge message with error: %d", deserialize_result);
@@ -73,6 +68,29 @@ void bridge_message_handler(const void* data, int len)
 
     ESP_LOGI(TAG, "Deserialized message: type=%d, correlation_id=%s, peer_id=%s, payload_len=%d",
              (int) signaling_msg.messageType, signaling_msg.correlationId, signaling_msg.peerClientId, (int) signaling_msg.payloadLen);
+
+    // Answer READY_QUERY only once we can actually consume what the answer unblocks:
+    // READY makes the C6 flush its whole queue, and the flush frees each message with
+    // no retry, so answering while on_msg_received is still NULL loses every queued
+    // OFFER silently. Staying quiet keeps the C6 in WAITING_FOR_WAKEUP with the queue
+    // intact; bridgeConnect() sends READY as soon as the client is up.
+    if (signaling_msg.messageType == SIGNALING_MSG_TYPE_READY_QUERY) {
+        ESP_LOGI(TAG, "Received READY_QUERY from C6");
+        if (g_bridge_client != NULL && g_bridge_client->on_msg_received != NULL) {
+            ESP_LOGI(TAG, "P4 is ready, responding with READY signal");
+            send_ready_signal_to_c6();
+        } else {
+            ESP_LOGI(TAG, "P4 not ready to consume messages yet - not answering READY "
+                          "(C6 keeps queuing; READY follows from bridgeConnect)");
+        }
+        goto cleanup;
+    }
+
+    // Everything below requires an initialized client + registered callback.
+    if (g_bridge_client == NULL || g_bridge_client->on_msg_received == NULL) {
+        ESP_LOGW(TAG, "Bridge message received but no client or callback registered");
+        goto cleanup;
+    }
 
     // If the message type is TRIGGER_OFFER, we need to trigger an offer
     if (signaling_msg.messageType == SIGNALING_MSG_TYPE_TRIGGER_OFFER) {
@@ -84,18 +102,6 @@ void bridge_message_handler(const void* data, int len)
     // Handle READY signal (though P4 shouldn't normally receive this)
     if (signaling_msg.messageType == SIGNALING_MSG_TYPE_READY) {
         ESP_LOGI(TAG, "Received READY signal (unexpected on streaming device)");
-        goto cleanup;
-    }
-
-    // Handle READY_QUERY from C6 - respond with READY if we're initialized
-    if (signaling_msg.messageType == SIGNALING_MSG_TYPE_READY_QUERY) {
-        ESP_LOGI(TAG, "Received READY_QUERY from C6");
-        if (g_bridge_client != NULL) {
-            ESP_LOGI(TAG, "P4 is ready, responding with READY signal");
-            send_ready_signal_to_c6();
-        } else {
-            ESP_LOGI(TAG, "P4 is not ready yet, ignoring query");
-        }
         goto cleanup;
     }
 

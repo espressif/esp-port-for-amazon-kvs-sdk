@@ -87,16 +87,10 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 CONFIG_LV_COLOR_16_SWAP=y
 
 #
-# Pin-conflict fix: esp_hosted's slave-reset-detect GPIO defaults to 6,
-# which is also BSP_AUDIO_SUBBOARD_I2S_BCLK on P4-EYE. Once audio TX starts,
-# I2S BCLK pulses get interpreted as slave-reset and the host self-resets.
-# Disable host power-save (which is what registers the wakeup-GPIO ISR);
-# slave_flasher is the actual recovery path anyway. The GPIO knob is also
-# set to -1 as belt-and-suspenders.
+# No wake-up pin available
 #
-# CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED is not set
-# CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED is not set
-CONFIG_ESP_HOSTED_HOST_WAKEUP_GPIO=-1
+CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED=n
+CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED=n
 
 #
 # Performance knobs ported from rmaker standalone (proven-good on P4-EYE).

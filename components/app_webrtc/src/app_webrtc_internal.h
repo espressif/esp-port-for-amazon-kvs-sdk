@@ -150,6 +150,12 @@ typedef struct {
 
     // === Signaling Management ===
     volatile ATOMIC_BOOL recreate_signaling_client; /* Recreate signaling client flag */
+    /* Set by sessionCleanupWait() while it runs signaling disconnect()/connect() with
+     * sampleConfigurationObjLock released. app_webrtc_terminate() must wait for this
+     * to clear: the lock/unlock handshake in freeAppWebRTCContext() alone cannot see
+     * the loop, so terminate would otherwise free the signaling client and this very
+     * context while the loop is still inside — and using them on the way out. */
+    volatile ATOMIC_BOOL reconnectInProgress;
     webrtc_channel_role_type_t channel_role_type;  /* Channel role (master/viewer) */
 
     // === Session Management ===
@@ -199,6 +205,7 @@ typedef papp_webrtc_context_t PSampleConfiguration;
 struct __AppWebRTCSession {
     // === Core Session Management ===
     volatile ATOMIC_BOOL terminateFlag;        //!< Flag to indicate session should be terminated
+    volatile ATOMIC_BOOL connectedAnnounced;   //!< PEER_CONNECTED was raised for this session, so PEER_DISCONNECTED is owed
     volatile ATOMIC_BOOL peerIdReceived;       //!< Flag indicating peer ID has been received
     volatile ATOMIC_BOOL firstFrame;           //!< Flag for first frame handling
     char peerId[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN + 1]; //!< Peer identifier string
