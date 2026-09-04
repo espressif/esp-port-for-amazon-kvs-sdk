@@ -1,0 +1,47 @@
+From 8b5379d297f230ba4108d40c6e51a4b8157c4738 Mon Sep 17 00:00:00 2001
+From: Aryan Kadole <aryan.kadole@espressif.com>
+Date: Thu, 20 Aug 2026 15:53:09 +0530
+Subject: [PATCH] Crypto: hash the DTLS certificate through mbedtls_md, not
+ mbedtls_sha256
+
+mbedTLS 4 (TF-PSA-Crypto) moved mbedtls_sha256() into the private header
+mbedtls/private/sha256.h and only compiles the builtin SHA-256 driver when
+no platform PSA accelerator is present. On ESP-IDF v6 with
+CONFIG_MBEDTLS_HARDWARE_SHA the declaration is still visible, so
+dtlsCertificateFingerprint() compiles and then fails to link with
+'undefined reference to mbedtls_sha256'.
+
+mbedtls_md() is public API in mbedTLS 2, 3 and 4 and dispatches to whichever
+driver is active. pMdInfo is already fetched a few lines above for
+mbedtls_md_get_size(), so this also drops the version fork.
+---
+ src/source/Crypto/Dtls_mbedtls.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/source/Crypto/Dtls_mbedtls.c b/src/source/Crypto/Dtls_mbedtls.c
+index 3a46cc87ac..5f5b1c7b56 100644
+--- a/src/source/Crypto/Dtls_mbedtls.c
++++ b/src/source/Crypto/Dtls_mbedtls.c
+@@ -1185,11 +1185,14 @@ STATUS dtlsCertificateFingerprint(mbedtls_x509_crt* pCert, PCHAR pBuff)
+     pMdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+     CHK(pMdInfo != NULL, STATUS_INTERNAL_ERROR);
+ 
+-#if MBEDTLS_BEFORE_V3
+-    sslRet = mbedtls_sha256_ret(pCert->raw.p, pCert->raw.len, fingerprint, 0);
+-#else
+-    sslRet = mbedtls_sha256(pCert->raw.p, pCert->raw.len, fingerprint, 0);
+-#endif
++    /* Go through the generic message-digest layer rather than the SHA-256 module
++     * directly. mbedTLS 4 (TF-PSA-Crypto) moved mbedtls_sha256() into
++     * mbedtls/private/sha256.h and only compiles it when the builtin SHA-256
++     * driver is in use - a build with a platform PSA accelerator (e.g. ESP-IDF's
++     * hardware SHA) still declares it but never defines it, so the reference does
++     * not link. mbedtls_md() is public in every version and dispatches to
++     * whichever driver is active. */
++    sslRet = mbedtls_md(pMdInfo, pCert->raw.p, pCert->raw.len, fingerprint);
+     CHK(sslRet == 0, STATUS_INTERNAL_ERROR);
+ 
+     size = mbedtls_md_get_size(pMdInfo);
+-- 
+2.55.0
+
