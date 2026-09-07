@@ -15,6 +15,8 @@
  */
 
 #pragma once
+
+#include "esp_idf_version.h"
 #include "esp_lcd_types.h"
 
 /* LCD color formats */
@@ -27,8 +29,13 @@
 #define BSP_LCD_BIGENDIAN           (1)
 /* LCD display color bits */
 #define BSP_LCD_BITS_PER_PIXEL      (16)
-/* LCD display color space */
+/* LCD display colour element order. IDF v6 replaced esp_lcd_panel_dev_config_t's
+ * color_space field with rgb_ele_order and dropped ESP_LCD_COLOR_SPACE_*. */
+#if ESP_IDF_VERSION_MAJOR >= 6
+#define BSP_LCD_COLOR_SPACE         (LCD_RGB_ELEMENT_ORDER_RGB)
+#else
 #define BSP_LCD_COLOR_SPACE         (ESP_LCD_COLOR_SPACE_RGB)
+#endif
 /* LCD display definition */
 #define BSP_LCD_H_RES               (240)
 #define BSP_LCD_V_RES               (240)

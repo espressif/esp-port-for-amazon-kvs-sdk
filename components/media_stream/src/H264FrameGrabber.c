@@ -241,7 +241,7 @@ cleanup:
     return ESP_ERR_NO_MEM;
 }
 
-esp_h264_out_buf_t *get_h264_encoded_frame()
+esp_h264_out_buf_t *get_h264_encoded_frame(void)
 {
     esp_h264_out_buf_t *frame_data = heap_caps_calloc(1, sizeof(esp_h264_out_buf_t), MALLOC_CAP_SPIRAM);
     if (xQueueReceive(s_h264_enc_data.frame_queue, frame_data, pdMS_TO_TICKS(QUEUE_RECEIVE_WAIT_MS)) != pdTRUE) {
@@ -425,7 +425,7 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     return ESP_OK;
 }
 
-esp_h264_out_buf_t *get_h264_encoded_frame()
+esp_h264_out_buf_t *get_h264_encoded_frame(void)
 {
     return esp32p4_grab_one_frame();
 }
@@ -481,10 +481,9 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
-esp_h264_out_buf_t * get_h264_encoded_frame(uint8_t *out_buf, uint32_t *frame_len)
+esp_h264_out_buf_t *get_h264_encoded_frame(void)
 {
-    /* Dummy function which does nothing. Set the frame size to 0 */
-    *frame_len = 0;
+    /* Dummy function which does nothing */
     return NULL;
 }
 

@@ -178,3 +178,19 @@ CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
 CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
+
+#
+# mbedTLS features the KVS SDK needs. ESP-IDF v5.x defaulted both to y; v6
+# (mbedTLS 4) defaults them to n, which breaks the DTLS-SRTP negotiation and the
+# self-signed DTLS certificate the SDK generates.
+#
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+# Needed for the DTLS-SRTP fingerprint check; ESP-IDF v6 no longer defaults it on.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
+
+#
+# BLE provisioning security v1 (x25519 + PoP); IDF v6 gates the
+# NETWORK_PROV_SECURITY_1 enum behind this (default off).
+#
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y

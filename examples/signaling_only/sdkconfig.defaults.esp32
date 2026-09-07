@@ -1,0 +1,6 @@
+
+# signaling_only on this target uses the MQTT bridge and the chip has native
+# Wi-Fi, so the esp_hosted host has no role here. Leaving it on selects a host
+# SDIO transport whose sdkconfig.rename aliases collide with the legacy
+# CONFIG_ESP_SDIO_* names the esp_hosted slave Kconfig still declares.
+CONFIG_ESP_HOSTED_ENABLED=n

@@ -169,3 +169,13 @@ CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED=y
 #
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+#
+# mbedTLS features the KVS SDK needs. ESP-IDF v5.x defaulted both to y; v6
+# (mbedTLS 4) defaults them to n, which breaks the DTLS-SRTP negotiation and the
+# self-signed DTLS certificate the SDK generates.
+#
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+# Needed for the DTLS-SRTP fingerprint check; ESP-IDF v6 no longer defaults it on.
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
