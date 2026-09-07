@@ -1150,15 +1150,15 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
     STATUS retStatus = STATUS_SUCCESS;
     PSampleConfiguration pSampleConfiguration = (PSampleConfiguration) HANDLE_TO_POINTER(customData);
 
-    CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
-
-    // Normal processing (bridge mode is handled in wrapper, never reaches here)
+    // Declared before the first CHK: it jumps to CleanUp, which reads most of these.
     BOOL peerConnectionFound = FALSE, locked = FALSE, freeStreamingSession = FALSE;
     UINT32 clientIdHash;
     UINT64 hashValue = 0;
     PPendingMessageQueue pPendingMessageQueue = NULL;
     PAppWebRTCSession pAppWebRTCSession = NULL;
     webrtc_message_t* pWebRtcMessageCopy = NULL;
+
+    CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
 
     MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
     locked = TRUE;
@@ -1470,9 +1470,6 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
 CleanUp:
 
     // Clean up webrtc message copy if allocated
-    // Suppress false positive warning: pWebRtcMessageCopy is initialized in ICE_CANDIDATE case
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
     if (pWebRtcMessageCopy != NULL) {
         // Free the payload if allocated separately
         if (pWebRtcMessageCopy->payload != NULL) {
@@ -1480,9 +1477,8 @@ CleanUp:
         }
         // Free the message itself
         SAFE_MEMFREE(pWebRtcMessageCopy);
-        pWebRtcMessageCopy = NULL; // Clear after freeing to help compiler analysis
+        pWebRtcMessageCopy = NULL;
     }
-    #pragma GCC diagnostic pop
 
     if (pPendingMessageQueue != NULL) {
         freeMessageQueue(pPendingMessageQueue);
@@ -2000,6 +1996,15 @@ WEBRTC_STATUS app_webrtc_run(void)
 
 #define WEBRTC_TASK_STACK_SIZE     CONFIG_APP_WEBRTC_TASK_STACK_SIZE
 #define WEBRTC_TASK_PRIO           5
+#if CONFIG_IDF_TARGET_LINUX
+    /* Linux: dynamic task (no SPIRAM; static stacks crash in prvInitialiseNewTask),
+     * at the caller's priority: it idles in a host condvar wait the port can't see as
+     * blocking, so a higher priority would starve the caller. */
+    if (xTaskCreate(app_webrtc_runTask, "webrtc_run", WEBRTC_TASK_STACK_SIZE,
+                    NULL, uxTaskPriorityGet(NULL), &gWebRtcRunTaskHandle) != pdPASS) {
+        gWebRtcRunTaskHandle = NULL;
+    }
+#else
     static StaticTask_t *task_buffer = NULL;
     static void *task_stack = NULL;
 
@@ -2026,6 +2031,7 @@ WEBRTC_STATUS app_webrtc_run(void)
         task_stack,
         task_buffer
     );
+#endif
 
     if (gWebRtcRunTaskHandle == NULL) {
         DLOGE("Failed to create WebRTC run task");

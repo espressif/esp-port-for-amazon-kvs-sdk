@@ -45,7 +45,16 @@ static struct {
 } g_data_channel_callbacks = {0};
 
 // Certificate pre-generation settings - match Common.c timing
+#if CONFIG_IDF_TARGET_LINUX
+/* The pre-generation timer thread calls mbedtls RNG to build DTLS keypairs
+ * concurrently with the signaling TLS handshakes. On the IDF Linux target
+ * mbedTLS threading (THREADING_ALT) is not wired, so the two race and the
+ * handshake intermittently fails cert verification. Disable pre-generation
+ * here (certs are generated on demand instead); ESP builds keep it on. */
+#define KVS_PRE_GENERATE_CERT FALSE
+#else
 #define KVS_PRE_GENERATE_CERT TRUE
+#endif
 #define KVS_PRE_GENERATE_CERT_PERIOD (1000 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND)  // 1 second (same as Common.c)
 #define KVS_TIMER_QUEUE_THREAD_SIZE (8 * 1024)
 

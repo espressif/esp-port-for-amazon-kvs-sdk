@@ -1,0 +1,4 @@
+dependencies:
+  media_stream:
+    path: ${KVS_SDK_PATH}/components/media_stream
+    version: '*'

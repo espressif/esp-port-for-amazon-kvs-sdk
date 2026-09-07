@@ -35,6 +35,7 @@ menu "KVS WebRTC Configuration"
 
     config USE_ESP_TLS_FOR_KVS
         bool "Use ESP-TLS for KVS TLS connections (TURN over TLS)"
+        default n if IDF_TARGET_LINUX
         default y
         help
             Use ESP-TLS implementation instead of direct mbedTLS for TLS connections.

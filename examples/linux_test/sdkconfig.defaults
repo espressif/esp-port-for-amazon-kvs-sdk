@@ -1,0 +1,39 @@
+# Linux-target defaults.
+# The Linux IDF target deliberately keeps the surface area minimal; most
+# ESP-IDF Kconfig options simply don't exist here. Only the project's
+# own knobs land in this file.
+
+CONFIG_IDF_TARGET="linux"
+
+# Use the upstream libwebsockets-based signaling path on Linux. The
+# ESP-websocket-client variant is built around lwip + ESP-specific
+# socket APIs and isn't portable to the host stack.
+CONFIG_USE_ESP_WEBSOCKET_CLIENT=n
+
+# WebRTC needs DTLS over SRTP (RFC 5764) — KVS's Dtls_mbedtls.c uses
+# mbedtls_ssl_srtp_profile, mbedtls_ssl_conf_dtls_srtp_protection_profiles,
+# etc. ESP-target builds get these enabled implicitly via esp-tls; the
+# Linux IDF target needs them turned on explicitly.
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
+CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
+
+# Dtls_mbedtls.c also generates the ephemeral cert (mbedtls_x509write_crt_*) and
+# derives SRTP keys (mbedtls_ssl_export_keying_material) — off in the minimal
+# linux mbedtls config; enable like the ESP examples do.
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
+CONFIG_MBEDTLS_SSL_KEYING_MATERIAL_EXPORT=y
+
+# WebRTC checks the peer's DTLS cert fingerprint against the SDP — needs the
+# peer cert kept (default-on for ESP, off in the minimal linux mbedTLS config).
+CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
+
+# Use upstream KVS Tls_mbedtls.c on Linux. The Tls_esp.c variant needs
+# esp_tls.h + esp_crt_bundle.h, which are ESP-only.
+CONFIG_USE_ESP_TLS_FOR_KVS=n
+
+
+# ESP-IDF 6.2+ renumbers host file descriptors through VFS but leaves bind(),
+# setsockopt() and getsockname() unwrapped, so the SDK's sockets break (no ICE host
+# candidate). Keep plain host fds; earlier IDF versions ignore this.
+CONFIG_VFS_SUPPORT_IO=n

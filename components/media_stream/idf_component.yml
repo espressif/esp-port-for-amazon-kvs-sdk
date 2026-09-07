@@ -21,7 +21,7 @@ dependencies:
   espressif/esp_video:
     version: "~2.0.1"
     rules:
-      - if: "target not in [esp32]"
+      - if: "target not in [esp32, linux]"
 
   espressif/esp_h264:
     public: true
@@ -31,6 +31,8 @@ dependencies:
 
   espressif/esp_audio_codec:
     version: "*"
+    rules:
+      - if: "target != linux"
     matches:
       # esp_audio_codec 2.6.0's P4 opus_xcorr_kernel_4_opt uses instructions that
       # fault on P4 rev < 3 silicon (not runtime-guarded upstream). Cap below 2.6.0
@@ -46,12 +48,14 @@ dependencies:
   # hw_cfg-based display config this component uses. Keep in lockstep with the BSP.
   espressif/esp_codec_dev:
     version: "~1.5"
+    rules:
+      - if: "target != linux"
 
   # BSP component from component manager
   espressif/bsp_selector:
     version: "^1.0.0"
     rules:
-      - if: "target not in [esp32c5, esp32c6]"
+      - if: "target not in [esp32c5, esp32c6, linux]"
 
   espressif/esp_image_effects:
     version: "^1.0.1"
@@ -65,14 +69,14 @@ dependencies:
   lvgl/lvgl:
     version: "^8"
     rules:
-      - if: "target not in [esp32c5, esp32c6]"
+      - if: "target not in [esp32c5, esp32c6, linux]"
 
   # >=2.9.0: has the esp-bsp lvgl8 DMA+SPIRAM gate (PR #783) older versions
   # lack, and drops the DPI callback IDF v5.5 deprecated (keeps -Werror clean).
   espressif/esp_lvgl_port:
     version: "~2.9.0"
     rules:
-      - if: "target not in [esp32c5, esp32c6]"
+      - if: "target not in [esp32c5, esp32c6, linux]"
 
   esp_webrtc_utils:
     path: ../esp_webrtc_utils

@@ -27,7 +27,7 @@ cd ..
 ## Patch ledger
 
 Base: upstream `develop` at **`4dd058d5`** (the 1.20.0 version-bump commit,
-awslabs#2382; no release tag yet). All five patches apply cleanly against this
+awslabs#2382; no release tag yet). All six patches apply cleanly against this
 base (`git am`, no fuzz). The SDP-renegotiation patches were dropped here — that
 flow is now upstream (awslabs#2214, in 1.20.0).
 
@@ -38,6 +38,7 @@ flow is now upstream (awslabs#2214, in 1.20.0).
 | 0003 | Ice: accept already-connected TCP in `socketConnectionIsConnected` (lwIP reports `EALREADY`, not `EISCONN`; use `getpeername`) | ESP-IDF/lwIP-specific | candidate — low-priority portability PR to upstream; drop if it lands |
 | 0004 | Crypto: take the RNG from PSA when mbedTLS has no entropy module (`MBEDTLS_HAS_ENTROPY` gate; ESP-IDF 6 / TF-PSA-Crypto builds) | aligned | [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385) (approved, awaiting merge) |
 | 0005 | Crypto: hash the DTLS certificate through `mbedtls_md()` instead of `mbedtls_sha256()` in `dtlsCertificateFingerprint` | portability | candidate — not yet submitted; needed by any mbedTLS 4 build with a platform PSA hash driver |
+| 0006 | SessionDescription: initialise `pSeenTransceivers` before the first `CHK` in `findTransceiversByRemoteDescription` (early-exit paths reach `hashTableFree()` on an indeterminate pointer) | aligned | candidate — not yet submitted; upstream bug in the awslabs#2214 re-negotiation cleanup |
 
 > **Not carried as patches:** the upstream `Network.c` uses POSIX `getifaddrs()`,
 > which ESP-IDF does not ship, so the ESP-IDF adaptation lives as a full port file

@@ -28,6 +28,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "video_sink_priv.h"
+#include <pthread.h>
 
 static const char *TAG = "video_sink";
 
@@ -63,7 +64,10 @@ struct video_sink_s {
 };
 
 static struct video_sink_s s_sinks[CONFIG_VIDEO_SINK_MAX];
-static SemaphoreHandle_t   s_lock;
+/* Recursive. A pthread mutex so the SDK's threads may take it on the host; on the chips
+ * IDF builds it on a FreeRTOS recursive mutex. s_lock points at s_lock_store once set up. */
+static pthread_mutex_t     s_lock_store;
+static pthread_mutex_t    *s_lock;
 static uint32_t            s_enabled_count;
 
 /* Total time spent inside sink callbacks since the last read. The grabber folds
@@ -83,17 +87,22 @@ static esp_err_t sink_lock_init(void)
         /* First use is as good a zero as any for the rate interval; without it
          * the first snapshot before any reset would divide by all of uptime. */
         s_stats_epoch_us = esp_timer_get_time();
-        s_lock = xSemaphoreCreateRecursiveMutex();
-        if (s_lock == NULL) {
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+        int rc = pthread_mutex_init(&s_lock_store, &attr);
+        pthread_mutexattr_destroy(&attr);
+        if (rc != 0) {
             ESP_LOGE(TAG, "Failed to create sink mutex");
             return ESP_ERR_NO_MEM;
         }
+        s_lock = &s_lock_store;
     }
     return ESP_OK;
 }
 
-static inline void sink_lock(void)   { xSemaphoreTakeRecursive(s_lock, portMAX_DELAY); }
-static inline void sink_unlock(void) { xSemaphoreGiveRecursive(s_lock); }
+static inline void sink_lock(void)   { pthread_mutex_lock(s_lock); }
+static inline void sink_unlock(void) { pthread_mutex_unlock(s_lock); }
 
 esp_err_t video_sink_register(const video_sink_config_t *cfg, video_sink_handle_t *out)
 {

@@ -29,7 +29,7 @@
 #include "video_rate_ctrl.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
+#include "message_queue.h"
 #include "fileio.h"
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 
@@ -65,14 +65,19 @@ static UINT32 g_sender_resync_skipped;
 
 #define KVS_VIDEO_SINK_QUEUE_DEPTH 3
 
+/* One PSRAM block per queued frame: this header, then the encoded bytes. Owned by the
+ * queue entry, then by the sender thread, which frees it after the send. */
 typedef struct {
-    uint8_t           *buffer;    /* owned by the queue entry; freed after send */
-    uint32_t           len;
     uint64_t           timestamp;
+    uint32_t           len;
     video_frame_type_t type;
+    uint8_t            data[];
 } kvs_video_item_t;
 
-static QueueHandle_t      s_video_q;
+/* message_queue: the sender is a pthread on the host. Points at s_video_q_store
+ * while the intake is up, NULL otherwise. */
+static message_queue_t    s_video_q_store;
+static message_queue_t   *s_video_q;
 static video_sink_handle_t s_video_sink;
 static uint32_t           s_video_sink_drops;
 /* This transport's rate controller, and whether TWCC has switched it on yet.
@@ -99,21 +104,19 @@ static void kvs_video_sink_on_frame(const video_frame_t *frame, void *user)
         return;
     }
 
-    kvs_video_item_t item = {
-        .len       = frame->len,
-        .timestamp = frame->timestamp,
-        .type      = frame->type,
-    };
-    item.buffer = heap_caps_malloc(frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (item.buffer == NULL) {
+    kvs_video_item_t *item = heap_caps_malloc(sizeof(*item) + frame->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (item == NULL) {
         s_video_sink_drops++;
         return;
     }
-    memcpy(item.buffer, frame->buffer, frame->len);
+    item->timestamp = frame->timestamp;
+    item->len       = frame->len;
+    item->type      = frame->type;
+    memcpy(item->data, frame->buffer, frame->len);
 
-    /* Zero wait: this runs on the encoder task and must not block. */
-    if (xQueueSend(s_video_q, &item, 0) != pdTRUE) {
-        heap_caps_free(item.buffer);
+    /* Never waits for room: this runs on the encoder task and must not block. */
+    if (message_queue_add(s_video_q, item, (int) (sizeof(*item) + frame->len)) != ESP_OK) {
+        heap_caps_free(item);
         s_video_sink_drops++;
 
         /* Encoded frames cannot be dropped cleanly */
@@ -134,11 +137,10 @@ static void kvs_video_q_drain(void)
     if (s_video_q == NULL) {
         return;
     }
-    kvs_video_item_t item;
-    while (xQueueReceive(s_video_q, &item, 0) == pdTRUE) {
-        if (item.buffer) {
-            heap_caps_free(item.buffer);
-        }
+    void *item;
+    int len;
+    while (message_queue_get_next_wait(s_video_q, &item, &len, 0) == ESP_OK) {
+        heap_caps_free(item);
     }
 }
 
@@ -292,7 +294,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
     Frame frame;
     UINT64 startTime;
     media_stream_video_capture_t *video_capture = NULL;
-    kvs_video_item_t video_item = {0};
+    kvs_video_item_t *video_item = NULL;
     UINT64 frame_duration_100ns = KVS_SAMPLE_VIDEO_FRAME_DURATION; // Default 30 fps
     UINT64 last_send_time_us = 0; // Track last frame send time for rate control
     UINT32 target_fps = 30; // Default FPS
@@ -360,12 +362,19 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
              * loop still turns over and re-checks the terminate flag when the
              * camera goes quiet. */
             UINT32 timeout_ms = (UINT32)(frame_duration_100ns / HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
-            if (xQueueReceive(s_video_q, &video_item, pdMS_TO_TICKS(timeout_ms)) == pdTRUE &&
-                video_item.buffer != NULL && video_item.len > 0) {
-                frame.frameData = video_item.buffer;
-                frame.size = video_item.len;
-                frame.flags = (video_item.type == VIDEO_FRAME_TYPE_I) ? FRAME_FLAG_KEY_FRAME : FRAME_FLAG_NONE;
-                frame_available = TRUE;
+            void *data = NULL;
+            int len = 0;
+            if (message_queue_get_next_wait(s_video_q, &data, &len, timeout_ms) == ESP_OK) {
+                video_item = (kvs_video_item_t *) data;
+                if (video_item->len > 0) {
+                    frame.frameData = video_item->data;
+                    frame.size = video_item->len;
+                    frame.flags = (video_item->type == VIDEO_FRAME_TYPE_I) ? FRAME_FLAG_KEY_FRAME : FRAME_FLAG_NONE;
+                    frame_available = TRUE;
+                } else {
+                    heap_caps_free(video_item);
+                    video_item = NULL;
+                }
             }
         }
 
@@ -470,9 +479,9 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
                      * off s_video_q, not a borrowed capture reference, and the
                      * skip path below does not reach the free at the end of the
                      * send branch. */
-                    if (video_item.buffer != NULL) {
-                        heap_caps_free(video_item.buffer);
-                        video_item.buffer = NULL;
+                    if (video_item != NULL) {
+                        heap_caps_free(video_item);
+                        video_item = NULL;
                     }
                     frame_available = FALSE;
                 } else {
@@ -560,9 +569,9 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
             last_send_time_us = send_end_time_us;
 
             /* The copy belongs to this thread once dequeued. */
-            if (video_item.buffer != NULL) {
-                heap_caps_free(video_item.buffer);
-                video_item.buffer = NULL;
+            if (video_item != NULL) {
+                heap_caps_free(video_item);
+                video_item = NULL;
             }
         } else {
             // No frame available - sleep a bit to avoid busy waiting
@@ -579,9 +588,9 @@ CleanupVideo:
      * of the queue is drained by kvs_media_stop_global_transmission() once the
      * sink is disabled and this thread has been joined.
      * Note: video capture stop and deinit also happen there, after the join. */
-    if (video_item.buffer != NULL) {
-        heap_caps_free(video_item.buffer);
-        video_item.buffer = NULL;
+    if (video_item != NULL) {
+        heap_caps_free(video_item);
+        video_item = NULL;
     }
 
     ESP_LOGD(TAG, "Global video sender thread finished");
@@ -1002,7 +1011,15 @@ STATUS kvs_media_start_global_transmission(void* client_data, kvs_media_config_t
         /* Stand the intake up before the sender thread exists, so no frame can
          * arrive with nowhere to go. */
         if (s_video_q == NULL) {
-            s_video_q = xQueueCreate(KVS_VIDEO_SINK_QUEUE_DEPTH, sizeof(kvs_video_item_t));
+            /* Full: refuse the new frame, as xQueueSend(0) did; the sink callback
+             * frees it and asks for a key frame */
+            const message_queue_config_t q_cfg = {
+                .depth       = KVS_VIDEO_SINK_QUEUE_DEPTH,
+                .full_policy = MESSAGE_QUEUE_FULL_REJECT_NEW,
+            };
+            if (message_queue_init_with_config(&s_video_q_store, &q_cfg) == ESP_OK) {
+                s_video_q = &s_video_q_store;
+            }
         }
         if (s_video_q == NULL) {
             ESP_LOGE(TAG, "Failed to create video intake queue");
@@ -1160,8 +1177,8 @@ STATUS kvs_media_stop_global_transmission(void* client_data)
         s_vrate_twcc_enabled = false;
     }
     if (s_video_q != NULL) {
-        vQueueDelete(s_video_q);
         s_video_q = NULL;
+        message_queue_deinit(&s_video_q_store);
     }
     if (s_video_sink_drops > 0) {
         ESP_LOGI(TAG, "Video intake dropped %" PRIu32 " frame(s) this session", s_video_sink_drops);

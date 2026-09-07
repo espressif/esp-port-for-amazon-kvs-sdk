@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "video_rate_ctrl_priv.h"
+#include <pthread.h>
 
 static const char *TAG = "vrate";
 
@@ -231,7 +232,10 @@ struct video_rate_ctrl_s {
 };
 
 static struct video_rate_ctrl_s s_ctrl[CONFIG_VIDEO_RATE_CTRL_MAX];
-static SemaphoreHandle_t        s_lock;
+/* A pthread mutex so the SDK's threads may take it on the host; on the chips IDF builds
+ * it on a FreeRTOS mutex. s_lock points at s_lock_store once set up. */
+static pthread_mutex_t          s_lock_store;
+static pthread_mutex_t         *s_lock;
 
 /* Encoder-wide state. Written under s_lock. */
 static struct {
@@ -288,17 +292,17 @@ static _Atomic int64_t  s_stale_check_us;   /* next time staleness could matter 
 static esp_err_t vrate_lock_init(void)
 {
     if (s_lock == NULL) {
-        s_lock = xSemaphoreCreateMutex();
-        if (s_lock == NULL) {
+        if (pthread_mutex_init(&s_lock_store, NULL) != 0) {
             ESP_LOGE(TAG, "Failed to create rate-control mutex");
             return ESP_ERR_NO_MEM;
         }
+        s_lock = &s_lock_store;
     }
     return ESP_OK;
 }
 
-static inline void vrate_lock(void)   { xSemaphoreTake(s_lock, portMAX_DELAY); }
-static inline void vrate_unlock(void) { xSemaphoreGive(s_lock); }
+static inline void vrate_lock(void)   { pthread_mutex_lock(s_lock); }
+static inline void vrate_unlock(void) { pthread_mutex_unlock(s_lock); }
 
 static void vrate_expire_if_due(int64_t now);
 
@@ -970,7 +974,7 @@ void video_rate_ctrl_report_queue(video_rate_ctrl_handle_t h,
 
     /* Runs inside the sink dispatch loop, so never block the encoder task behind
      * whoever else holds the lock - the next frame carries the same information. */
-    if (xSemaphoreTake(s_lock, 0) != pdTRUE) {
+    if (pthread_mutex_trylock(s_lock) != 0) {
         return;
     }
     if (!h->in_use || !h->enabled || !s_agg.inited) {
@@ -1330,7 +1334,7 @@ static void vrate_expire_if_due(int64_t now)
     if (now < atomic_load(&s_stale_check_us)) {
         return;
     }
-    if (s_lock == NULL || xSemaphoreTake(s_lock, 0) != pdTRUE) {
+    if (s_lock == NULL || pthread_mutex_trylock(s_lock) != 0) {
         return;   /* Someone is mid-update; they will re-arbitrate anyway. */
     }
     /* Names of controllers that just went stale, logged after the unlock -

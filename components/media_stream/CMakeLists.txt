@@ -1,3 +1,15 @@
+if(IDF_TARGET STREQUAL "linux")
+    # Most src depends on ESP-only peripherals (camera/ISP/codec) — skip those.
+    # Compile the ESP-free parts kvs_webrtc links against: the rate controller,
+    # the encoded-frame sink bus (kvs_media takes video from it, so a host capture
+    # source publishes there too), plus stubs for the camera entry points.
+    idf_component_register(
+        SRCS "src/video_rate_ctrl.c" "src/video_sink.c" "src/linux_stubs.c"
+        INCLUDE_DIRS "include"
+        REQUIRES esp_webrtc_utils esp_timer pthread)
+    return()
+endif()
+
 if (ENABLE_SIGNALLING_ONLY)
     set(srcs )
 else()
@@ -31,7 +43,7 @@ else()
     )
 endif()
 
-set(priv_reqs "")
+set(priv_reqs pthread)
 if(CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER)
     list(APPEND priv_reqs espressif__esp_h264)
 endif()

@@ -9,6 +9,9 @@ set(srcs
     "test_pending_ice.c"
     "test_stale_peer_watchdog.c"
     "test_bridge_ready_query.c"
+    "test_message_queue.c"
+    # esp_webrtc_utils' message queue: FreeRTOS, pthread + libc only, linked standalone.
+    "../../components/esp_webrtc_utils/src/message_queue.c"
     # P4 bridge signaling compiled standalone: the test stubs its app_webrtc /
     # webrtc_bridge / ice_bridge_client deps and drives bridge_message_handler()
     # directly to lock in the "answer READY_QUERY only once offers can be consumed"

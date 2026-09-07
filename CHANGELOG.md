@@ -14,12 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository. The upstream SDK is now a git submodule with platform patches
   applied via `git am patches/*.patch`.
 - Bumped the webrtc-c submodule to **1.20.0** (`4dd058d5`) and dropped the two
-  SDP-renegotiation patches — that flow is now upstream (awslabs#2214). The
-  patch set is down to three (ESP platform, Opus cap, ICE EALREADY). 1.20.0 also
-  brings opt-in mbedTLS 4 support (awslabs#2325), unused on IDF 5.5.
+  SDP-renegotiation patches — that flow is now upstream (awslabs#2214). 1.20.0
+  also brings opt-in mbedTLS 4 support (awslabs#2325), unused on IDF 5.5. The
+  current patch set is listed in `patches/README.md`.
+- Moved the usrsctp submodule to tag `0.9.5.0-247-esp.2` on the fork, which adds
+  the Linux/macOS host build fix. The previous pin is tagged `0.9.5.0-247-esp.1`,
+  so both stay fetchable whatever happens to the fork's branches.
 
 ### Added
 
+- **`linux_test` host example** — the SDK as a KVS master on the IDF linux target
+  (Linux and macOS hosts), streaming file-backed H.264 + Opus; `tests/linux_test_e2e`
+  checks what an aiortc viewer receives against the sample frames. Builds on IDF
+  5.5, 6.0, 6.1 and master.
 - **Raw-frame sink bus** — the capture loop is a pump: it publishes each camera
   frame and moves on, and N consumers share the buffer by reference with a
   per-sink queue depth, overflow policy and fps limit. The H.264 encoder is just
@@ -82,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `signalingMessageReceived()` read uninitialised locals on its NULL-argument
+  error path; patch 0006 fixes the same pattern in the SDK's
+  `findTransceiversByRemoteDescription()`.
 - Jitter buffer dropping multiple valid packets (increased buffer size and
   queue depth).
 - OV2710 black frames (sensor detection, flip-control skip, ioctl access).

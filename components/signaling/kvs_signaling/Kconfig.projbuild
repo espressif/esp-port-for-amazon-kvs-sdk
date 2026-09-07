@@ -2,6 +2,7 @@ menu "KVS Signaling Configuration"
 
     config USE_ESP_WEBSOCKET_CLIENT
         bool "Use esp_websocket_client instead of libwebsockets"
+        default n if IDF_TARGET_LINUX
         default y
         help
             Kinesis Video Stream SDK uses libwebsockets for the signaling API requests.

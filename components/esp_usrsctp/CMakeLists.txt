@@ -17,13 +17,17 @@ idf_component_register(
         freertos
 )
 
-# Set up environment for usrsctp
+# Set up environment for usrsctp. CACHE ... FORCE because the inner
+# usrsctp/CMakeLists.txt declares these as option() — a plain set() gets
+# overridden by option()'s default at add_subdirectory time, and
+# SCTP_USE_LWIP would end up defined on Linux (dragging in lwip headers the
+# userspace host path can't satisfy).
 if(CONFIG_IDF_TARGET STREQUAL "linux")
-    set(sctp_use_lwip OFF)
-    set(sctp_use_rtos OFF)
+    set(sctp_use_lwip OFF CACHE BOOL "build with lwip" FORCE)
+    set(sctp_use_rtos OFF CACHE BOOL "build with rtos" FORCE)
 else()
-    set(sctp_use_lwip ON)
-    set(sctp_use_rtos ON)
+    set(sctp_use_lwip ON CACHE BOOL "build with lwip" FORCE)
+    set(sctp_use_rtos ON CACHE BOOL "build with rtos" FORCE)
 endif()
 
 # Add definitions needed by usrsctp
@@ -34,6 +38,16 @@ add_definitions(-DHAVE_SYS_QUEUE_H)
 add_definitions(-DHAVE_STDATOMIC_H)
 add_definitions(-DSCTP_DEBUG)
 add_definitions(-DESP_PLATFORM)
+
+# On a macOS host building the IDF Linux target, usrsctp's CMake sees
+# CMAKE_SYSTEM_NAME=Linux and adds -D_GNU_SOURCE, which on macOS hides the BSD
+# `struct ip`/`udphdr` (guarded behind _DARWIN_C_SOURCE) -> "incomplete type".
+# Detect the real HOST (CMAKE_HOST_APPLE, true even for the linux target) and
+# expose the Darwin headers. Only for the linux target: ESP targets build with
+# their own toolchain and headers.
+if(CMAKE_HOST_APPLE AND CONFIG_IDF_TARGET STREQUAL "linux")
+    add_definitions(-D_DARWIN_C_SOURCE)
+endif()
 
 if(sctp_use_lwip)
     add_definitions(-DSCTP_USE_LWIP)
@@ -87,16 +101,34 @@ add_compile_options(
     -Wno-implicit-function-declaration
     -Wno-incompatible-pointer-types
     -Wno-format
-	-Wno-error=maybe-uninitialized
     -Wno-pedantic
     -Wno-error=pedantic
 )
+
+# Apple Clang doesn't know `-Wmaybe-uninitialized` (GCC-only; LLVM uses plain
+# `-Wuninitialized`) and errors on the unknown option under -Werror. Probe and
+# add only when supported so the Linux-target host build works on macOS.
+include(CheckCCompilerFlag)
+check_c_compiler_flag("-Wno-error=maybe-uninitialized" HAS_NO_ERROR_MAYBE_UNINIT)
+if(HAS_NO_ERROR_MAYBE_UNINIT)
+    add_compile_options(-Wno-error=maybe-uninitialized)
+endif()
 
 # Add usrsctp as a subdirectory
 add_subdirectory(${usrsctp_root_dir} ${CMAKE_CURRENT_BINARY_DIR}/usrsctp)
 
 # so that we can use pthread and heap functions in usrsctp
 target_link_libraries(usrsctp PRIVATE idf::pthread idf::heap)
+
+# Host build: usrsctp's own threads must start with the FreeRTOS tick (SIGALRM)
+# masked, or a tick landing on them parks them in place of the running task and
+# freezes the scheduler. Redirect usrsctp's pthread_create to a wrapper compiled
+# into the same target (see esp_usrsctp_linux_thread.c).
+if(CONFIG_IDF_TARGET STREQUAL "linux")
+    target_compile_definitions(usrsctp PRIVATE pthread_create=esp_usrsctp_pthread_create)
+    target_sources(usrsctp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/esp_usrsctp_linux_thread.c)
+endif()
+
 
 # Link against usrsctp library
 target_link_libraries(${COMPONENT_LIB} PUBLIC usrsctp)
