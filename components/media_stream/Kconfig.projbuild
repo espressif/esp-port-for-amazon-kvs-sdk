@@ -351,9 +351,21 @@ menu "Media Stream Configuration"
                   1280x720 YUV420   1.32 MiB each   4 buffers = 5.27 MiB
                   1920x1080 YUV420  2.97 MiB each   4 buffers = 11.87 MiB
 
+        # Largest reserve that still leaves 2 loanable buffers, which is what the
+        # mandatory encoder sink registers for. Without this the pair
+        # COUNT=3 / RESERVE=2 passes menuconfig and the encoder sink is then
+        # refused at registration, leaving the camera running with nothing
+        # encoding it.
+        config MEDIA_STREAM_CAM_BUFFER_RESERVE_MAX
+            int
+            default 1 if MEDIA_STREAM_CAM_BUFFER_COUNT = 3
+            default 2 if MEDIA_STREAM_CAM_BUFFER_COUNT = 4
+            default 3 if MEDIA_STREAM_CAM_BUFFER_COUNT = 5
+            default 4
+
         config MEDIA_STREAM_CAM_BUFFER_RESERVE
             int "Camera buffers never loaned to sinks"
-            range 1 4
+            range 1 MEDIA_STREAM_CAM_BUFFER_RESERVE_MAX
             default 2
             help
                 Buffers held back from the loan budget so the camera always has
@@ -363,6 +375,12 @@ menu "Media Stream Configuration"
                 useful default: one being filled, one queued behind it, so the
                 camera keeps running at full rate while every other buffer is
                 out with a sink.
+
+                The upper end is bounded by MEDIA_STREAM_CAM_BUFFER_COUNT: what
+                is left over after the reserve has to cover the encoder sink,
+                which is always registered and always claims 2 (one queued, one
+                being encoded). So a count of 3 forces a reserve of 1, and
+                raising the reserve means raising the count with it.
 
         config VIDEO_SINK_MAX
             int "Maximum number of encoded video sinks"
@@ -446,6 +464,53 @@ menu "Media Stream Configuration"
                 next IDR. A UVC camera sets its own GOP (up to 10 s), so one overflow can
                 stall the viewer for that long; the deeper UVC default absorbs send-side
                 jitter instead.
+
+        config VIDEO_RAW_SINK_MAX
+            int "Maximum number of raw video sinks"
+            range 1 8
+            default 5
+            help
+                How many consumers may register for raw camera frames at once.
+
+                This is a table size, not a budget. The budget is separate: a
+                passthrough sink claims queue_depth + 1 camera buffers and
+                registration fails once MEDIA_STREAM_CAM_BUFFER_COUNT minus
+                MEDIA_STREAM_CAM_BUFFER_RESERVE runs out. Inline sinks claim
+                nothing, so this ceiling is the only one that applies to them.
+
+        config VIDEO_RAW_SINK_SLOW_WARN_US
+            int "Slow raw sink warning threshold (us)"
+            range 100 1000000
+            default 20000
+            help
+                An inline raw sink holding a frame longer than this is named in
+                a rate-limited warning.
+
+                This applies to VIDEO_RAW_MODE_INLINE only, because those run on
+                the pump task and delay every other sink.
+
+        config VIDEO_RAW_SINK_BLOCK_TIMEOUT_MS
+            int "Default timeout for blocking raw sinks (ms)"
+            range 1 5000
+            default 100
+            help
+                How long the pump waits for a VIDEO_RAW_OVERFLOW_BLOCK sink
+                before giving up on a frame and counting dropped_timeout.
+
+                Only VIDEO_RAW_OVERFLOW_BLOCK sinks are affected, and each may
+                override this in its own config.
+
+        config VIDEO_RAW_SINK_TASK_STACK
+            int "Default stack for push-mode raw sink tasks (bytes)"
+            range 2048 32768
+            default 4096
+            help
+                Stack for the task the bus runs on behalf of a raw sink that
+                supplied an on_frame callback. Allocated from SPIRAM.
+
+                4 KB suits a callback that copies or forwards. Anything running
+                a model needs considerably more and should say so in its own
+                config, or use the pull API and own its task outright.
 
         config AUDIO_FRAME_QUEUE_SIZE
             int "Audio Frame Queue Size"

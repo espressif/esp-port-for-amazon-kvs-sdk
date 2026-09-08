@@ -62,6 +62,52 @@ typedef struct {
 } video_frame_raw_t;
 
 /**
+ * @brief FourCC pixel-format codes
+ *
+ * Values match the V4L2 codes of the same name, so a fourcc read straight out of the
+ * driver compares equal to the constant here. The exception is O_UYY_E_VYY, which V4L2
+ * has no code for - see below.
+ */
+#define VIDEO_FOURCC(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | \
+                                  ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
+
+/* Semi-packed YUV420: odd rows U Y Y, even rows V Y Y. What the P4 ISP emits and the
+ * only layout the P4 hardware H.264 encoder accepts */
+#define VIDEO_FOURCC_O_UYY_E_VYY  VIDEO_FOURCC('O', 'U', 'E', 'V')
+
+#define VIDEO_FOURCC_I420         VIDEO_FOURCC('Y', 'U', '1', '2')  /* planar YUV 4:2:0 */
+#define VIDEO_FOURCC_YUYV         VIDEO_FOURCC('Y', 'U', 'Y', 'V')  /* packed YUV 4:2:2 */
+#define VIDEO_FOURCC_UYVY         VIDEO_FOURCC('U', 'Y', 'V', 'Y')
+#define VIDEO_FOURCC_RGB565       VIDEO_FOURCC('R', 'G', 'B', 'P')  /* little-endian */
+#define VIDEO_FOURCC_RGB24        VIDEO_FOURCC('R', 'G', 'B', '3')
+#define VIDEO_FOURCC_GREY         VIDEO_FOURCC('G', 'R', 'E', 'Y')  /* 8-bit luma only */
+#define VIDEO_FOURCC_SBGGR8       VIDEO_FOURCC('B', 'A', '8', '1')  /* raw Bayer, ISP bypassed */
+#define VIDEO_FOURCC_H264         VIDEO_FOURCC('H', '2', '6', '4')
+
+/**
+ * @brief A raw (uncompressed) frame handed to a raw sink
+ *
+ * Deliberately small and free of pointers-to-owned-things: it is passed BY VALUE through
+ * queues, so a frame costs no allocation to deliver.
+ *
+ * @c slot and @c generation are the frame's identity for release purposes. Do not modify
+ * them, and pass the descriptor back unchanged - releasing a mutated or stale descriptor
+ * is detected and refused rather than corrupting the buffer pool.
+ */
+typedef struct {
+    uint8_t *buffer;        /* Pixel data */
+    size_t   len;           /* Bytes valid in @c buffer */
+    uint16_t width;
+    uint16_t height;
+    uint32_t fourcc;        /* VIDEO_FOURCC_*: what @c buffer actually contains */
+    uint64_t timestamp_us;  /* Capture time, microseconds since boot */
+    uint32_t seq;           /* Monotonic capture counter; a gap means frames were dropped */
+    uint8_t  slot;          /* Opaque: which capture buffer this is */
+    uint8_t  generation;    /* Opaque: stale-release detector */
+    bool     owned;         /* true when this is a private converted buffer, not a camera one */
+} video_raw_frame_t;
+
+/**
  * @brief Callback to preprocess raw frame before h264 encoding
  *
  * @param frame_raw Raw frame data

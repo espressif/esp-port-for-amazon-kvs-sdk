@@ -61,6 +61,7 @@
 #include "webrtc_mem_utils.h"
 #include "video_capture.h"
 #include "video_sink_priv.h"
+#include "video_raw_bus_priv.h"
 #if USE_ESP_VIDEO_IF
 #include "esp_video_if.h"
 #endif
@@ -576,56 +577,92 @@ static void publish_encoded_frame(uint8_t *buffer, uint32_t len, esp_h264_frame_
  * camera buffer still checked out, so everything here is on the camera's critical
  * path - which is exactly why the encoded sinks below it must be quick.
  */
-static esp_err_t h264_raw_sink_on_frame(const video_frame_raw_t *raw, void *user)
+static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
 {
     (void)user;
+
+    const uint8_t *src     = raw->buffer;
+    size_t         src_len = raw->len;
+
+    /* The hardware encoder takes O_UYY_E_VYY and nothing else. The ISP already produces
+     * it, so the CSI path passes straight through; a UVC camera hands over YUY2, which is
+     * repacked here rather than in the pump - the pump publishes what the camera actually
+     * produced, and a format only this consumer needs is this consumer's problem. */
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+    if (raw->fourcc == VIDEO_FOURCC_YUYV) {
+        const size_t need = (size_t)raw->width * raw->height * 3 / 2;
+        if (s_conv_buf_len < need) {
+            if (s_conv_buf) {
+                heap_caps_free(s_conv_buf);
+            }
+            s_conv_buf = heap_caps_aligned_calloc(64, 1, need, MALLOC_CAP_SPIRAM);
+            s_conv_buf_len = s_conv_buf ? need : 0;
+        }
+        if (s_conv_buf == NULL) {
+            return;
+        }
+        yuy2_to_o_uyy_e_vyy(raw->buffer, s_conv_buf, raw->width, raw->height);
+        src     = s_conv_buf;
+        src_len = need;
+    }
+#endif
 
     /* Borrowed: valid only until the next encode, which is why it is copied into
      * the pool below rather than published directly. */
     esp_h264_out_buf_t enc = {0};
-    if (esp_h264_hw_enc_encode_frame_borrow(raw->buffer, raw->len, &enc) != ESP_OK) {
+    if (esp_h264_hw_enc_encode_frame_borrow((uint8_t *)src, src_len, &enc) != ESP_OK) {
         static uint32_t enc_fail_count;
         enc_fail_count++;
         if (enc_fail_count == 1 || (enc_fail_count & 0x1F) == 0) {
             ESP_LOGW(TAG, "esp_h264_hw_enc_encode_frame_borrow() failed (count=%" PRIu32 ")",
                      enc_fail_count);
         }
-        return ESP_FAIL;
+        return;
     }
 
     /* Skip empty encoder output: a zero-length frame yields calloc(_, 0), a
      * pathological tiny pointer that NULL-checks pass and free() later corrupts
      * TLSF with (same crash family as the Opus zero-frame bug). */
     if (enc.len == 0) {
-        return ESP_OK;
+        return;
     }
 
     uint8_t *slot = enc_pool_take(enc.len);
     if (slot == NULL) {
         /* Already logged. Dropping one frame beats stalling the camera. */
-        return ESP_OK;
+        return;
     }
     memcpy(slot, enc.buffer, enc.len);
 
     publish_encoded_frame(slot, enc.len, enc.type);
     /* Nothing to free: the pool owns the buffer and will reuse this slot two
      * frames from now. */
-    return ESP_OK;
 }
 
-/* The encoder is the single raw-frame sink; encoded frames go out through the
- * video_sink registry, which consumers join with video_sink_register(). */
+/* The encoder is a raw-frame sink; encoded frames go out through the video_sink
+ * registry, which consumers join with video_sink_register().
+ *
+ * INLINE for now, which is exactly what the pipeline did before the bus existed: encode
+ * on the capture task with the camera buffer checked out. Moving it to its own task is
+ * the next step, and only the mode field changes. */
 static void register_raw_sink(void)
 {
-    static const video_raw_sink_t raw_sink = {
+    static video_raw_sink_handle_t s_enc_sink;
+    if (s_enc_sink != NULL) {
+        return;
+    }
+    const video_raw_sink_config_t cfg = {
         .name     = "h264-enc",
+        .mode     = VIDEO_RAW_MODE_INLINE,
         .on_frame = h264_raw_sink_on_frame,
         .user     = NULL,
     };
-    esp_err_t err = video_raw_sink_register(&raw_sink);
-    if (err != ESP_OK && err != ESP_ERR_NOT_SUPPORTED) {
+    esp_err_t err = video_raw_sink_register(&cfg, &s_enc_sink);
+    if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register raw sink: %s", esp_err_to_name(err));
+        return;
     }
+    video_raw_sink_set_enabled(s_enc_sink, true);
 }
 
 static void video_encoder_task(void *arg)
@@ -742,46 +779,26 @@ static void video_encoder_task(void *arg)
          * encoded sinks, then start the next iteration. Nothing below this point
          * applies: it all operates on a camera-supplied access unit. */
         if (!is_passthrough) {
-            uint8_t *enc_src = raw_frame->buf;
-            size_t   enc_src_len = raw_frame->len;
             video_resolution_t enc_res = {0};
             const bool have_res = (esp_video_if_get_resolution(&enc_res) == ESP_OK &&
                                    enc_res.width && enc_res.height);
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
-            /* A UVC camera delivers YUY2; the hardware encoder only takes
-             * O_UYY_E_VYY, so repack before handing it over. */
-            if (have_res) {
-                const size_t need = (size_t) enc_res.width * enc_res.height * 3 / 2;
-                if (s_conv_buf_len < need) {
-                    if (s_conv_buf) {
-                        heap_caps_free(s_conv_buf);
-                    }
-                    s_conv_buf = heap_caps_aligned_calloc(64, 1, need, MALLOC_CAP_SPIRAM);
-                    s_conv_buf_len = s_conv_buf ? need : 0;
-                }
-                if (s_conv_buf) {
-                    yuy2_to_o_uyy_e_vyy(raw_frame->buf, s_conv_buf, enc_res.width, enc_res.height);
-                    enc_src = s_conv_buf;
-                    enc_src_len = need;
-                }
-            }
-#endif
-            video_frame_raw_t raw_for_sink = {
-                .buffer = enc_src,
-                .len    = enc_src_len,
-                .pixfmt = PIXFMT_YUV420,
-                .width  = have_res ? enc_res.width : 0,
-                .height = have_res ? enc_res.height : 0,
-            };
-            const esp_err_t sink_ret = video_raw_sink_dispatch(&raw_for_sink);
 
-            /* Released only after the dispatch returns: the sink borrows this buffer. */
-            esp_video_if_release_frame(raw_frame);
-            if (sink_ret != ESP_OK) {
-                /* Encoder hiccup or no sink registered - back off a little so a
-                 * persistent failure does not spin the task. */
-                vTaskDelay(pdMS_TO_TICKS(10));
+            /* V4L2 reports the ISP's semi-packed layout as plain YUV420, which is
+             * indistinguishable from I420 over the wire. Only this layer knows which one
+             * it really is, so it is named here rather than guessed at downstream. */
+            uint32_t fourcc = VIDEO_FOURCC_O_UYY_E_VYY;
+            if (capture_pixfmt == V4L2_PIX_FMT_YUYV) {
+                fourcc = VIDEO_FOURCC_YUYV;
             }
+
+            if (have_res) {
+                raw_frame->width  = enc_res.width;
+                raw_frame->height = enc_res.height;
+            }
+
+            /* Ownership passes to the bus: it releases the buffer, not us. */
+            video_raw_bus_publish(raw_frame, fourcc,
+                                  have_res ? enc_res.fps : 0);
             continue;
         }
 
@@ -1127,6 +1144,12 @@ esp_err_t esp32p4_frame_grabber_start(void)
     }
 #endif
 
+#if USE_ESP_VIDEO_IF
+    /* Clears the halt a previous stop() left in place, so blocking sinks wait normally
+     * again instead of failing fast. */
+    video_raw_bus_resume();
+#endif
+
     s_p4_enc_data.running = true;
     xSemaphoreGive(s_p4_enc_data.run_semaphore);  // Signal encoder to start
     ESP_LOGD(TAG, "ESP32P4 frame grabber started");
@@ -1148,6 +1171,13 @@ esp_err_t esp32p4_frame_grabber_stop(void)
 
     s_p4_enc_data.running = false;
 
+#if USE_ESP_VIDEO_IF
+    /* Before the park wait, not after: a pump blocked inside a VIDEO_RAW_OVERFLOW_BLOCK
+     * sink never parks on its own, so waiting first would mean waiting behind the very
+     * sink being shut down. */
+    video_raw_bus_halt();
+#endif
+
     /* Wait for the task to park for longer that one DQBUF. Without this, stop() can return
      * while the task is still mid-DQBUF or holding a raw frame, and a caller that then releases
      * the capture buffers (the UVC re-init path does) unmaps memory still in use. */
@@ -1164,6 +1194,13 @@ esp_err_t esp32p4_frame_grabber_stop(void)
         ESP_LOGW(TAG, "encoder task did not park within %d ms; capture buffers stay mapped",
                  park_timeout_ms);
     }
+
+#if USE_ESP_VIDEO_IF
+    /* Parking the pump only guarantees no NEW frame is published. Sinks may still hold
+     * buffers from before, and the caller is entitled to unmap them once this returns, so
+     * every reference has to be accounted for first. */
+    video_raw_bus_drain();
+#endif
 
     ESP_LOGD(TAG, "ESP32P4 frame grabber stopped");
 
