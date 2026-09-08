@@ -42,6 +42,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "video_frame_convert.h"
 #include "video_raw_bus_priv.h"
 
 static const char *TAG = "video_raw_bus";
@@ -111,6 +112,13 @@ struct video_raw_sink_s {
     volatile bool        task_run;
     SemaphoreHandle_t    exited;     /* Given by sink_task just before it parks; the join. */
 
+    uint32_t             want_fourcc;
+    uint16_t             want_width;
+    uint16_t             want_height;
+    /* Created on the first frame, not at registration: the camera's format is not known until it
+     * starts, and building the converter against a guess would silently produce wrong pixels. */
+    video_frame_convert_handle_t conv;
+
     /* Rate gate: fixed-point accumulator, so 30 -> 7 fps lands on 7 and not 6 or 8. */
     uint32_t             rate_acc;
 
@@ -120,6 +128,7 @@ struct video_raw_sink_s {
     uint32_t             drop_nobuf;
     uint32_t             drop_rate;
     uint32_t             drop_timeout;
+    uint32_t             drop_convert;
     uint64_t             blocked_us;
     uint32_t             max_hold_us;
     uint64_t             total_hold_us;
@@ -158,6 +167,13 @@ esp_err_t video_raw_bus_init(void)
         ESP_LOGE(TAG, "Failed to create bus primitives");
         return ESP_ERR_NO_MEM;
     }
+    /* Here rather than in the converter's own lazy path: converters are created on each sink's
+     * task, on the first frame, so two of them can race. This runs on the registering task, long
+     * before any sink task exists. */
+    esp_err_t err = video_frame_convert_init();
+    if (err != ESP_OK) {
+        return err;
+    }
     s_stopping = false;
     return ESP_OK;
 }
@@ -172,7 +188,7 @@ esp_err_t video_raw_bus_init(void)
 static void slot_release(uint8_t slot, uint8_t generation)
 {
     if (slot == NO_SLOT) {
-        return;                                  /* Frame with no camera buffer behind it. */
+        return;                                  /* Converted frame: no camera buffer. */
     }
     if (slot >= MEDIA_STREAM_CAM_BUFFER_COUNT) {
         ESP_LOGE(TAG, "release of out-of-range slot %u", slot);
@@ -214,11 +230,17 @@ static void slot_release(uint8_t slot, uint8_t generation)
     xSemaphoreGive(s_freed_sem);
 }
 
-/* Give a frame back. Split from slot_release() because a frame carries its generation and a
- * slot does not, and because a frame not backed by a camera buffer is coming. */
+/* Give a frame back, whichever kind it is. A converted frame owns a converter pool buffer and
+ * never touched a camera slot; a passthrough frame is the other way round. */
 static void frame_release(struct video_raw_sink_s *s, const video_raw_frame_t *f)
 {
-    (void)s;
+    if (f->owned) {
+        video_frame_convert_release(s->conv, f->slot);
+        /* Given for the same reason slot_release() gives it: a BLOCK sink may be waiting on
+         * in-flight headroom that this release just freed. */
+        xSemaphoreGive(s_freed_sem);
+        return;
+    }
     slot_release(f->slot, f->generation);
 }
 
@@ -265,7 +287,11 @@ static bool evict_oldest_locked(struct video_raw_sink_s *s, video_fb_t **to_retu
     if (xQueueReceive(s->q, &old, 0) != pdTRUE) {
         return false;
     }
-    if (old.slot != NO_SLOT) {
+    if (old.owned) {
+        /* Converter pool buffer: the free-list is a queue, so returning it under the bus lock is
+         * safe and needs no second lock. */
+        video_frame_convert_release(s->conv, old.slot);
+    } else if (old.slot != NO_SLOT) {
         raw_slot_t *slot = &s_slots[old.slot];
         if (slot->generation == old.generation && slot->refs > 0) {
             if (--slot->refs == 0) {
@@ -291,9 +317,9 @@ static bool evict_oldest_locked(struct video_raw_sink_s *s, video_fb_t **to_retu
  * Returns true when the frame was queued. */
 static bool sink_enqueue(struct video_raw_sink_s *s, const video_raw_frame_t *d)
 {
-    /* `owned`, not `slot != NO_SLOT`: a frame the sink owns rather than borrows carries an
-     * index of its own in slot, and charging the loan budget for it would spend a camera
-     * buffer nobody took. `owned` is the only thing that distinguishes the two. */
+    /* `owned`, not `slot != NO_SLOT`: a converted frame puts its CONVERTER POOL INDEX in slot, so
+     * that test would read a pool index as a camera slot and charge the loan budget for a buffer
+     * the sink never borrowed. `owned` is the only thing that distinguishes the two. */
     const bool     uses_slot = !d->owned;
     const uint64_t t_start   = esp_timer_get_time();
     uint64_t       deadline  = 0;
@@ -487,6 +513,55 @@ uint32_t video_raw_bus_take_window_us(void)
     return v;
 }
 
+/* Turn a borrowed camera frame into this sink's own small copy (on the sink's own task)
+ *
+ * What the consumer gets is a small private frame, and the camera buffer is pinned only
+ * for the length of the conversion: released the moment it is done, before the callback
+ * runs, so inference or a blit is never on the camera's clock.
+ */
+static bool sink_convert(struct video_raw_sink_s *s, video_raw_frame_t *f)
+{
+    if (s->conv == NULL) {
+        const video_frame_convert_cfg_t ccfg = {
+            .src_fourcc = f->fourcc,
+            .dst_fourcc = s->want_fourcc,
+            .dst_width  = s->want_width,
+            .dst_height = s->want_height,
+            .pool_depth = (uint8_t)(s->queue_depth + 1),
+        };
+        /* One-shot: on failure the sink is disabled rather than retried per frame, which
+         * would log at the capture rate. The camera's format is only known now, which is
+         * why this is not done at registration. */
+        if (video_frame_convert_create(&ccfg, &s->conv) != ESP_OK) {
+            ESP_LOGE(TAG, "'%s': no converter for '%.4s' -> '%.4s'; disabling the sink",
+                     s->name, (const char *)&f->fourcc, (const char *)&s->want_fourcc);
+            sink_lock();
+            s->enabled = false;
+            sink_unlock();
+            /* Both callers take a false return to mean the camera frame is already gone, so it
+             * has to go here too. Leaving it pinned would cost a buffer for the rest of the
+             * session - LOAN_CAP one lower, the encoder starting to log dropped_nobuf, and every
+             * later drain reporting the slot as still referenced. */
+            slot_release(f->slot, f->generation);
+            return false;
+        }
+    }
+
+    video_raw_frame_t out;
+    const esp_err_t err = video_frame_convert_run(s->conv, f, &out);
+
+    /* Either way the camera buffer has served its purpose. Released before the callback,
+     * so the loan budget is free while the consumer does its slow work. */
+    slot_release(f->slot, f->generation);
+
+    if (err != ESP_OK) {
+        s->drop_convert++;
+        return false;
+    }
+    *f = out;
+    return true;
+}
+
 static void sink_task(void *arg)
 {
     struct video_raw_sink_s *s = (struct video_raw_sink_s *)arg;
@@ -496,6 +571,14 @@ static void sink_task(void *arg)
         if (xQueueReceive(s->q, &f, pdMS_TO_TICKS(100)) != pdTRUE) {
             continue;
         }
+        if (s->mode == VIDEO_RAW_MODE_CONVERTED && !sink_convert(s, &f)) {
+            /* The camera frame is already released; nothing is left to hand back. */
+            slot_lock();
+            s->in_flight--;
+            slot_unlock();
+            continue;
+        }
+
         const uint64_t t0 = esp_timer_get_time();
         s->on_frame(&f, s->user);
         const uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
@@ -524,6 +607,10 @@ static void sink_task(void *arg)
 
 static void sink_free_resources(struct video_raw_sink_s *s)
 {
+    if (s->conv != NULL) {
+        video_frame_convert_destroy(s->conv);
+        s->conv = NULL;
+    }
     if (s->q != NULL) {
         vQueueDelete(s->q);
         s->q = NULL;
@@ -552,6 +639,21 @@ esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
         ESP_LOGE(TAG, "'%s': inline sinks must supply on_frame", cfg->name);
         return ESP_ERR_INVALID_ARG;
     }
+    if (cfg->mode == VIDEO_RAW_MODE_CONVERTED) {
+        if (cfg->want_fourcc == 0 || cfg->want_width == 0 || cfg->want_height == 0) {
+            ESP_LOGE(TAG, "'%s': converted sinks must set want_fourcc/width/height", cfg->name);
+            return ESP_ERR_INVALID_ARG;
+        }
+        /* Half the validation is possible now; the source half waits for the first frame. Failing
+         * an impossible target here beats discovering it once per frame at runtime. */
+        esp_err_t cerr = video_frame_convert_check_dst(cfg->want_fourcc);
+        if (cerr != ESP_OK) {
+            ESP_LOGE(TAG, "'%s': cannot convert to '%.4s'", cfg->name,
+                     (const char *)&cfg->want_fourcc);
+            return cerr;
+        }
+    }
+
     esp_err_t err = video_raw_bus_init();
     if (err != ESP_OK) {
         return err;
@@ -572,11 +674,12 @@ esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
     *out = NULL;
     sink_lock();
 
-    /* Reject passthrough sinks that cannot be served. */
-    if (cfg->mode == VIDEO_RAW_MODE_PASSTHROUGH) {
+    /* Reject Passthrough and Converted sinks that cannot be served. */
+    if (cfg->mode == VIDEO_RAW_MODE_PASSTHROUGH || cfg->mode == VIDEO_RAW_MODE_CONVERTED) {
         uint32_t committed = 0;
         for (int i = 0; i < CONFIG_VIDEO_RAW_SINK_MAX; i++) {
-            if (s_sinks[i].in_use && s_sinks[i].mode == VIDEO_RAW_MODE_PASSTHROUGH) {
+            if (s_sinks[i].in_use && (s_sinks[i].mode == VIDEO_RAW_MODE_PASSTHROUGH ||
+                                      s_sinks[i].mode == VIDEO_RAW_MODE_CONVERTED)) {
                 committed += s_sinks[i].cap;
             }
         }
@@ -609,6 +712,9 @@ esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
         s->block_timeout_ms = cfg->block_timeout_ms ? cfg->block_timeout_ms
                                                     : CONFIG_VIDEO_RAW_SINK_BLOCK_TIMEOUT_MS;
         s->fps_limit        = cfg->fps_limit;
+        s->want_fourcc      = cfg->want_fourcc;
+        s->want_width       = cfg->want_width;
+        s->want_height      = cfg->want_height;
 
         if (s->mode != VIDEO_RAW_MODE_INLINE) {
             /* depth 0 still needs one slot to pass a frame through; the cap of 1 is what
@@ -800,6 +906,17 @@ esp_err_t video_raw_sink_acquire(video_raw_sink_handle_t sink, video_raw_frame_t
     if (xQueueReceive(sink->q, frame, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+    if (sink->mode == VIDEO_RAW_MODE_CONVERTED && !sink_convert(sink, frame)) {
+        /* The camera frame is gone and there is no converted one to hand over. Report a
+         * timeout rather than a phantom frame: the caller's loop retries, which is what it
+         * would do for a frame that never arrived. */
+        slot_lock();
+        if (sink->in_flight > 0) {
+            sink->in_flight--;
+        }
+        slot_unlock();
+        return ESP_ERR_TIMEOUT;     /* Nothing handed over, so `held` stays clear. */
+    }
     slot_lock();
     sink->held = true;
     slot_unlock();
@@ -842,6 +959,7 @@ esp_err_t video_raw_sink_get_stats(video_raw_sink_stats_t *out, size_t max, size
             .dropped_nobuf    = s->drop_nobuf,
             .dropped_rate     = s->drop_rate,
             .dropped_timeout  = s->drop_timeout,
+            .dropped_convert  = s->drop_convert,
             .blocked_us       = s->blocked_us,
             .max_hold_us      = s->max_hold_us,
             .avg_hold_us      = s->hold_samples ? (uint32_t)(s->total_hold_us / s->hold_samples) : 0,
@@ -865,7 +983,7 @@ void video_raw_sink_reset_stats(void)
             continue;
         }
         s->delivered = s->drop_queue = s->drop_inflight = s->drop_nobuf = 0;
-        s->drop_rate = s->drop_timeout = s->slow_warns = 0;
+        s->drop_rate = s->drop_timeout = s->drop_convert = s->slow_warns = 0;
         s->blocked_us = s->total_hold_us = 0;
         s->max_hold_us = s->hold_samples = 0;
     }

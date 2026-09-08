@@ -17,7 +17,10 @@
  * The one way to give that guarantee up is by creating a blocking sink using VIDEO_RAW_OVERFLOW_BLOCK.
  *
  * Raw frames are large and the camera only has CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT of them,
- * so a sink holding one is spending a scarce resource.
+ * so a sink holding one is spending a scarce resource. VIDEO_RAW_MODE_CONVERTED exists because
+ * most consumers do not actually want a full-size frame: it hands you a small hardware-scaled one
+ * instead and gives the camera buffer back as soon as the scaling is done - not at the end of your
+ * work, which is the whole difference from PASSTHROUGH.
  */
 
 #pragma once
@@ -53,6 +56,22 @@ typedef enum {
      * bring-up, rather than as unexplained frame loss later.
      */
     VIDEO_RAW_MODE_PASSTHROUGH,
+
+    /**
+     * Own task, hardware-converted: the PPA scales and colour-converts into a buffer this
+     * sink owns, on your task, and the camera buffer is released the moment that pass
+     * finishes - before your callback runs, or before acquire() returns.
+     *
+     * The right mode for model inference and for a preview
+     *
+     * It is not free of the loan budget: what a converted sink claims is queue_depth
+     * camera frames waiting their turn plus the one being converted. The claim ends at
+     * the conversion rather than lasting for however long your work takes, which is what
+     * makes it cheaper than PASSTHROUGH - not free.
+     *
+     * Set want_fourcc / want_width / want_height.
+     */
+    VIDEO_RAW_MODE_CONVERTED,
 
     /**
      * Runs on the PUMP TASK with the camera buffer checked out. The frame is BORROWED and
@@ -121,7 +140,11 @@ typedef struct {
      * than one frame at a time in either mode; in PULL mode a second acquire() before
      * release() is refused, so there is nothing left for a second dial to say.
      *
-     * For PASSTHROUGH the queued frames are camera frames, so depth costs camera buffers.
+     * For PASSTHROUGH and CONVERTED the queued frames are camera frames, so depth costs
+     * camera buffers.
+     *
+     * CONVERTED hands its share back sooner (at the end of the conversion rather than the
+     * end of your work) but is charged the same.
      *
      * queue_depth 0 is legal and means no staging: strictly one frame at a time, claim 1.
      */
@@ -134,6 +157,12 @@ typedef struct {
      * queued. 0 means every frame.
      */
     uint8_t              fps_limit;
+
+    /* VIDEO_RAW_MODE_CONVERTED only. Zero width/height keeps the capture resolution.
+     * Unsupported combinations are rejected at registration, not silently per frame. */
+    uint32_t             want_fourcc;
+    uint16_t             want_width;
+    uint16_t             want_height;
 } video_raw_sink_config_t;
 
 /**
@@ -147,8 +176,10 @@ typedef struct {
  * @return ESP_OK,
  *         ESP_ERR_INVALID_ARG on a malformed config,
  *         ESP_ERR_NOT_FOUND when CONFIG_VIDEO_RAW_SINK_MAX sinks are already registered,
- *         ESP_ERR_NO_MEM when a PASSTHROUGH sink's claim of queue_depth + 1 would exceed
- *         the camera loan budget
+ *         ESP_ERR_NO_MEM when a PASSTHROUGH or CONVERTED sink's claim of queue_depth + 1
+ *         would exceed the camera loan budget,
+ *         ESP_ERR_NOT_SUPPORTED when a CONVERTED sink asks for a conversion the hardware
+ *         cannot do
  */
 esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
                                   video_raw_sink_handle_t *out);
@@ -243,6 +274,7 @@ typedef struct {
     uint32_t    dropped_nobuf;    /* Global camera loan budget exhausted */
     uint32_t    dropped_rate;     /* fps_limit gate */
     uint32_t    dropped_timeout;  /* BLOCK only: block_timeout_ms expired */
+    uint32_t    dropped_convert;  /* CONVERTED only: the conversion failed */
     uint64_t    blocked_us;       /* BLOCK only: pump time spent waiting on this sink */
     uint32_t    max_hold_us;      /* Longest acquire -> release observed */
     uint32_t    avg_hold_us;

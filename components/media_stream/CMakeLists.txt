@@ -20,6 +20,7 @@ else()
         "src/ringbuf.c"
         "src/video_sink.c"
         "src/video_raw_bus.c"
+        "src/video_frame_convert.c"
         "src/video_capture_adapter.c"
         "src/audio_capture_adapter.c"
         "src/audio_player_adapter.c"
@@ -38,7 +39,7 @@ endif()
 idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "include"
-    REQUIRES esp_driver_jpeg
+    REQUIRES esp_driver_jpeg esp_driver_ppa
     PRIV_REQUIRES ${priv_reqs}
     PRIV_INCLUDE_DIRS "src"
 )

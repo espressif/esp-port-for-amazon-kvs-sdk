@@ -473,9 +473,12 @@ menu "Media Stream Configuration"
                 How many consumers may register for raw camera frames at once.
 
                 This is a table size, not a budget. The budget is separate: a
-                passthrough sink claims queue_depth + 1 camera buffers and
-                registration fails once MEDIA_STREAM_CAM_BUFFER_COUNT minus
-                MEDIA_STREAM_CAM_BUFFER_RESERVE runs out. Inline sinks claim
+                passthrough or converted sink claims queue_depth + 1 camera buffers
+                and registration fails once MEDIA_STREAM_CAM_BUFFER_COUNT minus
+                MEDIA_STREAM_CAM_BUFFER_RESERVE runs out. Converted sinks are
+                charged the same as passthrough ones - they hand the buffers back
+                after the conversion rather than after the consumer's work, which
+                makes them cheaper in time, not in count. Inline sinks claim
                 nothing, so this ceiling is the only one that applies to them.
 
         config VIDEO_RAW_SINK_SLOW_WARN_US
