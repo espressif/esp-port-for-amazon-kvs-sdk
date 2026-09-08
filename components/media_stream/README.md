@@ -137,8 +137,8 @@ stale and dropped from the minimum — it keeps its rung, so it resumes where it
 left off — which is what stops a wedged sender from pinning the encoder.
 
 The ladder has two columns and they are not equally available. fps is only a lever
-upstream of an encoder we own: `video_rate_ctrl_should_encode()` drops a **raw** frame
-before encode. Where the camera hands us already-encoded H.264, dropping a frame
+upstream of an encoder we own: the arbitrated target becomes the encoder sink's
+`fps_limit`, and the raw bus drops the **raw** frame on the pump, before encode. Where the camera hands us already-encoded H.264, dropping a frame
 corrupts everything up to the next IDR, so `video_rate_ctrl_init()` is told
 `fps_actuable = false`, every rung reports the native rate, and the stats show no fps
 reduction — because there is none. On UVC H.264 passthrough the camera owns bitrate and
@@ -155,8 +155,8 @@ consumers can hold the camera at once: it comes up for the first and is torn dow
 after the last. The first caller's `video_capture_config_t` sets the profile and
 later callers join it — a mismatch is logged, not silently applied.
 
-Several transports can therefore run against one camera at the same time, each as
-its own sink and each start/stoppable independently.
+`examples/webrtc_person_detect` runs three consumers against one camera — WebRTC,
+person detection and an LCD preview — each start/stoppable from the console.
 
 > **Note on the file-based source.** `media_stream_get_file_video_capture_if()`
 > serves `.h264` files from SPIFFS through the pull API, and
@@ -168,11 +168,87 @@ its own sink and each start/stoppable independently.
 
 ### Raw frames (`video_raw_sink.h`)
 
-The seam between the camera grabber and the H.264 encoder. There is deliberately
-**one** slot and the encoder fills it; registering a second returns
-`ESP_ERR_NOT_SUPPORTED`. Fanning raw frames out to several consumers needs a
-refcounted shared queue — raw frames are large and the camera buffer must be
-returned promptly — which is separate work.
+Where the encoded registry above fans out compressed frames, this one fans out the
+camera's raw output — to any number of consumers, running in parallel, sharing
+buffers by reference rather than by copy.
+
+The capture task is a **pump**: dequeue a frame, publish it, go back for the next.
+Everything that does work, the H.264 encoder included, is a sink on its own task.
+A camera buffer returns to the driver when the last holder releases it, not when
+the pump moves on.
+
+**The property this guarantees:** a slow sink cannot lower anyone else's frame
+rate. A model doing 60 ms of inference does not cost the encoder a frame. It is
+bought with two per-sink dials — queue depth, and what to discard when the sink
+falls behind (`DROP_OLD` / `DROP_NEW` / `BLOCK`).
+
+Queue depth is the only number: a sink may have `queue_depth + 1` frames
+outstanding — depth staged plus the one being worked on — and that same figure is
+its claim on the camera pool, summed across sinks and checked at registration.
+A depth of 0 means no staging: one frame at a time, claiming one buffer.
+
+Three modes:
+
+| Mode | Runs on | Claim on the camera |
+|---|---|---|
+| `INLINE` | the pump, frame borrowed for the call | none |
+| `PASSTHROUGH` | its own task, pointer into the camera buffer | held for as long as your work takes |
+| `CONVERTED` | its own task, PPA-scaled into a buffer it owns | held only for the length of the pass |
+
+`CONVERTED` is the right mode for most consumers and the counter-intuitive one:
+converting 1920x1080 to a model's 224x224 in one PPA pass moves 3% as much data as
+pinning the full frame would, uses no CPU, and hands the camera buffer back the
+moment the pass finishes — before your callback runs — so a 60 ms inference is off
+the camera's clock entirely. The pass crops to the target aspect ratio at the same
+time, for free. Both async modes draw on the loan budget and are checked against it
+at registration; `CONVERTED` simply gives its share back sooner.
+
+Push mode (supply `on_frame`) or pull mode (leave it NULL and drive
+`video_raw_sink_acquire()` / `_release()` from your own task). Pull is for a
+consumer that already owns a worker with a model loaded — pushing one of those
+through a callback just makes it copy the frame into a queue of its own. Either
+way a sink works on one frame at a time: a second `acquire()` before the matching
+`_release()` is refused.
+
+Drop counters are split by cause, because "this sink is too slow"
+(`dropped_queue`), "this sink is still busy with the last frame"
+(`dropped_inflight`), "the
+camera pool is exhausted by someone else" (`dropped_nobuf`) and "you asked for
+fewer" (`dropped_rate`) call for four different fixes.
+
+`examples/webrtc_person_detect` runs three sinks against one camera — encoder,
+inference and LCD preview — and is the worked proof of the guarantee above.
+
+#### Pixel formats
+
+One representation, everywhere: the `uint32_t fourcc` on `video_raw_frame_t`, from
+the `VIDEO_FOURCC_*` constants in `video_capture.h`. Values match the V4L2 code of
+the same name, and `esp32p4_frame_grabber.c` static-asserts that they still do.
+
+Of the codes declared, the capture path only ever produces three:
+
+| fourcc | Produced when |
+|---|---|
+| `VIDEO_FOURCC_O_UYY_E_VYY` | CSI/DVP sensor — the P4 ISP's semi-packed YUV420, and the only layout the hardware H.264 encoder accepts |
+| `VIDEO_FOURCC_YUYV` | UVC camera, raw capture |
+| `VIDEO_FOURCC_H264` | UVC camera, `MEDIA_STREAM_UVC_PASSTHROUGH_H264` — a compressed access unit, not a surface |
+
+The rest (`I420`, `UYVY`, `RGB565`, `RGB24`, `GREY`, `SBGGR8`) exist to name a
+conversion target or a format the tree does not yet capture.
+
+As a `want_fourcc` on a `CONVERTED` sink only **`RGB565`** and **`RGB24`** are legal.
+The PPA takes YUV as a source but not as a destination, and a planar destination
+would need a stride the frame descriptor cannot express. Anything else is rejected at
+registration, not silently per frame.
+
+> **Why not just use `V4L2_PIX_FMT_*`?** Two reasons. `video_capture.h` is public and
+> `esp_video` is not a dependency on every target, so `linux/videodev2.h` cannot be
+> pulled in from there. More importantly the driver's fourcc is *wrong* on the P4:
+> esp_video asks for `V4L2_PIX_FMT_YUV420` on the CSI path, but the ISP emits
+> O_UYY_E_VYY, which V4L2 has no code for. `'YU12'` therefore lands on a buffer that
+> is not I420, and `VIDEO_FOURCC_I420` is deliberately that same value — so the pump
+> re-labels rather than forwards. Forwarding it verbatim would hand the PPA the wrong
+> colour mode on every CSI frame.
 
 ## Quick Usage
 

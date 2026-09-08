@@ -36,7 +36,9 @@ static const char *TAG __attribute__((unused)) = "H264FrameGrabber";
 #if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_enc_single.h"
 #endif
-extern esp_err_t esp32p4_frame_grabber_init(video_frame_preprocess_fn_t);
+#include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR selection */
+#include "esp_video_if.h"           /* esp_video_if_set_desired_resolution() */
+extern esp_err_t esp32p4_frame_grabber_init(void);
 extern esp_err_t esp32p4_frame_grabber_start(void);
 extern esp_err_t esp32p4_frame_grabber_stop(void);
 extern esp_err_t esp32p4_frame_grabber_deinit(void);
@@ -45,12 +47,10 @@ extern bool esp32p4_is_encoder_initialized(void);
 extern esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
                                                    size_t *len, uint16_t *width,
                                                    uint16_t *height,
-                                                   video_frame_pixformat_t *pixfmt,
                                                    uint32_t timeout_ms);
 extern esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
                                                size_t *len, uint16_t *width,
                                                uint16_t *height,
-                                               video_frame_pixformat_t *pixfmt,
                                                uint32_t timeout_ms);
 #endif
 
@@ -114,7 +114,7 @@ static void video_encoder_task(void *arg)
 {
     static uint8_t fill_val = 0;
     ESP_LOGD(TAG, "H264 encoder task started (singleton mode - runs continuously)");
-    video_frame_preprocess_fn_t frame_preprocess_fn = (video_frame_preprocess_fn_t) arg;
+    (void)arg;
 
     s_h264_enc_data.frame_count = 0;
     int one_image_size = s_h264_enc_data.cfg.res.height * s_h264_enc_data.cfg.res.width * 2;
@@ -128,31 +128,13 @@ static void video_encoder_task(void *arg)
             ESP_LOGD(TAG, "H264 encoder resumed");
         }
         camera_fb_t *fb = esp_camera_fb_get();
-        video_frame_pixformat_t pixfmt;
         if (fb) {
             memcpy(s_h264_enc_data.in_frame.raw_data.buffer, fb->buf, one_image_size);
-            switch (fb->format) {
-                case PIXFORMAT_YUV422: pixfmt = PIXFMT_YUV422; break;
-                case PIXFORMAT_YUV420: pixfmt = PIXFMT_YUV420; break;
-                default: pixfmt = PIXFMT_OTHER; break;
-            }
             esp_camera_fb_return(fb);
         } else {
             memset(s_h264_enc_data.in_frame.raw_data.buffer, fill_val++, one_image_size);
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
-        }
-
-        if (frame_preprocess_fn)
-        {
-            video_frame_raw_t frame = {
-                .buffer = s_h264_enc_data.in_frame.raw_data.buffer,
-                .width = s_h264_enc_data.cfg.res.width,
-                .height = s_h264_enc_data.cfg.res.height,
-                .pixfmt = pixfmt,
-                .len = one_image_size,
-            };
-            frame_preprocess_fn(frame);
         }
 
         s_h264_enc_data.in_frame.pts = s_h264_enc_data.frame_count++ * (1000 / s_h264_enc_data.cfg.fps);
@@ -219,7 +201,7 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     s_h264_enc_data.running = false;  // Start in stopped state
 
     s_h264_enc_data.encoder_task_handle = xTaskCreateStatic(video_encoder_task, "video_encoder", ENC_TASK_STACK_SIZE,
-                                                            config->frame_preprocess_fn, ENC_TASK_PRIO, s_h264_enc_data.task_stack, s_h264_enc_data.task_buffer);
+                                                            NULL, ENC_TASK_PRIO, s_h264_enc_data.task_stack, s_h264_enc_data.task_buffer);
     if (s_h264_enc_data.encoder_task_handle == NULL) {
         ESP_LOGE(TAG, "failed to create encoder task!");
         goto cleanup;
@@ -407,9 +389,38 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
         return ESP_OK;
     }
 
+    /* Hand the requested resolution to esp_video_if BEFORE the grabber initialises the
+     * camera, which is the only window in which it can act on it: configure_camera_format()
+     * reads g_desired_resolution when it builds the first VIDIOC_S_FMT.
+     *
+     * This used to be `(void) config;`, and the whole video_capture_config_t was dropped on
+     * the floor here. Nothing else on the P4 CSI path set the desired resolution - only
+     * MJPEGFrameGrabber.c did - so g_desired_resolution stayed {0,0} and the format request
+     * fell back to MEDIA_STREAM_CAPTURE_WIDTH/HEIGHT, which on this path resolve to the
+     * WIDTH/HEIGHT macros in esp_h264_hw_enc.h: a hardcoded 1920x1080. Every P4 CSI
+     * example therefore asked the sensor for 1080p regardless of what it had configured.
+     *
+     * It went unnoticed because the fallback list rescued it: with only the 720p sensor
+     * format compiled in, S_FMT for 1080p returned EINVAL, esp_video_if logged a warning
+     * and retried down the list, and the second entry happened to be the 720p the app
+     * wanted all along. Compile the 1080p sensor format in as well and the first request
+     * succeeds - so enabling a format silently changes the capture resolution of an
+     * example that never asked for it.
+     *
+     * fps is passed through too: esp_video_if defaults it to 30 when unset, which is a
+     * frame rate no sensor here actually delivers. */
+    if (config != NULL && config->resolution.width != 0 && config->resolution.height != 0) {
+        const video_resolution_t res = {
+            .width  = config->resolution.width,
+            .height = config->resolution.height,
+            .fps    = config->resolution.fps,
+        };
+        esp_video_if_set_desired_resolution(&res);
+    }
+
     /* Propagate the failure and do not latch camera_enc_init_done. Swallowing it let
        the caller go straight on to start the capture */
-    esp_err_t ret = esp32p4_frame_grabber_init(config->frame_preprocess_fn);
+    esp_err_t ret = esp32p4_frame_grabber_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "frame grabber init failed: %s", esp_err_to_name(ret));
         return ret;

@@ -38,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integration, snapshot over the bridge with SPIRAM-preferred payloads.
 - **`simple_video_server` example** — standalone HTTP MJPEG / snapshot server
   with no WebRTC dependency.
-- **Frame preprocess hook** — callback for raw frames before H.264 encoding.
 - **Ring buffer peek API** — made public with peek support.
 - **Kconfig stack sizes and signaling init retry** with exponential backoff;
   WebSocket stale-event guard and timeout race hardening.

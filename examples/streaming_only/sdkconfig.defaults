@@ -179,3 +179,9 @@ CONFIG_MBEDTLS_SSL_DTLS_SRTP=y
 # Needed for the DTLS-SRTP fingerprint check; ESP-IDF v6 no longer defaults it on.
 CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
 CONFIG_MBEDTLS_X509_CREATE_C=y
+
+# One camera buffer above the encoder's claim of 2, so the snapshot sink has
+# something to borrow. GET_SNAPSHOT registers a PASSTHROUGH sink for the length
+# of one request and needs one loanable buffer; at the default count of 4 the
+# encoder holds the whole budget and the registration is refused.
+CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT=5

@@ -307,10 +307,6 @@ menu "Media Stream Configuration"
 
                 0 leaves the camera at whatever its descriptors default to.
 
-        config VIDEO_FRAME_QUEUE_SIZE
-            int "Video Frame Queue Size"
-            range 1 32
-            default 8 if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
         config VIDEO_ENC_POOL_SLOTS
             int "Encoder output buffers (triple buffering)"
             range 1 8
@@ -460,11 +456,6 @@ menu "Media Stream Configuration"
                 default flags a callback eating ~15% of that, which is well
                 before it starts costing frames.
 
-                When the queue is full the frame is dropped and the stream waits for the
-                next IDR. A UVC camera sets its own GOP (up to 10 s), so one overflow can
-                stall the viewer for that long; the deeper UVC default absorbs send-side
-                jitter instead.
-
         config VIDEO_RAW_SINK_MAX
             int "Maximum number of raw video sinks"
             range 1 8
@@ -514,6 +505,20 @@ menu "Media Stream Configuration"
                 4 KB suits a callback that copies or forwards. Anything running
                 a model needs considerably more and should say so in its own
                 config, or use the pull API and own its task outright.
+
+        config VIDEO_CAPTURE_PUMP_TASK_STACK
+            int "Capture pump task stack (bytes)"
+            range 2048 32768
+            default 4096
+            help
+                Stack for the task that dequeues camera frames and publishes
+                them to the raw sinks. Allocated from SPIRAM.
+
+                The pump itself needs very little - it dequeues, stamps and
+                publishes, and the encoder moved to its own sink task with
+                VIDEO_ENCODER_TASK_STACK_SIZE. Raise this only if a sink is
+                registered as VIDEO_RAW_MODE_INLINE, which runs on the pump
+                and can need whatever it needs.
 
         config AUDIO_FRAME_QUEUE_SIZE
             int "Audio Frame Queue Size"

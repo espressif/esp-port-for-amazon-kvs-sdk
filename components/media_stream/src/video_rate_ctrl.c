@@ -283,11 +283,6 @@ static _Atomic uint32_t s_pending_bitrate;  /* 0 = nothing to apply */
 static _Atomic int32_t s_pending_pin = -1;
 static _Atomic int64_t  s_stale_check_us;   /* next time staleness could matter */
 
-/* Skip accumulator. There is one encoder, so there is one skip decision and one
- * accumulator; it lives here rather than per controller. Touched only by the
- * encoder task inside video_rate_ctrl_should_encode(), so it needs no lock. */
-static uint32_t s_accum;
-
 /* ------------------------------------------------------------------------- */
 
 static esp_err_t vrate_lock_init(void)
@@ -1358,29 +1353,14 @@ static void vrate_expire_if_due(int64_t now)
     }
 }
 
-bool video_rate_ctrl_should_encode(void)
+uint32_t video_rate_ctrl_target_fps(void)
 {
-    vrate_expire_if_due(esp_timer_get_time());
-
-    uint32_t target = atomic_load(&s_pub_target_fps);
-    if (target == 0) {
-        s_accum = 0;   /* native rate: nothing is skipped */
-        return true;
-    }
-    uint32_t cam = atomic_load(&s_pub_camera_fps);
-    if (cam == 0 || target >= cam) {
-        return true;
-    }
-    /* Bresenham-style even distribution: keep target frames out of every cam
-     * frames. Deliberately NOT reset when the target changes - accum is always
-     * in [0, cam), so a new increment stays correct, and resetting would emit a
-     * burst at every rung change. */
-    s_accum += target;
-    if (s_accum >= cam) {
-        s_accum -= cam;
-        return true;
-    }
-    return false;
+    /* No staleness check here, deliberately: this is read once per CAPTURED frame, on the
+     * pump, and vrate_expire_if_due() can log - which on that task costs a frame. The
+     * encoder's own per-frame touchpoint, video_rate_ctrl_pull_bitrate_bps(), does the
+     * expiry instead, and a target lowered by a controller that has since gone stale is
+     * corrected on the pump's next read. */
+    return atomic_load(&s_pub_target_fps);
 }
 
 uint32_t video_rate_ctrl_pull_bitrate_bps(void)

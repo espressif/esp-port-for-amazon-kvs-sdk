@@ -101,13 +101,6 @@ esp_err_t esp_h264_hw_enc_process_one_frame();
 esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
                                               esp_h264_out_buf_t *out);
 
-/**
- * @brief Encode one frame into a newly allocated buffer the caller owns.
- *
- * Costs a malloc + copy per frame. Prefer esp_h264_hw_enc_encode_frame_borrow()
- * where the lifetime allows it. Caller frees ->buffer and the struct.
- */
-esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len);
 esp_err_t esp_h264_hw_enc_set_bitrate(uint32_t bitrate);
 uint32_t esp_h264_hw_enc_get_bitrate(void);
 /* Request the next emitted frame be an IDR keyframe (PLI response). */
@@ -139,13 +132,6 @@ static inline esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size
     (void) frame_len;
     (void) out;
     return ESP_ERR_NOT_SUPPORTED;
-}
-
-static inline esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len)
-{
-    (void) frame;
-    (void) frame_len;
-    return NULL;
 }
 
 static inline esp_err_t esp_h264_hw_enc_set_bitrate(uint32_t bitrate)

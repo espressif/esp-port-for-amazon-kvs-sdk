@@ -122,6 +122,7 @@ struct video_raw_sink_s {
     /* Rate gate: fixed-point accumulator, so 30 -> 7 fps lands on 7 and not 6 or 8. */
     uint32_t             rate_acc;
 
+    /* Stats. No lock: a data race only costs a stat. */
     uint32_t             delivered;
     uint32_t             drop_queue;
     uint32_t             drop_inflight;
@@ -152,6 +153,14 @@ static inline void sink_lock(void)   { xSemaphoreTake(s_sink_lock, portMAX_DELAY
 static inline void sink_unlock(void) { xSemaphoreGive(s_sink_lock); }
 static inline void slot_lock(void)   { xSemaphoreTake(s_slot_lock, portMAX_DELAY); }
 static inline void slot_unlock(void) { xSemaphoreGive(s_slot_lock); }
+
+static uint8_t sink_in_flight(const struct video_raw_sink_s *s)
+{
+    slot_lock();
+    const uint8_t n = s->in_flight;
+    slot_unlock();
+    return n;
+}
 
 esp_err_t video_raw_bus_init(void)
 {
@@ -382,7 +391,9 @@ static bool sink_enqueue(struct video_raw_sink_s *s, const video_raw_frame_t *d)
 
         case VIDEO_RAW_OVERFLOW_BLOCK:
             slot_unlock();
-            if (s_stopping) {
+            /* !enabled: unregister() is waiting on this dispatch to free the sink, and
+             * sitting out the full block_timeout_ms would only hold it up. */
+            if (s_stopping || !s->enabled) {
                 s->drop_timeout++;
                 return false;
             }
@@ -583,13 +594,13 @@ static void sink_task(void *arg)
         s->on_frame(&f, s->user);
         const uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
 
-        slot_lock();
-        s->in_flight--;
         s->total_hold_us += dt;
         s->hold_samples++;
         if (dt > s->max_hold_us) {
             s->max_hold_us = dt;
         }
+        slot_lock();
+        s->in_flight--;
         slot_unlock();
 
         frame_release(s, &f);
@@ -829,15 +840,24 @@ esp_err_t video_raw_sink_unregister(video_raw_sink_handle_t sink)
     sink_unlock();
 
     /* Wait for any dispatch that is already inside this sink - possibly blocked in its
-     * enqueue - to finish before the slot can be reused. */
-    for (int i = 0; i < 200; i++) {
+     * enqueue - to finish before the slot can be reused.
+     *
+     * Unbounded, like the join below: giving up would memset the sink under a pump still
+     * inside its enqueue. A blocked pump sees !enabled on its next wake, which the nudge
+     * provides; an inline on_frame that never returns is the only way to stay here. */
+    xSemaphoreGive(s_freed_sem);
+    for (int i = 1;; i++) {
         sink_lock();
         const uint16_t refs = sink->dispatch_refs;
         sink_unlock();
         if (refs == 0) {
             break;
         }
-        xSemaphoreGive(s_freed_sem);          /* Nudge a blocked pump. */
+        if (i % 200 == 0) {
+            ESP_LOGW(TAG, "'%s': frame dispatch still in progress after %d s; waiting to unregister",
+                     sink->name, i / 200);
+            xSemaphoreGive(s_freed_sem);
+        }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 
@@ -865,13 +885,14 @@ esp_err_t video_raw_sink_unregister(video_raw_sink_handle_t sink)
         /* pull mode: nothing to join, and a consumer sitting on an acquired frame is outside our
          * control. Bounded wait, then leak the frame rather than reclaim a buffer it may still
          * be reading. */
-        for (int i = 0; i < 200 && sink->in_flight > 0; i++) {
+        for (int i = 0; i < 200 && sink_in_flight(sink) > 0; i++) {
             vTaskDelay(pdMS_TO_TICKS(5));
         }
-        if (sink->in_flight > 0) {
+        const uint8_t held = sink_in_flight(sink);
+        if (held > 0) {
             ESP_LOGE(TAG, "'%s' still holds %u frame(s) at unregister; leaking them rather "
                           "than reclaiming a buffer it may still be reading",
-                     sink->name, sink->in_flight);
+                     sink->name, held);
         }
     }
 
@@ -1006,13 +1027,19 @@ void video_raw_bus_halt(void)
 
 void video_raw_bus_resume(void)
 {
+    /* Drop the tokens halt() left behind, so the first BLOCK wait after a restart waits on a
+     * real release instead of re-testing through them. */
+    if (s_freed_sem != NULL) {
+        while (xSemaphoreTake(s_freed_sem, 0) == pdTRUE) {
+        }
+    }
     s_stopping = false;
 }
 
-void video_raw_bus_drain(void)
+bool video_raw_bus_drain(void)
 {
     if (s_sink_lock == NULL) {
-        return;
+        return true;
     }
     video_raw_bus_halt();   /* Idempotent; covers a caller that drains without halting. */
 
@@ -1035,7 +1062,7 @@ void video_raw_bus_drain(void)
     for (int attempt = 0; attempt < 200; attempt++) {
         bool busy = false;
         for (int i = 0; i < n; i++) {
-            if (list[i]->in_flight > 0) {
+            if (sink_in_flight(list[i]) > 0) {
                 busy = true;
             }
         }
@@ -1044,18 +1071,22 @@ void video_raw_bus_drain(void)
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
+    bool clean = true;
     for (int i = 0; i < n; i++) {
-        if (list[i]->in_flight > 0) {
-            ESP_LOGE(TAG, "'%s' still holds %u frame(s) after drain", list[i]->name,
-                     list[i]->in_flight);
+        const uint8_t held = sink_in_flight(list[i]);
+        if (held > 0) {
+            ESP_LOGE(TAG, "'%s' still holds %u frame(s) after drain", list[i]->name, held);
+            clean = false;
         }
     }
 
     for (int i = 0; i < MEDIA_STREAM_CAM_BUFFER_COUNT; i++) {
         if (s_slots[i].refs != 0) {
             ESP_LOGE(TAG, "slot %d still has %u reference(s) after drain", i, s_slots[i].refs);
+            clean = false;
         }
     }
+    return clean;
 }
 
 #endif /* MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE */

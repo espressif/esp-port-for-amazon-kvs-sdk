@@ -6,6 +6,9 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 #
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 
+# 1.5 MB factory app: the 1 MB default no longer fits the media_stream pipeline on IDF 6.1
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
 #
 # ESP System Settings
 #

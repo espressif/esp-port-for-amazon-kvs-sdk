@@ -48,21 +48,30 @@ void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
                           uint32_t width, uint32_t height, bool fps_actuable);
 
 /**
- * @brief Per camera frame: true = encode this frame, false = skip it
+ * @brief The frame rate the encoder should be fed, or 0 for the camera's own rate
  *
- * Skipping is how effective fps is lowered below the camera rate. Reflects the strict
- * minimum target across all eligible controllers; always true when none is enabled.
- * Lock-free; encoder task only. Not called on passthrough, where fps is not a lever.
+ * Lowering fps is done by not delivering frames, and it is the RAW BUS that does it: the
+ * caller pushes this number into the encoder's sink as its fps limit
+ * (video_raw_sink_set_fps_limit()) and the bus's per-sink gate drops the rest on the pump.
+ *
+ * It used to be a per-frame `should_encode()` decision taken on the encoder task, which
+ * was wrong in exactly the case that matters: the bus ALSO drops frames when the encoder
+ * falls behind, and two independent skip decisions multiply. A 15-of-30 target behind a
+ * bus delivering 20 produced 10 fps, not 15, and only while the link was congested - so
+ * the ladder was steering against a frame rate that was never happening.
+ *
+ * Reflects the strict minimum target across all eligible controllers; 0 when none is
+ * enabled. One lock-free atomic load, safe from any task.
  */
-bool video_rate_ctrl_should_encode(void);
+uint32_t video_rate_ctrl_target_fps(void);
 
 /**
  * @brief Fetch a new encoder bitrate to apply, or 0 if unchanged since the last pull
  *
  * The pending target is held until taken, so a caller that rate limits itself delays a
- * change rather than losing it. Also where controller staleness is noticed, so a path
- * that never calls should_encode() still drops a silent sink from arbitration. Encoder
- * task only.
+ * change rather than losing it. Also where controller staleness is noticed, because it is
+ * the one per-frame touchpoint every path has - the passthrough path never reads the fps
+ * target. Encoder task only.
  */
 uint32_t video_rate_ctrl_pull_bitrate_bps(void);
 

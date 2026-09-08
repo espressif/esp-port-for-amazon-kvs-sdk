@@ -176,10 +176,10 @@ esp_err_t esp_h264_hw_enc_process_one_frame()
  * Encode one frame and hand back a BORROWED view of the encoder's own output
  * buffer - no allocation, no copy.
  *
- * The buffer stays valid until the next call to this function (or to
- * esp_h264_hw_enc_encode_frame()), i.e. for one frame period. Callers that need
- * it for longer must copy it out; components/media_stream's grabber does that
- * into a small rotating pool rather than malloc'ing per frame.
+ * The buffer stays valid until the next call to this function, i.e. for one
+ * frame period. Callers that need it for longer must copy it out;
+ * components/media_stream's grabber does that into a small rotating pool
+ * rather than malloc'ing per frame.
  */
 esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
                                               esp_h264_out_buf_t *out)
@@ -246,35 +246,6 @@ esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
 
         return ESP_OK;
     }
-}
-
-/**
- * Allocating wrapper kept for callers that want to own the frame. Costs a
- * malloc + copy per frame; prefer the borrow form above where the lifetime
- * allows it.
- */
-esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len)
-{
-    esp_h264_out_buf_t borrowed = {0};
-    if (esp_h264_hw_enc_encode_frame_borrow(frame, frame_len, &borrowed) != ESP_OK) {
-        return NULL;
-    }
-
-    esp_h264_out_buf_t *out_buf = calloc(1, sizeof(esp_h264_out_buf_t));
-    if (!out_buf) {
-        ESP_LOGE(TAG, "Allocation failed for esp_h264_out_buf_t");
-        return NULL;
-    }
-    out_buf->buffer = heap_caps_aligned_calloc(64, 1, borrowed.len, MALLOC_CAP_SPIRAM);
-    if (!out_buf->buffer) {
-        ESP_LOGE(TAG, "mem allocation failed for frame_buffer. line %d", __LINE__);
-        free(out_buf);
-        return NULL;
-    }
-    memcpy(out_buf->buffer, borrowed.buffer, borrowed.len);
-    out_buf->len  = borrowed.len;
-    out_buf->type = borrowed.type;
-    return out_buf;
 }
 
 void esp_h264_destroy_encoder()

@@ -74,8 +74,13 @@ void video_raw_bus_resume(void);
  * registered. Run it after the pump has parked.
  *
  * Must complete before the caller unmaps or frees the capture buffers.
+ *
+ * @return true when every frame was accounted for, false when the wait expired with a sink
+ *         still holding one - which also means that sink may still be inside its callback.
+ *         A caller about to free anything the callback can reach must check this: the
+ *         alternative to leaking is a use-after-free.
  */
-void video_raw_bus_drain(void);
+bool video_raw_bus_drain(void);
 
 #ifdef __cplusplus
 }
