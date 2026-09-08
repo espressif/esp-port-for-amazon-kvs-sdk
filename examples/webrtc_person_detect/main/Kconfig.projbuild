@@ -1,0 +1,93 @@
+menu "Person Detection Example"
+
+    config PERSON_DETECT_VIDEO_WIDTH
+        int "Capture width"
+        default 1280
+        help
+            One profile serves the whole example - the encoder and WebRTC both
+            describe this. The preview and the detector scale from it themselves
+            and are unaffected.
+
+            This is a REQUEST, and on the P4 CSI path the sensor has the last word: the
+            video device is bound to the sensor's compiled default format and rejects
+            VIDIOC_S_FMT for any other size, so changing this alone silently keeps the
+            old resolution (esp_video_if falls back and logs a warning). Change the
+            matching CONFIG_CAMERA_<sensor>_MIPI_DEFAULT_FMT_* choice with it.
+
+    config PERSON_DETECT_VIDEO_HEIGHT
+        int "Capture height"
+        default 720
+
+    config PERSON_DETECT_VIDEO_FPS
+        int "Capture frame rate"
+        range 1 60
+        default 30
+
+    config PERSON_DETECT_VIDEO_BITRATE
+        int "Requested bitrate (kbps)"
+        range 100 8000
+        default 1000
+        help
+            Carried in video_capture_config_t.
+
+            It does NOT set the encoder's bitrate ceiling, despite how it reads: on the
+            P4 CSI path esp32p4_frame_grabber.c derives that from the resolution instead
+            (LINK_BASE_BITRATE_BPS * height / 720, so 1 Mbps at 720p and 1.5 Mbps at
+            1080p) and overwrites whatever arrived here. That ceiling is the top of the
+            rate-control ladder; the floor is VIDEO_RATE_CTRL_MIN_MBPS_PER_PX. Keep this
+            value near the derived one so the two do not tell different stories.
+
+    config PERSON_DETECT_FPS
+        int "Inference rate (frames per second)"
+        range 1 30
+        default 5
+        help
+            How many camera frames per second are handed to the model. The rest
+            are dropped by the bus before they are ever queued, which is much
+            cheaper than receiving 30 and discarding 25.
+
+            pedestrian_detect takes roughly 60 ms per frame on the P4, so the
+            model itself tops out near 16 fps. 5 is a sensible default: it keeps
+            detection responsive while leaving the CPU to the encoder and the
+            preview.
+
+            This costs nothing in camera buffers - the inference sink is a
+            converted sink, so the PPA hands it a small private frame and the
+            camera buffer goes straight back.
+
+    config PERSON_DETECT_PREVIEW_FPS
+        int "LCD preview rate (frames per second)"
+        range 1 30
+        default 5
+        help
+            How often the LCD preview is refreshed. Independent of the inference
+            rate, which is the point: the preview stays smooth while detection
+            runs slowly behind it.
+
+            Because the two are asynchronous, the boxes on screen belong to an
+            earlier frame than the picture under them - by roughly one inference
+            period. That is expected.
+
+    config PERSON_DETECT_SCORE_THRESHOLD
+        int "Detection score threshold (percent)"
+        range 1 99
+        default 70
+        help
+            Minimum confidence for a detection to be reported, as a percentage.
+            The model's own default is 70.
+
+            Lower catches more distant or partly occluded people at the cost of
+            false positives; higher is stricter.
+
+    config PERSON_DETECT_ENABLE_AT_BOOT
+        bool "Start inference at boot"
+        default y
+        help
+            When set, the inference sink starts enabled. When clear it is
+            registered but idle until "detect on" is typed at the console, which
+            is useful for measuring what inference actually costs the rest of the
+            pipeline.
+
+            The preview is unaffected either way.
+
+endmenu

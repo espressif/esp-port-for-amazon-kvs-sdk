@@ -1,0 +1,128 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# BSP selection: pick the P4-EYE BSP (ST7789 SPI display). Without this the
+# bsp_selector choice defaults to ESP32_P4_FUNCTION_EV_BOARD for esp32p4,
+# which pulls the EV-board MIPI stack (esp_lcd_ek79007) — wrong panel for
+# this board.
+#
+CONFIG_BSP_SELECT_ESP32_P4_EYE=y
+
+#
+# esp_hosted board select: auto-configures the P4-EYE SDIO pin map and the
+# C6 slave-reset GPIO (9). Without this esp_hosted falls back to the default
+# P4 map (reset GPIO 54) and the C6 never resets -> SDIO card-init timeout.
+#
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+
+#
+# Camera sensor: P4-EYE units ship with OV2710 (the base esp32p4 overlay only
+# enables SC2336, whose auto-detect then fails -> session comes up audio-only).
+# Both stay enabled; esp_cam_sensor auto-detect probes for whichever responds.
+#
+CONFIG_CAMERA_OV2710=y
+
+# Compile BOTH sensor formats, and keep 720p as the default.
+#
+# The component ships 1080p on and 720p off; this example wants the opposite default, and
+# turning 720p on is not enough - leaving 1080p compiled out makes VIDIOC_S_FMT return
+# EINVAL for 1920x1080, esp_video_if falls back with a warning, and everything downstream
+# quietly runs at 720p while menuconfig says 1080p. That is a confusing half hour.
+#
+# THE DEFAULT_FMT LINE BELOW IS WHAT PICKS THE CAPTURE RESOLUTION, not
+# PERSON_DETECT_VIDEO_WIDTH/HEIGHT. The CSI video device is bound to the sensor's compiled
+# default format, and csi_video rejects VIDIOC_S_FMT for any other size:
+#     I esp_video_if: Default: width=1280 height=720 RGBP
+#     E csi_video: format width or height is invalid
+#     W esp_video_if: Failed to set format 1920x1080, errno: 22
+# esp_video_if then walks its fallback list and lands back on the default, so the app's
+# request is honoured only when it already agrees with this line. Moving to 1080p means
+# switching DEFAULT_FMT here as well as the WIDTH/HEIGHT pair.
+#
+# 720p is the default because 1080p is not a viable operating point on this board, measured:
+#   - the H.264 encoder needs 46-48 ms per 1080p frame, so it tops out near 21 fps against
+#     a 25 fps sensor - the 20 fps floor is met with about 1 fps to spare;
+#   - PutMedia and WebRTC cannot run together. The five 1080p capture buffers cost 15.5 MB
+#     and the encoder's output buffer another 3.1 MB, leaving 0.9-2.4 MB of PSRAM free
+#     against 14.7 MB at 720p, and addTransceiver() then fails with STATUS_NOT_ENOUGH_MEMORY
+#     (0x00000004) on every offer. WebRTC alone does start, with ~3.5 MB free;
+#   - buffers cannot be traded for that memory: the four sinks need a loan budget of 4
+#     (preview 1 + detect 1 + encoder 2), so COUNT=4/RESERVE=2 makes the bus refuse to
+#     register 'h264-enc' at all and nothing is encoded;
+#   - scaling the preview and the detector down from 1080p costs the PPA 34-58 ms per
+#     frame instead of 13 ms, which starves IDLE0 - the task watchdog fires repeatedly on
+#     taskLVGL and 'detect', and the detector falls to 4.3 fps.
+# The encoder ceiling and the rate-control floor do track the resolution on their own
+# (1.5 Mbps and 675993 bps at 1080p), so neither needs changing by hand.
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1280X720_25FPS=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS=y
+
+#
+# Chip revision
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_0=y
+
+#
+# Slave Flasher
+#
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0x8000
+CONFIG_SLAVE_APPLICATION_ADDRESS=0x10000
+CONFIG_SLAVE_UART_RX_PIN=36
+CONFIG_SLAVE_UART_TX_PIN=35
+CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
+
+#
+# Video player (receive path) OFF. This example puts the LOCAL CAMERA on the
+# LCD, not the peer's stream, so the inbound decode path is dead weight - and
+# leaving it on would have media_stream's own render backend call
+# bsp_display_start() and lv_obj_remove_style_all(lv_scr_act()) underneath the
+# preview screen this example owns.
+#
+# CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
+
+#
+# ST7789 SPI panel byte order. Required, and easy to lose: with this unset the
+# preview renders with swapped RGB565 (reds and blues inverted). Note the PPA
+# cannot do this swap for us - its byte_swap acts on the INPUT picture and only
+# for ARGB8888/RGB565 inputs, and ours is YUV420 - so preview_display.c swaps
+# while it copies into the canvas.
+#
+CONFIG_LV_COLOR_16_SWAP=y
+
+#
+# esp-dl wants XIP-from-PSRAM.
+#
+# It also wants CONFIG_COMPILER_OPTIMIZATION_PERF, which is NOT set here:
+# -O2 makes GCC's maybe-uninitialized analysis fire inside esp_lvgl_port's
+# knob code, and IDF builds managed components with -Werror=all, so the whole
+# build fails on a file this board does not even use (P4-EYE has no encoder).
+# The example instead applies -O2 to the esp-dl component alone, in
+# CMakeLists.txt, which is where the optimisation actually pays.
+#
+# It ALSO wants CACHE_L2_CACHE_256KB + CACHE_L2_CACHE_LINE_128B, which are
+# deliberately NOT set here. esp_cache_msync() requires both the address and
+# the size to be multiples of the cache line and refuses
+# ESP_CACHE_MSYNC_FLAG_UNALIGNED for the M2C direction (esp_cache_msync.c:120,
+# :129) - the only direction media_stream uses. Every aligned_alloc(64,..) and
+# (len+63)&~63 in the camera path, the encoder output and the enc pool would
+# start failing. Inference is a little slower than esp-dl's published 55.6 ms;
+# at a 5 fps detection sink that does not matter.
+#
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+#
+# The model lives in a flash partition, not the app image (see
+# partitions.16mb.csv).
+#
+CONFIG_PEDESTRIAN_DETECT_MODEL_IN_FLASH_PARTITION=y
+
+#
+# 16 MB flash + slave partition for in-system C6/C5 flashing (slave_flasher)
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"

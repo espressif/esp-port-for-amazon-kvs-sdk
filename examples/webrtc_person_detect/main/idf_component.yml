@@ -1,0 +1,72 @@
+## IDF Component Manager Manifest File
+dependencies:
+  # local components
+  espressif/esp_hosted:
+    override_path: ${KVS_SDK_PATH}/components/esp_hosted
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"
+
+  espressif/esp_wifi_remote:
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"
+
+  esp_webrtc_utils:
+    path: ${KVS_SDK_PATH}/components/esp_webrtc_utils
+    version: "*"
+
+  kvs_webrtc:
+    path: ${KVS_SDK_PATH}/components/kvs_webrtc
+    version: "*"
+
+  app_webrtc:
+    path: ${KVS_SDK_PATH}/components/app_webrtc
+    version: "*"
+
+  kvs_signaling:
+    path: ${KVS_SDK_PATH}/components/signaling/kvs_signaling
+    version: "*"
+
+  media_stream:
+    path: ${KVS_SDK_PATH}/components/media_stream
+    version: "*"
+
+  app_common:
+    path: ${KVS_SDK_PATH}/examples/common_components/app_common
+    version: "*"
+
+  # The LCD preview talks to the board through bsp/esp-bsp.h, so main needs the
+  # BSP on its include path whichever board is selected - not only when the
+  # P4-EYE override below applies.
+  espressif/bsp_selector:
+    version: "^1.0.0"
+    rules:
+      - if: "target not in [esp32c5, esp32c6]"
+
+  # Use the local P4-EYE BSP: it does the board-specific camera bring-up
+  # (XCLK allocate/start, sensor reset + enable pins) that the stock registry
+  # BSP omits — without it the OV2710 gets no master clock/reset and never
+  # ACKs on SCCB ("Get sensor ID failed"). Same override the working examples use.
+  espressif/esp32_p4_eye:
+    override_path: ${KVS_SDK_PATH}/examples/common_components/esp32_p4_eye
+    version: '*'
+    rules:
+    - if: target in [esp32p4] && $CONFIG{BSP_SELECT_ESP32_P4_EYE} == True
+
+  # esp-dl person detection. Pulls espressif/esp-dl 3.3.x transitively, which
+  # requires IDF >= 5.3 on esp32p4. The model itself is written to the
+  # 'pedestrian_det' partition by the component's own flash hook - see
+  # partitions.16mb.csv.
+  espressif/pedestrian_detect:
+    version: "^0.3.2"
+    rules:
+      - if: "target in [esp32p4]"
+
+  # P4 host flashes the C6/C5 co-processor in-system (enabled per board overlay
+  # via CONFIG_SLAVE_FLASHER_ENABLE; sources compile only when enabled).
+  slave_flasher:
+    path: ${KVS_SDK_PATH}/components/slave_flasher
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"

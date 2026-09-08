@@ -39,6 +39,12 @@ variables:
   - echo "Skipping $EXAMPLE for $TARGET (camera HTTP server — esp32p4 only)"
   - continue
   - fi
+  # webrtc_person_detect needs the raw-frame bus (esp_video MIPI-CSI), the PPA for
+  # its converted sinks and the hardware H.264 encoder. All three are esp32p4 only.
+  - if [ $EXAMPLE == "webrtc_person_detect" ] && [ $TARGET != "esp32p4" ]; then
+  - echo "Skipping $EXAMPLE for $TARGET (raw sinks + PPA + HW H.264 — esp32p4 only)"
+  - continue
+  - fi
   - example_path=$CI_PROJECT_DIR/examples/$EXAMPLE
   - cd $example_path
   - echo "Building $EXAMPLE for $TARGET"
@@ -95,7 +101,7 @@ build_idf_v5.4:
     matrix:
       - TARGETS: [esp32, esp32s3, esp32c6, esp32p4]
   variables:
-    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server
+    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server webrtc_person_detect
 
 build_idf_v5.5:
   extends: .build_template
@@ -104,7 +110,7 @@ build_idf_v5.5:
     matrix:
       - TARGETS: [esp32, esp32s3, esp32c6, esp32c5, esp32p4]
   variables:
-    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server
+    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server webrtc_person_detect
 
 # IDF v6.x ships mbedTLS 4 (TF-PSA-Crypto). The SDK crypto adapts to it via PSA and
 # the port stays on libsrtp 2.x, which speaks mbedTLS 4 from 2.8.0~1 onward
@@ -116,7 +122,7 @@ build_idf_v6.0:
     matrix:
       - TARGETS: [esp32, esp32s3, esp32c6, esp32c5, esp32p4]
   variables:
-    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server
+    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server webrtc_person_detect
 
 build_idf_v6.1:
   extends: .build_template
@@ -125,7 +131,7 @@ build_idf_v6.1:
     matrix:
       - TARGETS: [esp32, esp32s3, esp32c6, esp32c5, esp32p4]
   variables:
-    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server
+    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server webrtc_person_detect
 
 # Feature-combination builds: valid Kconfig combinations that the main matrix
 # never exercises (it builds full-featured defaults only). One board is enough

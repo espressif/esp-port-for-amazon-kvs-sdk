@@ -20,6 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Raw-frame sink bus** — the capture loop is a pump: it publishes each camera
+  frame and moves on, and N consumers share the buffer by reference with a
+  per-sink queue depth, overflow policy and fps limit. The H.264 encoder is just
+  another sink. `VIDEO_RAW_MODE_CONVERTED` hands a consumer a PPA-scaled copy and
+  returns the camera buffer immediately. See `include/video_raw_sink.h`.
+- **Per-sink rate control** — one congestion controller per transport instead of
+  a process-wide singleton, arbitrated as the strict minimum over every enabled,
+  still-reporting controller. Transports report either send latency or upload-queue
+  occupancy; the encoder side moved to `video_rate_ctrl_priv.h`.
+- **`webrtc_person_detect` example** — esp-dl pedestrian detection, an LCD preview
+  and WebRTC, all three on one camera, each start/stoppable from the console.
+  ESP32-P4 only.
+- **`media_stream_caps.h`** — capability macros (esp_video capture, hardware H.264,
+  esp_image_effects, PPA) replacing raw `CONFIG_IDF_TARGET_*` tests at the capture
+  pipeline's guard sites.
 - **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
   alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
   stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from
