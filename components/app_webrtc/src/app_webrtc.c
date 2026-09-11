@@ -2664,6 +2664,50 @@ static WEBRTC_STATUS app_webrtc_on_ice_servers_updated(uint64_t customData, uint
 }
 
 /**
+ * @brief Install the ICE server(s) that signaling handed back for index 0
+ *
+ * The payload is a heap-allocated array of app_webrtc_ice_server_t.
+ * The KVS signaling backend returns exactly one (the region STUN server),
+ * but the interface is a vtable so another backend may return more.
+ * set_ice_servers() deep-copies them, so the caller still owns and frees ice_data
+ * afterwards.
+ *
+ * @param ice_data Payload from get_ice_server_by_idx()
+ * @param ice_len  Payload length in bytes
+ * @param context  Description of the calling context (for logging)
+ * @return TRUE if the server was installed
+ */
+static BOOL app_webrtc_apply_immediate_ice_server(uint8_t* ice_data, int ice_len, const char* context)
+{
+    if (ice_data == NULL || ice_len < (int) SIZEOF(app_webrtc_ice_server_t)) {
+        ESP_LOGW(TAG, "Progressive ICE: no usable immediate ICE server for %s (len=%d)", context, ice_len);
+        return FALSE;
+    }
+
+    if (g_kvs_webrtc_client == NULL || gWebRtcAppConfig.peer_connection_if == NULL ||
+        gWebRtcAppConfig.peer_connection_if->set_ice_servers == NULL) {
+        ESP_LOGW(TAG, "Progressive ICE: cannot apply immediate ICE server for %s - no peer connection client", context);
+        return FALSE;
+    }
+
+    uint32_t count = (uint32_t) (ice_len / SIZEOF(app_webrtc_ice_server_t));
+    app_webrtc_ice_server_t *pServers = (app_webrtc_ice_server_t *) ice_data;
+
+    ESP_LOGI(TAG, "Progressive ICE: applying %" PRIu32 " immediate ICE server(s) for %s (first: %s)",
+             count, context, pServers[0].urls);
+
+    WEBRTC_STATUS status = gWebRtcAppConfig.peer_connection_if->set_ice_servers(
+        g_kvs_webrtc_client, pServers, count);
+    if (status != WEBRTC_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "Progressive ICE: failed to apply immediate ICE server for %s: 0x%08" PRIx32,
+                 context, (UINT32) status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/**
  * @brief Trigger progressive ICE server refresh mechanism
  *
  * This helper function eliminates code duplication for the progressive ICE
@@ -2717,6 +2761,40 @@ static WEBRTC_STATUS app_webrtc_trigger_progressive_ice(const char* context, boo
                     gWebRtcAppConfig.peer_connection_if->set_ice_servers != NULL) {
                     ESP_LOGI(TAG, "Progressive ICE: Signaling returned no ICE servers — clearing client config");
                     gWebRtcAppConfig.peer_connection_if->set_ice_servers(g_kvs_webrtc_client, NULL, 0);
+                }
+            } else {
+                /* Apply the servers before the caller creates the session.
+                 * Only read the cached config synchronously when signaling can promise
+                 * the read costs no network I/O. */
+                bool cache_usable = false;
+                if (gWebRtcAppConfig.signaling_client_if->has_valid_ice_config != NULL &&
+                    gWebRtcAppConfig.signaling_client_if->has_valid_ice_config(
+                        gSignalingClientData, &cache_usable) != WEBRTC_STATUS_SUCCESS) {
+                    cache_usable = false;
+                }
+
+                BOOL applied = FALSE;
+                if (cache_usable && have_more) {
+                    /* The cached ICE config is present and unexpired, so the full set
+                     * (STUN + TURN) is available without going on the wire. Install it
+                     * synchronously so gathering sees every server. The async apply that
+                     * signaling also scheduled will re-install the same set later, which
+                     * is harmless. */
+                    ESP_LOGI(TAG, "Progressive ICE: cached ICE config is usable - applying STUN+TURN synchronously for %s", context);
+                    if (app_webrtc_update_ice_servers() == WEBRTC_STATUS_SUCCESS) {
+                        applied = TRUE;
+                    } else {
+                        ESP_LOGW(TAG, "Progressive ICE: synchronous apply failed - falling back to the immediate STUN server");
+                    }
+                }
+
+                if (!applied) {
+                    /* No usable cache (or the sync apply failed): the TURN fetch is a
+                     * blocking HTTPS call dispatched onto the work queue, so it must
+                     * not run inline here. Install the immediate STUN server so that
+                     * gathering still produces a reflexive candidate; TURN arrives
+                     * later through app_webrtc_on_ice_servers_updated(). */
+                    app_webrtc_apply_immediate_ice_server(ice_data, ice_len, context);
                 }
             }
 

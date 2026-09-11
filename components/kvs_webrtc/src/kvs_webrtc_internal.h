@@ -76,6 +76,10 @@ typedef struct {
     // Client-level data channel configuration (defaults for all sessions)
     webrtc_data_channel_config_t client_dc_config;
     bool has_client_dc_config;
+
+    /* true only after set_ice_servers(client, NULL, 0) deliberately cleared the
+     * ICE configuration. */
+    bool ice_servers_cleared;
 } kvs_pc_client_t;
 
 /**

@@ -40,6 +40,21 @@ typedef struct {
  */
 typedef void (*esp_work_fn_t)(void *priv_data);
 
+/** Queue a task, waiting up to timeout_ms for room in the queue
+ *
+ * Do not call this from the work queue's own worker task; the worker is what
+ * drains the queue, so waiting on it there would deadlock until the timeout.
+ *
+ * @param[in] work_fn The work function to execute.
+ * @param[in] priv_data The private data to pass to the work function.
+ * @param[in] timeout_ms How long to wait for a free slot. 0 is non-blocking.
+ *
+ * @return ESP_OK on success.
+ * @return ESP_FAIL if the queue was still full when the timeout expired.
+ * @return ESP_ERR_INVALID_STATE if the queue has not been created.
+ */
+esp_err_t esp_work_queue_add_task_timeout(esp_work_fn_t work_fn, void *priv_data, uint32_t timeout_ms);
+
 /** Initializes the Work Queue
  *
  * This initializes the work queue, which is basically a mechanism to run

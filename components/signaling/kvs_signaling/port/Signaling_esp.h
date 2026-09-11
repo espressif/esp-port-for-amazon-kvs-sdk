@@ -19,6 +19,7 @@ extern "C" {
 
 // ICE configuration helper functions
 BOOL signaling_is_ice_config_refresh_needed(PSignalingClient pSignalingClient);
+BOOL signaling_has_valid_ice_config(PSignalingClient pSignalingClient);
 STATUS refresh_ice_configuration(PSignalingClient pSignalingClient);
 
 #ifdef __cplusplus
