@@ -35,6 +35,18 @@
 
 static const char *TAG = "kvs_media";
 
+static void kvs_media_request_keyframe(void *ctx)
+{
+    kvs_pc_session_t *session = (kvs_pc_session_t *)ctx;
+    if (session == NULL || session->video_transceiver == NULL) {
+        return;
+    }
+    STATUS status = transceiverSendPictureLoss(session->video_transceiver);
+    if (STATUS_FAILED(status)) {
+        ESP_LOGD(TAG, "PLI not sent: 0x%08x", (unsigned)status);
+    }
+}
+
 /* Global media state following KVS official pattern */
 static struct {
     void* client_data;                    // KVS client for session iteration
@@ -1292,7 +1304,9 @@ STATUS kvs_media_setup_players(kvs_pc_session_t* session, kvs_media_config_t* co
                 },
                 .buffer_frames = 5,
                 .codec_specific = NULL,
-                .display_handle = NULL
+                .display_handle = NULL,
+                .request_keyframe = kvs_media_request_keyframe,
+                .request_keyframe_ctx = session,
             };
 
             esp_err_t init_ret = video_player->init(&video_config, &session->video_player_handle);
