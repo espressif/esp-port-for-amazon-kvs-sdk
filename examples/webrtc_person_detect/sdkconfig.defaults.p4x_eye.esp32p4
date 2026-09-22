@@ -1,3 +1,7 @@
+# ESP32-P4-EYE on NEWER P4 silicon (P4X, chip rev >= v3.0).
+# Same board and settings as sdkconfig.defaults.p4_eye.esp32p4, only the chip-revision
+# window differs. Use this INSTEAD of p4_eye; the two windows are mutually exclusive.
+
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
 #
@@ -28,8 +32,8 @@ CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS=y
 #
 # Chip revision
 #
-CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
-CONFIG_ESP32P4_REV_MIN_0=y
+# REV_MIN is not pinned: with SELECTS_REV_LESS_V3 off, IDF already defaults to REV_MIN_301.
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
 
 #
 # Slave Flasher

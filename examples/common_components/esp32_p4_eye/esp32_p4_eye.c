@@ -26,6 +26,7 @@
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "esp_sleep.h"
 
+#include "esp_idf_version.h"
 #include "bsp/esp32_p4_eye.h"
 #include "button_gpio.h"
 #include "bsp_err_check.h"
@@ -659,6 +660,20 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
         .lcd_param_bits = LCD_PARAM_BITS,
         .spi_mode = 3,
         .trans_queue_depth = 2,
+        /*
+         * DMA straight out of PSRAM, because the default is expensive here: without it
+         * spi_master allocates an internal DMA buffer the size of the flushed area (up to
+         * 240*240*2) and memcpy's into it on every flush.
+         *
+         * The flag arrived partway through the 5.5 line, not at 6.0: absent in 5.4.4 and
+         * 5.5.4, present in 5.5.5, 6.0.2 and master. Testing MAJOR >= 6 compiles everywhere
+         * but silently drops the saving on 5.5.5 - the IDF in CI and in users' hands.
+         */
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 5)
+        .flags = {
+            .psram_dma_direct = 1,
+        },
+#endif
     };
     if (io_config.pclk_hz != 20 * 1000 * 1000) {
         ESP_LOGW(TAG, "If the pixel clock is not set to 20 MHz, you need to temporarily apply the patch 0001-fix-spi-default-clock-source.patch. For details on how to apply the patch, please refer to the README.");
@@ -772,11 +787,27 @@ esp_err_t bsp_display_enter_sleep(void)
     return ESP_OK;
 }
 
+/* Hand the core back while the panel transfer finishes.
+ *
+ * This board takes that path on every refresh: BSP_LCD_DRAW_BUFF_DOUBLE is 0 and
+ * the draw buffer is full-screen, in PSRAM and not DMA-capable, so the flush is
+ * slow enough for the spin to dominate.
+ */
+static void bsp_display_lvgl_flush_wait_cb(lv_disp_drv_t *drv)
+{
+    (void)drv;
+    vTaskDelay(1);
+}
+
 lv_disp_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg)
 {
     assert(cfg != NULL);
     BSP_ERROR_CHECK_RETURN_NULL(lvgl_port_init(&cfg->lvgl_port_cfg));
     BSP_NULL_CHECK(disp = bsp_display_lcd_init(cfg), NULL);
+
+    if (disp->driver != NULL) {
+        disp->driver->wait_cb = bsp_display_lvgl_flush_wait_cb;
+    }
 
     return disp;
 }
