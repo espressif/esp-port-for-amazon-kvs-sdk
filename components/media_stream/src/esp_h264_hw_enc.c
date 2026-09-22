@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include "dirent.h"
 #include <stdio.h>
@@ -30,6 +31,11 @@
 // #include "allocators.h"
 
 static char *TAG = "h264_hw_enc";
+
+#ifndef CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB
+#define CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB 1024
+#endif
+
 static void audio_mem_print(const char *tag, int line, const char *func)
 {
 #ifdef CONFIG_SPIRAM_BOOT_INIT
@@ -300,10 +306,24 @@ esp_err_t esp_h264_setup_encoder(h264_enc_user_cfg_t *user_cfg)
     audio_mem_print("H264 HW", __LINE__, __func__);
     enc_data.in_frame.raw_data.len = (width * height + (width * height >> 1));
 
-    enc_data.out_frame.raw_data.len = enc_data.in_frame.raw_data.len;
-    // uint32_t actual_size = 0;
-    // enc_data.out_frame.raw_data.buffer = esp_h264_aligned_calloc(64, 1, enc_data.out_frame.raw_data.len, &actual_size, MALLOC_CAP_SPIRAM);
+    /* The output buffer holds compressed frames, so size it from the compressed-frame
+     * bound rather than from the input frame - the same bound the UVC capture buffers use
+     * in esp_video_if.c, because it answers the same question. */
+    {
+        const uint32_t uncompr = enc_data.in_frame.raw_data.len;
+        uint32_t       out_len = (uint32_t) CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB * 1024u;
+
+        if (out_len == 0 || out_len > uncompr) {
+            /* 0 means "no cap", and a cap above the uncompressed size cannot be reached
+             * by a compressed frame either way. */
+            out_len = uncompr;
+        }
+        enc_data.out_frame.raw_data.len = out_len;
+    }
     enc_data.out_frame.raw_data.buffer = heap_caps_aligned_calloc(64, 1, enc_data.out_frame.raw_data.len, MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "encoder output buffer: %" PRIu32 " bytes for %ux%u (uncompressed frame is %" PRIu32 ")",
+             (uint32_t) enc_data.out_frame.raw_data.len, width, height,
+             (uint32_t) enc_data.in_frame.raw_data.len);
 
     if (!enc_data.out_frame.raw_data.buffer) {
         printf("mem allocation failed.line %d \n", __LINE__);

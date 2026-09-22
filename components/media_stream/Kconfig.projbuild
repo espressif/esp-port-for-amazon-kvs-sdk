@@ -264,6 +264,20 @@ menu "Media Stream Configuration"
                 Leave this off to capture raw and encode locally, which keeps rate control,
                 a short GOP and PLI-driven keyframes.
 
+        config MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB
+            int "Max compressed H.264/MJPEG frame (KB)"
+            default 1024
+            help
+                Upper bound on one compressed frame, in KB. Every buffer that holds a
+                compressed frame is sized from this, on both paths that have one:
+
+                  - the UVC capture buffers, when the camera hands us H.264 or MJPEG.
+                    There are three, so capture memory is 3x this.
+                  - the hardware encoder's output buffer, when we encode ourselves.
+
+                1 MB carries a 1080p keyframe with room to spare. Raise it if overflow messages
+                appear for either of those cases.
+
         config MEDIA_STREAM_UVC_CAPTURE_WIDTH
             int "UVC capture width"
             depends on MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
@@ -318,6 +332,37 @@ menu "Media Stream Configuration"
 
                 Buffers grow on demand to fit the largest frame seen, so raising
                 this costs roughly one keyframe of PSRAM per extra slot.
+
+        config MEDIA_STREAM_CAM_BUFFER_COUNT
+            int "Camera capture buffers"
+            range 3 8
+            default 4
+            help
+                How many V4L2 capture buffers the camera rotates through.
+
+                This is the pool every raw consumer borrows from. One buffer is
+                always being filled by the camera, and each raw sink that takes
+                a zero-copy (passthrough) frame holds one for as long as it is
+                working on it. MEDIA_STREAM_CAM_BUFFER_RESERVE decides how many
+                are held back for the camera; the rest are loanable.
+
+                Each buffer is a full frame in PSRAM, so the cost is real:
+
+                  1280x720 YUV420   1.32 MiB each   4 buffers = 5.27 MiB
+                  1920x1080 YUV420  2.97 MiB each   4 buffers = 11.87 MiB
+
+        config MEDIA_STREAM_CAM_BUFFER_RESERVE
+            int "Camera buffers never loaned to sinks"
+            range 1 4
+            default 2
+            help
+                Buffers held back from the loan budget so the camera always has
+                somewhere to write.
+
+                Must be at least 1 (the buffer currently being filled). 2 is the
+                useful default: one being filled, one queued behind it, so the
+                camera keeps running at full rate while every other buffer is
+                out with a sink.
 
         config VIDEO_SINK_MAX
             int "Maximum number of encoded video sinks"

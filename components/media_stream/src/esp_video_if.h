@@ -12,6 +12,15 @@
 #include "video_capture.h"
 #include <sys/time.h>
 
+/* Size of the V4L2 capture pool. Consumers that key a table off the buffer index
+ * (video_raw_bus.c) size their arrays with this, so it has to be visible here rather
+ * than staying private to esp_video_if.c. The fallback covers an sdkconfig predating
+ * the option. */
+#ifndef CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT
+#define CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT 4
+#endif
+#define MEDIA_STREAM_CAM_BUFFER_COUNT   CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT
+
 /* Fallback when the Kconfig symbol is absent — a project whose sdkconfig
  * predates this option simply will not define it. */
 #ifndef CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS
@@ -20,6 +29,10 @@
 
 /**
  * @brief Frame buffer structure
+ *
+ * Descriptors are per capture buffer and owned by this layer, so several may be
+ * checked out at once - one per index. The pointer stays valid until the matching
+ * esp_video_if_release_frame().
  */
 typedef struct {
     uint8_t *buf;               /*!< Pointer to the frame data */
@@ -27,6 +40,7 @@ typedef struct {
     size_t width;               /*!< Width of the image frame in pixels */
     size_t height;              /*!< Height of the image frame in pixels */
     struct timeval timestamp;   /*!< Timestamp since boot of the frame */
+    uint8_t index;              /*!< V4L2 buffer index; stable key for the frame's slot */
 } video_fb_t;
 
 /**

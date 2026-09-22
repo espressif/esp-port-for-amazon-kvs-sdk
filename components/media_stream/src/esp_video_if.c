@@ -55,7 +55,9 @@
 /* Forward declaration of internal I2C init function */
 extern esp_err_t media_stream_i2c_init_safe(void);
 
-#define BUFFER_COUNT        3
+/* Kconfig-driven; the macro and its fallback live in esp_video_if.h because
+ * video_raw_bus.c sizes its slot table off the same number. */
+#define BUFFER_COUNT        MEDIA_STREAM_CAM_BUFFER_COUNT
 /* UVC needs MMAP: esp_video hands uvc_host the element[] pointers as
  * advanced.user_frame_buffers at stream-open time, and in USERPTR mode those are still
  * NULL then, so the camera has nowhere to write and streams nothing. CSI/DVP keep
@@ -85,7 +87,7 @@ typedef struct v4l2 {
     bool                fb_used[BUFFER_COUNT];
     struct v4l2_buffer  v4l2_buf[BUFFER_COUNT];
     bool                buffers_allocated;
-    video_fb_t fb;
+    video_fb_t          fb[BUFFER_COUNT];
 } v4l2_src_t;
 
 static v4l2_src_t *g_v4l2 = NULL;
@@ -325,6 +327,31 @@ static void requeue_used_buffers(v4l2_src_t *v4l2)
     }
 }
 
+/* Capture-buffer size for a compressed format.
+ *
+ * esp_video_config_buffer() honours sizeimage for JPEG/H264 and otherwise falls back to
+ * width * height * bpp / 8 with bpp = 8, i.e. one byte per pixel - far too small.
+ */
+#ifndef CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB
+#define CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB 1024
+#endif
+
+static uint32_t compressed_buffer_size(uint32_t width, uint32_t height)
+{
+    /* uvc_host.c uses advanced.frame_size directly as the
+     * allocation size (dwMaxVideoFrameSize is only the fallback when it is 0) and never
+     * compares the two - the only check is frame_size > 0. The real requirement is that
+     * the buffer hold the largest *actual* frame, which for H.264 is a keyframe.
+     */
+    uint64_t declared = (uint64_t) width * height * 2;
+    uint64_t cap = (uint64_t) CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB * 1024;
+
+    if (cap == 0 || declared <= cap) {
+        return (uint32_t) declared;
+    }
+    return (uint32_t) cap;
+}
+
 static esp_err_t queue_all_buffers(v4l2_src_t *v4l2)
 {
     if (!v4l2) {
@@ -401,6 +428,14 @@ static video_fb_t *video_fb_get_cb(void *cb_ctx)
                     ESP_LOGE(TAG, "failed to receive video frame: %s (errno %d, count=%" PRIu32 ")",
                              errno == EPERM ? "timed out waiting for the driver" : "ioctl error",
                              errno, dqbuf_fail_count);
+                    if (dqbuf_fail_count == 1) {
+                        ESP_LOGW(TAG, "if this persists with no frames at all, the capture buffer may be "
+                                      "too small for a keyframe - raise "
+                                      "CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB (currently %d KB) "
+                                      "or enable DEBUG on tag \"usb_uvc_device\" to see "
+                                      "\"Frame buffer overflow\"",
+                                 CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB);
+                    }
                 }
                 return NULL;
             }
@@ -414,30 +449,39 @@ static video_fb_t *video_fb_get_cb(void *cb_ctx)
                 return NULL;
             }
 
+            video_fb_t *fb = &v4l2->fb[buf.index];
+
             v4l2->fb_used[buf.index] = true;
-            v4l2->fb.buf = v4l2->cap_buffer[buf.index];
-            v4l2->fb.len = buf.bytesused;
-            v4l2->fb.width = g_current_resolution.width;
-            v4l2->fb.height = g_current_resolution.height;
+            fb->buf = v4l2->cap_buffer[buf.index];
+            fb->len = buf.bytesused;
+            fb->width = g_current_resolution.width;
+            fb->height = g_current_resolution.height;
+            fb->index = buf.index;
             v4l2->v4l2_buf[buf.index] = buf;
 
             /* Compressed frames have arbitrary lengths and esp_cache_msync() requires a
              * cache-line-aligned size, but the rounded-up length must not run past the
              * buffer or the sync covers memory that is not ours. */
-            size_t sync_len = ((size_t)v4l2->fb.len + 63U) & ~63U;
+            size_t sync_len = ((size_t)fb->len + 63U) & ~63U;
             if (sync_len > v4l2->buffer_size[buf.index]) {
                 sync_len = v4l2->buffer_size[buf.index] & ~63U;
             }
-            esp_cache_msync(v4l2->fb.buf, sync_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+            /* No invalidate on the USB-UVC path - it would destroy the frame. */
+            (void) sync_len;
+#else
+            /* This branch is only compiled for CSI/DVP. */
+            esp_cache_msync(fb->buf, sync_len, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+#endif
 
             us = esp_timer_get_time();
-            v4l2->fb.timestamp.tv_sec = us / 1000000UL;
-            v4l2->fb.timestamp.tv_usec = us % 1000000UL;
+            fb->timestamp.tv_sec = us / 1000000UL;
+            fb->timestamp.tv_usec = us % 1000000UL;
 
             // uint64_t end_time = us;
             // printf("Frame Grab FPS: %d\n", (int) (1000000 / (end_time - start_time)));
 
-            return &v4l2->fb;
+            return fb;
         }
     }
     return NULL;
@@ -449,21 +493,32 @@ static void video_fb_return_cb(video_fb_t *fb, void *cb_ctx)
 
     ESP_LOGD(TAG, "Returning encoder buffer");
 
-    for (int i = 0; i < BUFFER_COUNT; i++) {
-        if (v4l2->fb_used[i] && v4l2->cap_buffer[i] == fb->buf) {
-            v4l2->fb_used[i] = false;
-#if USE_V4L2_USERPTR
-            /* For USERPTR, always set the pointer and length before requeueing (per ESP-BSP example) */
-            v4l2->v4l2_buf[i].m.userptr = (unsigned long)v4l2->cap_buffer[i];
-            /* length should already be set from QUERYBUF, but as fallback use fb length */
-            if (v4l2->v4l2_buf[i].length == 0) {
-                v4l2->v4l2_buf[i].length = fb->len;
-            }
-#endif
-            ioctl(v4l2->cap_fd, VIDIOC_QBUF, &v4l2->v4l2_buf[i]);
-            return;
-        }
+    /* Keyed on the index the descriptor carries rather than scanned by buffer pointer.
+     * With several frames in flight a scan is both O(n) on a hot path and ambiguous the
+     * moment two descriptors could name the same buffer. */
+    const unsigned i = fb->index;
+    if (i >= BUFFER_COUNT || v4l2->cap_buffer[i] != fb->buf) {
+        ESP_LOGE(TAG, "release of a foreign frame (index %u, buf %p)", i, (void *)fb->buf);
+        return;
     }
+    if (!v4l2->fb_used[i]) {
+        /* Double release. The caller's refcounting should have caught it; requeueing a
+         * second time would hand the driver a buffer another consumer may still be
+         * reading, so refuse and make the bug audible. */
+        ESP_LOGE(TAG, "double release of capture buffer %u", i);
+        return;
+    }
+
+    v4l2->fb_used[i] = false;
+#if USE_V4L2_USERPTR
+    /* For USERPTR, always set the pointer and length before requeueing (per ESP-BSP example) */
+    v4l2->v4l2_buf[i].m.userptr = (unsigned long)v4l2->cap_buffer[i];
+    /* length should already be set from QUERYBUF, but as fallback use fb length */
+    if (v4l2->v4l2_buf[i].length == 0) {
+        v4l2->v4l2_buf[i].length = fb->len;
+    }
+#endif
+    ioctl(v4l2->cap_fd, VIDIOC_QBUF, &v4l2->v4l2_buf[i]);
 }
 
 static void free_mapped_buffers(v4l2_src_t *v4l2)
@@ -581,6 +636,11 @@ static esp_err_t reopen_camera_for_userptr(v4l2_src_t *v4l2)
     format.fmt.pix.width = g_current_resolution.width;
     format.fmt.pix.height = g_current_resolution.height;
     format.fmt.pix.pixelformat = g_current_pixelformat;
+    /* Same reasoning as the initial S_FMT above: without sizeimage the capture buffer is
+     * sized at one byte per pixel and every camera frame overflows it. */
+    if (g_current_pixelformat == V4L2_PIX_FMT_H264 || g_current_pixelformat == V4L2_PIX_FMT_JPEG) {
+        format.fmt.pix.sizeimage = compressed_buffer_size(format.fmt.pix.width, format.fmt.pix.height);
+    }
     if (ioctl(v4l2->cap_fd, VIDIOC_S_FMT, &format) != 0) {
         ESP_LOGE(TAG, "Failed to set format on reopen");
         return ESP_FAIL;
@@ -812,6 +872,10 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
         format.fmt.pix.width = fallback_resolutions[i].width;
         format.fmt.pix.height = fallback_resolutions[i].height;
         format.fmt.pix.pixelformat = pixelformat;
+
+        if (pixelformat == V4L2_PIX_FMT_H264 || pixelformat == V4L2_PIX_FMT_JPEG) {
+            format.fmt.pix.sizeimage = compressed_buffer_size(format.fmt.pix.width, format.fmt.pix.height);
+        }
 
         if (i == 0) {
             ESP_LOGD(TAG, "Attempting to set format: %dx%d", (int)format.fmt.pix.width, (int)format.fmt.pix.height);
