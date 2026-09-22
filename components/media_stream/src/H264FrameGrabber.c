@@ -26,15 +26,17 @@ static const char *TAG __attribute__((unused)) = "H264FrameGrabber";
 #include "H264FrameGrabber.h"
 #include "video_sink_priv.h"
 
-#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32S3 || MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
 #if CONFIG_IDF_TARGET_ESP32S3
 #include "app_camera_esp.h"
 #include "esp_h264_enc_single_sw.h"
 #include "esp_h264_enc_single.h"
 #else
 #include "esp_h264_hw_enc.h"
+#if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_enc_single.h"
-extern void esp32p4_frame_grabber_init(video_frame_preprocess_fn_t);
+#endif
+extern esp_err_t esp32p4_frame_grabber_init(video_frame_preprocess_fn_t);
 extern esp_err_t esp32p4_frame_grabber_start(void);
 extern esp_err_t esp32p4_frame_grabber_stop(void);
 extern esp_err_t esp32p4_frame_grabber_deinit(void);
@@ -405,7 +407,13 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
         return ESP_OK;
     }
 
-    esp32p4_frame_grabber_init(config->frame_preprocess_fn);
+    /* Propagate the failure and do not latch camera_enc_init_done. Swallowing it let
+       the caller go straight on to start the capture */
+    esp_err_t ret = esp32p4_frame_grabber_init(config->frame_preprocess_fn);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "frame grabber init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
     camera_enc_init_done = true;
     return ESP_OK;
 }
@@ -425,7 +433,14 @@ esp_h264_out_buf_t *get_h264_encoded_frame(void)
 esp_err_t video_capture_set_bitrate(video_capture_handle_t handle, uint32_t bitrate_kbps)
 {
     (void) handle;
+#if MEDIA_STREAM_HAS_HW_H264_ENC
     return esp_h264_hw_enc_set_bitrate(bitrate_kbps * 1000);
+#else
+    /* The camera encodes and owns its own bitrate; the UVC host driver exposes no
+     * encoding-unit control to change it. */
+    (void) bitrate_kbps;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t video_capture_get_bitrate(video_capture_handle_t handle, uint32_t *bitrate_kbps)
@@ -434,8 +449,13 @@ esp_err_t video_capture_get_bitrate(video_capture_handle_t handle, uint32_t *bit
     if (bitrate_kbps == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+#if MEDIA_STREAM_HAS_HW_H264_ENC
     *bitrate_kbps = esp_h264_hw_enc_get_bitrate() / 1000;
     return ESP_OK;
+#else
+    *bitrate_kbps = 0;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t h264_encoder_start(void)

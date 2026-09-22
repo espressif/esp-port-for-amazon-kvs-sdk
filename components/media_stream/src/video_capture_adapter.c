@@ -20,12 +20,15 @@
 #include "H264FrameGrabber.h"
 #include "MJPEGFrameGrabber.h"
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#include "media_stream_caps.h"
+#if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
 #include "driver/jpeg_encode.h"
 #include "esp_video_if.h"
 #include "esp_cache.h"
+#if MEDIA_STREAM_HAS_IMG_EFFECTS
 #include "esp_imgfx_color_convert.h"
 #include "esp_imgfx_scale.h"
+#endif
 
 /* Extern declarations for P4 snapshot interceptor functions */
 extern esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
@@ -319,7 +322,7 @@ esp_err_t video_capture_get_active_resolution(video_resolution_t *resolution)
     if (resolution == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-#if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_USE_ESP_VIDEO_IF
+#if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE && CONFIG_USE_ESP_VIDEO_IF
     esp_err_t ret = esp_video_if_get_resolution(resolution);
     if (ret == ESP_ERR_INVALID_STATE) {
         /* Not started yet (the SDP is built first): report what it will ask for. */
@@ -390,7 +393,9 @@ esp_err_t video_capture_deinit(video_capture_handle_t handle)
 /*  JPEG Snapshot                                                             */
 /* -------------------------------------------------------------------------- */
 
-#if CONFIG_IDF_TARGET_ESP32P4
+/* The JPEG snapshot path is built on esp_image_effects, a P4-only dependency.
+ * Targets without it fall through to the ESP_ERR_NOT_SUPPORTED stubs below. */
+#if MEDIA_STREAM_HAS_IMG_EFFECTS
 
 /**
  * Convert O_UYY_E_VYY (ESP32-P4 ISP native YUV420) to RGB565 using esp_image_effects.
@@ -684,7 +689,7 @@ void video_capture_snapshot_free(uint8_t *jpeg_buf)
     }
 }
 
-#else /* !CONFIG_IDF_TARGET_ESP32P4 */
+#else /* !MEDIA_STREAM_HAS_IMG_EFFECTS */
 
 esp_err_t video_capture_get_snapshot_scaled(uint8_t **jpeg_buf, size_t *jpeg_len,
                                             uint8_t quality, uint16_t out_width,
@@ -713,4 +718,4 @@ void video_capture_snapshot_free(uint8_t *jpeg_buf)
     }
 }
 
-#endif /* CONFIG_IDF_TARGET_ESP32P4 */
+#endif /* MEDIA_STREAM_HAS_IMG_EFFECTS */

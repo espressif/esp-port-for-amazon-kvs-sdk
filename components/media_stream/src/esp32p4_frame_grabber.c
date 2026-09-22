@@ -5,11 +5,12 @@
  */
 
 #include "sdkconfig.h"
+#include "media_stream_caps.h"
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
 
-/* Inside the target guard: linux/videodev2.h comes from esp_video, which only exists
- * for the P4, and this file is expected to compile to an empty object elsewhere. */
+/* Inside the capability guard: linux/videodev2.h comes from esp_video, which only
+ * exists on targets with the V4L2 capture stack */
 #include "H264FrameGrabber.h"
 #include "linux/videodev2.h"
 
@@ -45,20 +46,26 @@
 /* This path requires local component override */
 #include "bsp/camera.h"
 #endif
+/* Kept above the #if below, which would otherwise be evaluated before the define
+ * exists and leave the debug hook without its driver headers. */
+#define H264_ENCODE     1
+// #define SDCARD_SAVE     1
+
+#if SDCARD_SAVE
+/* Only the SDCARD_SAVE debug hook mounts a card; the sdmmc driver is not a
+ * dependency of this component on every target. */
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
+#endif
 
 #include "webrtc_mem_utils.h"
 #include "video_capture.h"
 #include "video_sink_priv.h"
-#include "esp_h264_alloc.h"
 #if USE_ESP_VIDEO_IF
 #include "esp_video_if.h"
 #endif
 
 static const char *TAG = "esp32p4_frame_grabber";
-#define H264_ENCODE     1
-// #define SDCARD_SAVE     1
 
 /* Annex-B helpers for camera-supplied H.264 (UVC passthrough).
  *
@@ -210,8 +217,10 @@ static void h264_scan_au(const uint8_t *buf, uint32_t len, h264_au_info_t *info)
 
 #if H264_ENCODE
 #include "esp_h264_hw_enc.h"
+#if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_alloc.h"
 #include "esp_cache.h"
+#endif
 #endif
 
 #if SDCARD_SAVE
@@ -314,6 +323,11 @@ static void data_write_callback(void *ctx, esp_h264_out_buf_t *out_data)
 #endif
 #endif
 
+/* SoC bring-up below is register- and CSR-level ESP32-P4: the MIPI-CSI DPHY, ISP
+ * and H.264 clock gates, plus P4 CSRs 0x7F1/0x7F2. A target reached over USB-UVC
+ * has no such peripherals to enable - esp_video and the USB host stack own
+ * everything the camera needs there. */
+#if CONFIG_IDF_TARGET_ESP32P4
 static void init_chip()
 {
     asm volatile("li t0, 0x2000\n"
@@ -390,6 +404,10 @@ void init_clock(void)
     rd |= HP_SYS_CLKRST_REG_H264_CLK_SRC_SEL;
     REG_WRITE(HP_SYS_CLKRST_PERI_CLK_CTRL26_REG, rd);
 }
+#else /* !CONFIG_IDF_TARGET_ESP32P4 */
+static inline void init_chip(void) {}
+static inline void init_clock(void) {}
+#endif
 
 void esp32p4_frame_grabber_cleanup(void)
 {
@@ -434,7 +452,9 @@ static snapshot_intercept_t s_snapshot = {0};
 #define CAMERA_RETRY_WAIT_MS   CONFIG_VIDEO_QUEUE_RECEIVE_WAIT_MS
 
 extern void *get_buffer();
+#if MEDIA_STREAM_HAS_HW_H264_ENC
 extern esp_err_t esp_h264_hw_enc_set_reset_request();
+#endif
 
 /*  The grab loop does not encode inline. It hands the raw frame to the       
  *  registered raw sink (the H.264 encoder, below), which encodes and fans the
