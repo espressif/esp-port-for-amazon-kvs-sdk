@@ -378,6 +378,19 @@ menu "Media Stream Configuration"
                 sequentially on the encoder task and shares one per-frame time
                 budget, so more sinks means less headroom for each.
 
+        config VIDEO_RATE_CTRL_MAX
+            int "Maximum number of video rate controllers"
+            range 1 8
+            default 4
+            help
+                How many sinks may run their own congestion-adaptive rate
+                controller at once. One per transport that opts in.
+
+                Each controller keeps its own ladder position and congestion
+                history; the grabber applies the strict minimum of their targets,
+                because a single encoder cannot serve a fast consumer and a slow
+                one at the same time.
+
         config VIDEO_SINK_SLOW_WARN_US
             int "Slow sink warning threshold (us)"
             range 100 100000

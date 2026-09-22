@@ -75,6 +75,21 @@ typedef struct {
 static QueueHandle_t      s_video_q;
 static video_sink_handle_t s_video_sink;
 static uint32_t           s_video_sink_drops;
+/* This transport's rate controller, and whether TWCC has switched it on yet.
+ *
+ * Created with the sink but left DISABLED, because on its own it has no trustworthy
+ * congestion signal: report_send_ms() below measures how long writeFrame() took, and on
+ * this path that reads ~0 ms whatever the network is doing, so a controller enabled on it
+ * alone climbs to the top rung and stays there. media_stream/README.md is explicit that a
+ * controller must only be enabled from a path that also reports.
+ *
+ * TWCC is that path. When the viewer's transport-wide feedback starts arriving,
+ * kvs_media_report_network_estimate_bps() has evidence of a real signal and turns the
+ * controller on - ONCE, so a later `rate-adapt off` is not undone by the next report. No
+ * feedback, no enable, and the encoder keeps running at its native rate exactly as before.
+ */
+static video_rate_ctrl_handle_t s_vrate;
+static bool                     s_vrate_twcc_enabled;
 
 static void kvs_video_sink_on_frame(const video_frame_t *frame, void *user)
 {
@@ -493,7 +508,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
              * duration is the congestion signal. The controller adjusts
              * target fps (grabber skips frames) and, at the fps floor,
              * encoder bitrate. Supersedes the old fixed-fps send pacing. */
-            video_rate_ctrl_report_send_ms((uint32_t)(sendDuration / HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
+            video_rate_ctrl_report_send_ms(s_vrate, (uint32_t)(sendDuration / HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
 
 #if KVS_MEDIA_ENABLE_ADAPTIVE_BITRATE
             /* Adaptive bitrate control based on send performance */
@@ -556,7 +571,9 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
     }
 
 CleanupVideo:
-    video_rate_ctrl_enable(false);
+    video_rate_ctrl_enable(s_vrate, false);
+    /* Re-arm: the next session gets its own chance to prove TWCC works. */
+    s_vrate_twcc_enabled = false;
 
     /* Release a frame dequeued but not sent (e.g. terminated mid-loop). The rest
      * of the queue is drained by kvs_media_stop_global_transmission() once the
@@ -1008,6 +1025,11 @@ STATUS kvs_media_start_global_transmission(void* client_data, kvs_media_config_t
          * session sends is an I-frame and the viewer's decoder can lock on. */
         video_sink_set_enabled(s_video_sink, true);
 
+        /* Rate-control handle for this sink. */
+        if (s_vrate == NULL) {
+            video_rate_ctrl_create("webrtc", &s_vrate);
+        }
+
         /* Explicit prio 5 (pthread default) so the relationship with kvsGlobalAudio is
          * obvious: audio is one slot above so its frames reach the wire first when both
          * are runnable. Keep below connListener (6) and i2s_read (9). */
@@ -1131,6 +1153,11 @@ STATUS kvs_media_stop_global_transmission(void* client_data)
     if (s_video_sink != NULL) {
         video_sink_unregister(s_video_sink);
         s_video_sink = NULL;
+    }
+    if (s_vrate != NULL) {
+        video_rate_ctrl_destroy(s_vrate);
+        s_vrate = NULL;
+        s_vrate_twcc_enabled = false;
     }
     if (s_video_q != NULL) {
         vQueueDelete(s_video_q);
@@ -1467,4 +1494,30 @@ void kvs_media_print_stats(kvs_pc_session_t* session)
     }
 
     ESP_LOGI(TAG, "  Session Duration: %" PRIu64 " seconds", sessionDuration);
+}
+
+video_rate_ctrl_handle_t kvs_media_get_video_rate_ctrl(void)
+{
+    return s_vrate;
+}
+
+void kvs_media_report_network_estimate_bps(uint32_t bps)
+{
+    if (s_vrate == NULL || bps == 0) {
+        /* Before the sink exists there is nothing to steer. Dropping this estimate is
+         * harmless: TWCC feedback repeats about once a second. */
+        return;
+    }
+
+    /* Ceiling first, then enable. The other order would let the controller join
+     * arbitration for one pass still at its unclamped start rung, which on a link that
+     * has just told us it is slow is the wrong direction to move. */
+    video_rate_ctrl_set_network_ceiling_bps(s_vrate, bps);
+
+    if (!s_vrate_twcc_enabled) {
+        s_vrate_twcc_enabled = true;
+        video_rate_ctrl_enable(s_vrate, true);
+        ESP_LOGI(TAG, "TWCC feedback is arriving (%" PRIu32 " bps); WebRTC rate control is "
+                      "now adapting", bps);
+    }
 }

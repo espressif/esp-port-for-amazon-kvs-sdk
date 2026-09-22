@@ -1044,7 +1044,8 @@ esp_err_t esp32p4_frame_grabber_init(video_frame_preprocess_fn_t frame_preproces
      * bitrate as stage 2, with recovery. Driven by send-latency reports
      * from kvs_media. */
     video_rate_ctrl_init(cfg.enc_cfg.fps, cfg.enc_cfg.rc.bitrate,
-                         cfg.enc_cfg.res.width, cfg.enc_cfg.res.height);
+                         cfg.enc_cfg.res.width, cfg.enc_cfg.res.height,
+                         /* fps_actuable = */ true);
 #endif
 
 #define ENC_TASK_STACK_SIZE     (5 * 1024)

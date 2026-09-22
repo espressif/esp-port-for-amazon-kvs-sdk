@@ -51,9 +51,6 @@ static struct {
 
 // Sender bandwidth estimation (TWCC) control
 #define KVS_ENABLE_SENDER_BANDWIDTH_ESTIMATION TRUE   // Consume TWCC sender BWE -> video_rate_ctrl ceiling
-#if KVS_ENABLE_SENDER_BANDWIDTH_ESTIMATION
-#include "video_rate_ctrl.h"   // feed the TWCC video bitrate estimate in as a network ceiling
-#endif
 
 // ICE candidate pair statistics settings
 #define KVS_ICE_STATS_DURATION (20 * HUNDREDS_OF_NANOS_IN_A_SECOND)  // 20 seconds
@@ -2309,11 +2306,18 @@ static VOID kvs_senderBandwidthEstimationHandler(UINT64 customData, UINT32 txByt
                                                  UINT32 txPacketsCnt, UINT32 rxPacketsCnt, UINT64 duration)
 {
     UNUSED_PARAM(duration);
+    UNUSED_PARAM(txBytes);
+    UNUSED_PARAM(rxBytes);
     kvs_pc_session_t *session = (kvs_pc_session_t *)HANDLE_TO_POINTER(customData);
     UINT64 videoBitrate, audioBitrate;
     UINT64 currentTimeMs, timeDiff;
-    UINT32 lostPacketsCnt = txPacketsCnt - rxPacketsCnt;
-    DOUBLE percentLost = (DOUBLE) ((txPacketsCnt > 0) ? (lostPacketsCnt * 100 / txPacketsCnt) : 0.0);
+    /* Clamped, not subtracted blind: these counts come from the peer's feedback, and a
+     * duplicate or reordered report can put rxPacketsCnt above txPacketsCnt. Unsigned
+     * subtraction then yields ~4e9, percentLost becomes astronomical, and the reduction
+     * branch below drives the ceiling to MIN_VIDEO_BITRATE and keeps it there - a
+     * permanent quality collapse from one odd report. */
+    UINT32 lostPacketsCnt = (txPacketsCnt > rxPacketsCnt) ? (txPacketsCnt - rxPacketsCnt) : 0;
+    DOUBLE percentLost = (txPacketsCnt > 0) ? ((DOUBLE) lostPacketsCnt * 100.0 / (DOUBLE) txPacketsCnt) : 0.0;
 
     if (session == NULL) {
         ESP_LOGW(TAG, "Invalid session in TWCC bandwidth estimation handler");
@@ -2372,10 +2376,11 @@ static VOID kvs_senderBandwidthEstimationHandler(UINT64 customData, UINT32 txByt
 
     MUTEX_UNLOCK(session->twcc_metadata.update_lock);
 
-    /* Feed the network estimate to the TX video rate controller as a ceiling.
-     * The controller caps its target at min(configured max, this); the local
-     * send-latency loop continues to handle the on-device bottleneck within it. */
-    video_rate_ctrl_set_network_ceiling_bps((uint32_t) videoBitrate);
+    /* Hand the estimate to kvs_media, which owns the controller and decides what to do
+     * with it: the value becomes the controller's network ceiling, and the first report of
+     * a session also switches the controller on. Reporting and that policy are kept apart
+     * deliberately - this callback knows the network, kvs_media knows the encoder. */
+    kvs_media_report_network_estimate_bps((uint32_t) videoBitrate);
 
     ESP_LOGD(TAG, "TWCC adjustment for peer %s: loss=%.2f%%, video=%lluKbps, audio=%lluKbps",
              session->peer_id, session->twcc_metadata.average_packet_loss,
