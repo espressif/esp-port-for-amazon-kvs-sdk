@@ -378,6 +378,43 @@ menu "Media Stream Configuration"
                 sequentially on the encoder task and shares one per-frame time
                 budget, so more sinks means less headroom for each.
 
+        config VIDEO_RATE_CTRL_FPS_FLOOR
+            int "Rate control: lowest frame rate the ladder may schedule"
+            range 1 30
+            default 12
+            help
+                The ladder never asks for fewer frames per second than this, whatever
+                the link is doing. Its rungs are clamped up to it, so raising this
+                shortens the ladder rather than changing its shape.
+
+                12 is the historical default, measured on a contended 2.4 GHz uplink
+                where a single frame took ~70 ms to send: a 15-fps budget (67 ms) stays
+                under water and the controller cannot catch up, while 12 fps (~83 ms)
+                has the headroom to match those sends.
+
+                Raise it when a consumer has a hard frame-rate requirement and would
+                rather lose quality than smoothness - an archive upload that must stay
+                at 20 fps, say. The bitrate floor rises with it in effect, since fewer
+                bits per frame at more frames is what the encoder is then asked for.
+
+        config VIDEO_RATE_CTRL_MIN_MBPS_PER_PX
+            int "Rate control: bitrate floor in milli-bits per pixel per second"
+            range 0 2000
+            default 280
+            help
+                Lowest bitrate the ladder may ask for at the current resolution,
+                expressed per pixel so it scales: floor = width * height * this / 1000.
+
+                280 puts 720p at 258 kbps and 1080p at 581 kbps, which is where the
+                UVC test camera independently clamps and just above the measured bottom
+                of usable. Below a floor like this the encoder answers a low target with
+                a few KB per key frame - technically a stream, not usefully a picture.
+
+                Raise it for a quality-sensitive deployment (326 gives 300 kbps at
+                720p); 0 disables it and leaves only the encoder's own minimum, which
+                is resolution-independent and therefore means something very different
+                at 320x240 than at 1080p.
+
         config VIDEO_RATE_CTRL_MAX
             int "Maximum number of video rate controllers"
             range 1 8

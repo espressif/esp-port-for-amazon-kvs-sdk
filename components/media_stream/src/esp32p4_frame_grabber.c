@@ -29,7 +29,7 @@
 #include "esp_log.h"
 
 #include "esp_dma_utils.h"
-#include "video_rate_ctrl.h"
+#include "video_rate_ctrl_priv.h"
 #include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR selection */
 
 #include "bsp/esp-bsp.h"

@@ -53,6 +53,9 @@ struct video_sink_s {
     uint32_t                max_us;
     uint64_t                total_us;
     uint32_t                slow_warns;
+    /* Encoded bytes handed to this sink. Charged inside the per-sink loop, so a
+     * sink still holding for its first keyframe accrues none. */
+    uint64_t                bytes;
 };
 
 static struct video_sink_s s_sinks[CONFIG_VIDEO_SINK_MAX];
@@ -70,11 +73,18 @@ static bool                s_raw_registered;
  * the sinks (or exonerated) at a glance, without correlating two logs. */
 static uint64_t            s_window_dispatch_us;
 
+/* When the per-sink byte counters were last zeroed, so a rate can be derived
+ * from them without the caller having to time the interval itself. */
+static int64_t             s_stats_epoch_us;
+
 /* Recursive so a callback may call back into this API (e.g. a sink disabling itself)
  * without deadlocking against the dispatch that is running it. */
 static esp_err_t sink_lock_init(void)
 {
     if (s_lock == NULL) {
+        /* First use is as good a zero as any for the rate interval; without it
+         * the first snapshot before any reset would divide by all of uptime. */
+        s_stats_epoch_us = esp_timer_get_time();
         s_lock = xSemaphoreCreateRecursiveMutex();
         if (s_lock == NULL) {
             ESP_LOGE(TAG, "Failed to create sink mutex");
@@ -212,6 +222,7 @@ void video_sink_dispatch(const video_frame_t *frame)
             continue;
         }
         s->calls++;
+        s->bytes += frame->len;
         s->total_us += dt;
         if (dt > s->max_us) {
             s->max_us = dt;
@@ -239,6 +250,10 @@ esp_err_t video_sink_get_stats(video_sink_stats_t *out, size_t max, size_t *coun
     if (s_lock == NULL) {
         return ESP_OK;
     }
+    /* One clock read for the whole snapshot, so every row's kbps is over the
+     * same interval and the rows can be compared with each other. */
+    const int64_t elapsed_ms = s_stats_epoch_us
+                               ? (esp_timer_get_time() - s_stats_epoch_us) / 1000 : 0;
     sink_lock();
     for (int i = 0; i < CONFIG_VIDEO_SINK_MAX && *count < max; i++) {
         struct video_sink_s *s = &s_sinks[i];
@@ -252,6 +267,9 @@ esp_err_t video_sink_get_stats(video_sink_stats_t *out, size_t max, size_t *coun
         o->gate_held = s->gate_held;
         o->max_us    = s->max_us;
         o->avg_us    = s->calls ? (uint32_t)(s->total_us / s->calls) : 0;
+        o->bytes_kb  = (uint32_t)(s->bytes / 1024);
+        o->kbps      = (elapsed_ms > 0)
+                       ? (uint32_t)((s->bytes * 8ULL) / (uint64_t) elapsed_ms) : 0;
     }
     sink_unlock();
     return ESP_OK;
@@ -270,7 +288,11 @@ void video_sink_reset_stats(void)
         }
         s->calls = s->gate_held = s->max_us = s->slow_warns = 0;
         s->total_us = 0;
+        s->bytes = 0;
     }
+    /* Restart the interval the per-sink kbps is derived from, so it describes
+     * the window the caller just opened rather than all of time. */
+    s_stats_epoch_us = esp_timer_get_time();
     sink_unlock();
 }
 
