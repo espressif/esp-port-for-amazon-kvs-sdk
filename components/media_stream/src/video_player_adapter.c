@@ -149,6 +149,7 @@ typedef struct {
     /* Queue + task */
     QueueHandle_t                queue;
     TaskHandle_t                 task;
+    SemaphoreHandle_t            task_exited;   /* given by decode_task on its way out */
     volatile bool                stopping;
     volatile bool                wait_for_idr;
 
@@ -417,7 +418,14 @@ static void decode_task(void *arg)
     drain_queue(ctx->queue);
     ESP_LOGI(TAG, "decode task exit (queued=%" PRIu32 " rendered=%" PRIu32 " dropped=%" PRIu32 ")",
              ctx->frames_queued, ctx->frames_rendered, ctx->frames_dropped);
-    vTaskDeleteWithCaps(NULL);
+    /* Hand off to video_player_stop(), which deletes this task. A WithCaps task
+     * must not delete itself here: IDF frees its TCB asynchronously, and a
+     * stopper polling eTaskGetState() on that handle then reads freed memory and
+     * can spin forever (seen as a wedged session teardown). */
+    xSemaphoreGive(ctx->task_exited);
+    for (;;) {
+        vTaskSuspend(NULL);
+    }
 }
 
 esp_err_t video_player_init(video_player_config_t *config, video_player_handle_t *ret_handle)
@@ -472,6 +480,11 @@ esp_err_t video_player_init(video_player_config_t *config, video_player_handle_t
         ESP_LOGE(TAG, "xQueueCreate failed");
         goto fail;
     }
+    ctx->task_exited = xSemaphoreCreateBinary();
+    if (ctx->task_exited == NULL) {
+        ESP_LOGE(TAG, "xSemaphoreCreateBinary failed");
+        goto fail;
+    }
 
     ctx->initialized = true;
     *ret_handle = ctx;
@@ -482,6 +495,7 @@ esp_err_t video_player_init(video_player_config_t *config, video_player_handle_t
     return ESP_OK;
 
 fail:
+    if (ctx->task_exited) vSemaphoreDelete(ctx->task_exited);
     if (ctx->queue)    vQueueDelete(ctx->queue);
     if (ctx->render)   video_render_display_deinit(ctx->render);
     if (ctx->dec) {
@@ -531,11 +545,16 @@ esp_err_t video_player_stop(video_player_handle_t handle)
     video_frame_desc_t *sentinel = FRAME_SENTINEL;
     xQueueSend(ctx->queue, &sentinel, portMAX_DELAY);
 
-    /* Wait for the task to exit (it calls vTaskDelete(NULL)). */
-    while (ctx->task != NULL && eTaskGetState(ctx->task) != eDeleted) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+    /* Wait for the task to signal it is out of its loop, then delete it from
+     * here. Bounded: a decode call that never returns must not wedge the
+     * session teardown (and with it every later offer) as well. */
+    if (ctx->task != NULL) {
+        if (xSemaphoreTake(ctx->task_exited, pdMS_TO_TICKS(3000)) != pdTRUE) {
+            ESP_LOGE(TAG, "decode task did not exit within 3 s, deleting it anyway");
+        }
+        vTaskDeleteWithCaps(ctx->task);
+        ctx->task = NULL;
     }
-    ctx->task = NULL;
     ctx->running = false;
     return ESP_OK;
 }
@@ -673,6 +692,7 @@ esp_err_t video_player_deinit(video_player_handle_t handle)
     if (ctx->queue) {
         drain_queue(ctx->queue);
         vQueueDelete(ctx->queue);
+        if (ctx->task_exited) vSemaphoreDelete(ctx->task_exited);
     }
     if (ctx->render) {
         video_render_display_deinit(ctx->render);
