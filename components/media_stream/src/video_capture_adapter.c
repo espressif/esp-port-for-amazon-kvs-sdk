@@ -11,6 +11,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -47,6 +49,57 @@ typedef struct {
     video_codec_type_t codec_type;
 } video_capture_context_t;
 
+/* -------------------------------------------------------------------------- */
+/*  Reference-counted pipeline lifecycle                                      */
+/*                                                                            */
+/*  The camera and encoder are a process-wide singleton, but several consumers */
+/*  may now hold them at once. Without counting, the first consumer to call    */
+/*  stop() or deinit() would tear the camera down under the others - which is  */
+/*  exactly what stopped PutMedia and WebRTC from coexisting. Each handle      */
+/*  contributes at most one init reference and one start reference, so a       */
+/*  double stop() or a stop() on a never-started handle cannot unbalance it.   */
+/* -------------------------------------------------------------------------- */
+
+static SemaphoreHandle_t s_lifecycle_lock;
+static uint32_t          s_init_refs;
+static uint32_t          s_start_refs;
+static video_capture_config_t s_active_profile;
+
+static esp_err_t lifecycle_lock_init(void)
+{
+    if (s_lifecycle_lock == NULL) {
+        s_lifecycle_lock = xSemaphoreCreateRecursiveMutex();
+        if (s_lifecycle_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
+}
+
+static inline void lifecycle_lock(void)   { xSemaphoreTakeRecursive(s_lifecycle_lock, portMAX_DELAY); }
+static inline void lifecycle_unlock(void) { xSemaphoreGiveRecursive(s_lifecycle_lock); }
+
+/* The second and later callers do not get to reconfigure a running pipeline.
+ * Say so rather than silently ignoring their settings - which is what used to
+ * happen, via camera_and_encoder_init()'s singleton early-return. */
+static void warn_profile_mismatch(const video_capture_config_t *want)
+{
+    const video_capture_config_t *have = &s_active_profile;
+    if (want->codec != have->codec ||
+        want->resolution.width  != have->resolution.width ||
+        want->resolution.height != have->resolution.height ||
+        want->resolution.fps    != have->resolution.fps ||
+        want->bitrate != have->bitrate) {
+        ESP_LOGW(TAG,
+                 "Capture already running as codec=%d %ux%u@%u %" PRIu32 "kbps; "
+                 "ignoring request for codec=%d %ux%u@%u %" PRIu32 "kbps",
+                 have->codec, have->resolution.width, have->resolution.height,
+                 have->resolution.fps, have->bitrate,
+                 want->codec, want->resolution.width, want->resolution.height,
+                 want->resolution.fps, want->bitrate);
+    }
+}
+
 esp_err_t video_capture_init(video_capture_config_t *config, video_capture_handle_t *ret_handle)
 {
     if (config == NULL || ret_handle == NULL) {
@@ -59,6 +112,11 @@ esp_err_t video_capture_init(video_capture_config_t *config, video_capture_handl
         return ESP_ERR_NOT_SUPPORTED;
     }
 
+    esp_err_t ret = lifecycle_lock_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
     video_capture_context_t *ctx = calloc(1, sizeof(video_capture_context_t));
     if (ctx == NULL) {
         return ESP_ERR_NO_MEM;
@@ -69,13 +127,33 @@ esp_err_t video_capture_init(video_capture_config_t *config, video_capture_handl
     ctx->codec_type = config->codec;
     ctx->running = false;
 
+    lifecycle_lock();
+
+    if (s_init_refs > 0) {
+        /* Already up. Join it rather than reinitialising underneath the others. */
+        if (ctx->codec_type != s_active_profile.codec) {
+            ESP_LOGE(TAG, "Capture already running with codec %d, cannot also serve codec %d",
+                     s_active_profile.codec, ctx->codec_type);
+            lifecycle_unlock();
+            free(ctx);
+            return ESP_ERR_INVALID_STATE;
+        }
+        warn_profile_mismatch(config);
+        s_init_refs++;
+        ctx->initialized = true;
+        lifecycle_unlock();
+        *ret_handle = ctx;
+        ESP_LOGI(TAG, "Joined running capture (init refs=%" PRIu32 ")", s_init_refs);
+        return ESP_OK;
+    }
+
     // Initialize the camera and encoder based on codec type
-    esp_err_t ret = ESP_OK;
     if (config->codec == VIDEO_CODEC_H264) {
         // Initialize H264 encoder with configuration
         ret = camera_and_encoder_init(config);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize H264 camera and encoder: %d", ret);
+            lifecycle_unlock();
             free(ctx);
             return ret;
         }
@@ -88,12 +166,17 @@ esp_err_t video_capture_init(video_capture_config_t *config, video_capture_handl
         );
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize MJPEG camera and encoder: %d", ret);
+            lifecycle_unlock();
             free(ctx);
             return ret;
         }
     }
 
+    memcpy(&s_active_profile, config, sizeof(s_active_profile));
+    s_init_refs = 1;
     ctx->initialized = true;
+    lifecycle_unlock();
+
     *ret_handle = ctx;
     return ESP_OK;
 }
@@ -105,15 +188,24 @@ esp_err_t video_capture_start(video_capture_handle_t handle)
         return ESP_ERR_INVALID_ARG;
     }
 
-    // The camera and encoder are already running after initialization
-    ctx->running = true;
-    if (ctx->codec_type == VIDEO_CODEC_H264) {
+    lifecycle_lock();
+    if (ctx->running) {
+        lifecycle_unlock();
+        return ESP_OK;  /* Idempotent per handle, so refs stay balanced */
+    }
+
+    if (s_start_refs == 0 && ctx->codec_type == VIDEO_CODEC_H264) {
         esp_err_t ret = h264_encoder_start();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start H264 encoder: %d", ret);
+            lifecycle_unlock();
             return ret;
         }
     }
+    s_start_refs++;
+    ctx->running = true;
+    ESP_LOGI(TAG, "Capture started (start refs=%" PRIu32 ")", s_start_refs);
+    lifecycle_unlock();
     return ESP_OK;
 }
 
@@ -124,14 +216,29 @@ esp_err_t video_capture_stop(video_capture_handle_t handle)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (ctx->codec_type == VIDEO_CODEC_H264) {
+    lifecycle_lock();
+    if (!ctx->running) {
+        lifecycle_unlock();
+        return ESP_OK;
+    }
+    ctx->running = false;
+    if (s_start_refs > 0) {
+        s_start_refs--;
+    }
+
+    if (s_start_refs == 0 && ctx->codec_type == VIDEO_CODEC_H264) {
+        /* Last one out stops the encoder. */
         esp_err_t ret = h264_encoder_stop();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to stop H264 encoder: %d", ret);
+            lifecycle_unlock();
             return ret;
         }
+    } else {
+        ESP_LOGI(TAG, "Capture still held by %" PRIu32 " consumer(s), leaving encoder running",
+                 s_start_refs);
     }
-    ctx->running = false;
+    lifecycle_unlock();
     return ESP_OK;
 }
 
@@ -142,44 +249,32 @@ esp_err_t video_capture_get_frame(video_capture_handle_t handle, video_frame_t *
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* H.264 no longer has a pull path. It used to be backed by an output queue in
+     * the grabber, filled by a built-in "legacy-pull" sink that existed purely so
+     * kvs_webrtc would not have to change; every consumer paid for that queue
+     * whether or not it pulled. Encoded frames now go out through the video_sink
+     * registry only.
+     *
+     * Fail loudly rather than returning ESP_ERR_TIMEOUT, which a caller would
+     * reasonably read as "the camera is merely slow" and retry forever. */
+    if (ctx->codec_type == VIDEO_CODEC_H264) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            ESP_LOGE(TAG, "video_capture_get_frame() is not supported for H.264. "
+                          "Register a callback with video_sink_register() instead "
+                          "(see video_sink.h; kvs_media.c is a worked example).");
+        }
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     // Allocate a video_frame_t to return
     video_frame_t *output_frame = calloc(1, sizeof(video_frame_t));
     if (output_frame == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
-    if (ctx->codec_type == VIDEO_CODEC_H264) {
-        // Get a frame using the H264 API
-        esp_h264_out_buf_t *h264_frame = get_h264_encoded_frame();
-        if (h264_frame == NULL) {
-            ESP_LOGD(TAG, "Failed to get H264 frame: %p", h264_frame);
-            free(output_frame);
-            return ESP_ERR_TIMEOUT;
-        }
-
-        ESP_LOGD(TAG, "H264 frame got: %p", h264_frame);
-
-        // Fill in the frame data
-        output_frame->buffer = h264_frame->buffer;
-        output_frame->len = h264_frame->len;
-        output_frame->timestamp = esp_timer_get_time(); // Use current time as timestamp
-
-        // Convert frame type
-        switch (h264_frame->type) {
-            case ESP_H264_FRAME_TYPE_IDR:
-            case ESP_H264_FRAME_TYPE_I:
-                output_frame->type = VIDEO_FRAME_TYPE_I;
-                break;
-            case ESP_H264_FRAME_TYPE_P:
-                output_frame->type = VIDEO_FRAME_TYPE_P;
-                break;
-            default:
-                output_frame->type = VIDEO_FRAME_TYPE_OTHER;
-                break;
-        }
-        ESP_LOGD(TAG, "H264 frame released");
-        free(h264_frame);
-    } else if (ctx->codec_type == VIDEO_CODEC_MJPEG) {
+    if (ctx->codec_type == VIDEO_CODEC_MJPEG) {
         // Get a frame using the MJPEG API
         esp_mjpeg_out_buf_t *mjpeg_frame = get_mjpeg_encoded_frame();
         if (mjpeg_frame == NULL) {
@@ -255,14 +350,36 @@ esp_err_t video_capture_deinit(video_capture_handle_t handle)
     if (ctx == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-
-    // Clean up based on codec type
-    if (ctx->codec_type == VIDEO_CODEC_MJPEG) {
-        mjpeg_encoder_deinit();
-    } else if (ctx->codec_type == VIDEO_CODEC_H264) {
-        // Deinitialize H264 encoder and camera hardware
-        h264_encoder_deinit();
+    if (!ctx->initialized) {
+        free(ctx);
+        return ESP_ERR_INVALID_ARG;
     }
+
+    /* Drop this handle's start reference first, so a caller that skips stop()
+     * cannot strand the encoder in the running state. */
+    video_capture_stop(handle);
+
+    lifecycle_lock();
+    ctx->initialized = false;
+    if (s_init_refs > 0) {
+        s_init_refs--;
+    }
+
+    if (s_init_refs == 0) {
+        // Last consumer out tears the hardware down
+        if (ctx->codec_type == VIDEO_CODEC_MJPEG) {
+            mjpeg_encoder_deinit();
+        } else if (ctx->codec_type == VIDEO_CODEC_H264) {
+            // Deinitialize H264 encoder and camera hardware
+            h264_encoder_deinit();
+        }
+        memset(&s_active_profile, 0, sizeof(s_active_profile));
+        ESP_LOGI(TAG, "Last consumer released, camera torn down");
+    } else {
+        ESP_LOGI(TAG, "Capture still held by %" PRIu32 " consumer(s), camera stays up",
+                 s_init_refs);
+    }
+    lifecycle_unlock();
 
     // Free our context
     free(ctx);

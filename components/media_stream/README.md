@@ -28,8 +28,11 @@ The component provides four main interface types:
 ### Video Capture Interface (`media_stream_video_capture_t`)
 ```c
 media_stream_video_capture_t *video_capture = media_stream_get_video_capture_if();
-// Provides: init, start, stop, get_frame, release_frame, deinit
+// Provides: init, start, stop, deinit (all reference counted)
+//           get_frame, release_frame  -- MJPEG only, deprecated; see below
 ```
+Encoded H.264 frames are delivered through `video_sink.h`, not pulled — see
+[Multiple video consumers](#multiple-video-consumers).
 
 ### Audio Capture Interface (`media_stream_audio_capture_t`)
 ```c
@@ -48,6 +51,97 @@ media_stream_video_player_t *video_player = media_stream_get_video_player_if();
 media_stream_audio_player_t *audio_player = media_stream_get_audio_player_if();
 // Provides: init, start, stop, play_frame, deinit
 ```
+
+## Multiple video consumers
+
+More than one consumer can receive the encoded video stream at the same time, and
+each can be started and stopped independently. There is one way in: register a
+sink.
+
+### Encoded-frame sinks (`video_sink.h`)
+
+Register a callback and get every encoded frame:
+
+```c
+static void on_frame(const video_frame_t *frame, void *user)
+{
+    /* BORROWED: valid only for this call. Copy what you need and return. */
+}
+
+video_sink_handle_t sink;
+const video_sink_config_t cfg = { .name = "myapp", .on_frame = on_frame };
+video_sink_register(&cfg, &sink);
+video_sink_set_enabled(sink, true);   /* independent on/off, any time */
+```
+
+Sinks are dispatched **sequentially on the encoder task**. Nothing is queued per
+sink, so nothing can overflow — but all sinks share one per-frame budget (33 ms at
+30 fps) with the encoder itself, and a slow callback lowers the capture rate for
+everyone. Copy and return; no network I/O, no blocking waits.
+
+Every sink always **starts on a keyframe**: on enable its gate is armed and frames
+are withheld until the next `VIDEO_FRAME_TYPE_I`. This is not optional, because a
+mid-GOP P-frame decodes against reference frames the consumer never received.
+No IDR is requested, so the wait is at most one GOP.
+
+Because the contract is timing-sensitive, it is measured rather than assumed:
+
+- `video_sink_get_stats()` reports per-sink `max_us` / `avg_us` and `gate_held`.
+- A callback slower than `CONFIG_VIDEO_SINK_SLOW_WARN_US` (default 5 ms) is named
+  in a rate-limited warning.
+- The grabber's 1 s `enc_fps:` line carries `sink_ms=<spent>/<window>`.
+
+### The pull API (`video_capture_get_frame`) — removed for H.264
+
+There used to be a second way in: `video_capture_get_frame()`, backed inside this
+component by a built-in sink named `legacy-pull` that copied every frame into a
+FreeRTOS queue. It is gone. It existed so one consumer would not have to change,
+and every other consumer paid for its queue and its per-frame copy regardless.
+
+For H.264, `video_capture_get_frame()` now returns `ESP_ERR_NOT_SUPPORTED` and
+logs the replacement once. It still works for MJPEG, which is a separate grabber
+with its own queue; that path is expected to move to sinks too, at which point
+the function goes away.
+
+**A consumer that must do slow work owns its own buffering.** That is the trade
+sinks make explicit rather than hiding: a callback that sends over the network
+cannot run on the encoder task, so it copies into a queue of its own choosing and
+does the slow part on its own thread. `components/kvs_webrtc/src/kvs_media.c` is
+the worked example — its callback copies and enqueues, and `writeFrame()` stays
+on the `kvsGlobalVideo` thread. The depth and the drop policy are then that
+consumer's decision, made where the requirements are known, instead of one global
+default serving nobody well.
+
+Note for encoded video: frames cannot be dropped individually, because every
+P-frame references the ones before it. Whatever a consumer discards leaves the
+decoder broken until the next keyframe, so the useful recovery is to ask for one
+— `video_capture_request_keyframe()`.
+
+### Lifecycle
+
+`video_capture_init/start/stop/deinit` are reference counted, so several
+consumers can hold the camera at once: it comes up for the first and is torn down
+after the last. The first caller's `video_capture_config_t` sets the profile and
+later callers join it — a mismatch is logged, not silently applied.
+
+`examples/kvs_combined` runs KVS PutMedia and WebRTC against one camera, both as
+sinks, each start/stoppable from the console.
+
+> **Note on the file-based source.** `media_stream_get_file_video_capture_if()`
+> serves `.h264` files from SPIFFS through the pull API, and
+> `examples/streaming_only` can select it with its `USE_FILE_STREAM` toggle
+> (compiled out by default). Since consumers now take frames from the sink
+> registry, that toggle no longer feeds WebRTC — the file source produces nothing
+> into the registry. Making it a sink producer (a small paced task calling the
+> internal dispatch) is the fix if the path is wanted again.
+
+### Raw frames (`video_raw_sink.h`)
+
+The seam between the camera grabber and the H.264 encoder. There is deliberately
+**one** slot and the encoder fills it; registering a second returns
+`ESP_ERR_NOT_SUPPORTED`. Fanning raw frames out to several consumers needs a
+refcounted shared queue — raw frames are large and the camera buffer must be
+returned promptly — which is separate work.
 
 ## Quick Usage
 

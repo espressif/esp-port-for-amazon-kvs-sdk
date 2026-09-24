@@ -166,8 +166,22 @@ esp_err_t esp_h264_hw_enc_process_one_frame()
     return ESP_OK;
 }
 
-esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len)
+/**
+ * Encode one frame and hand back a BORROWED view of the encoder's own output
+ * buffer - no allocation, no copy.
+ *
+ * The buffer stays valid until the next call to this function (or to
+ * esp_h264_hw_enc_encode_frame()), i.e. for one frame period. Callers that need
+ * it for longer must copy it out; components/media_stream's grabber does that
+ * into a small rotating pool rather than malloc'ing per frame.
+ */
+esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
+                                              esp_h264_out_buf_t *out)
 {
+    if (frame == NULL || out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     esp_h264_err_t ret = ESP_H264_ERR_OK;
     if (enc_data.reset_requested) {
         esp_h264_enc_param_hw_handle_t param_hd = NULL;
@@ -206,25 +220,16 @@ esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_le
 
         if (ret != ESP_H264_ERR_OK) {
             ESP_LOGE(TAG, "esp_h264_enc_process failed. line %d", __LINE__);
-            return NULL;
+            return ESP_FAIL;
         }
-        esp_h264_out_buf_t *out_buf = calloc(1, sizeof(esp_h264_out_buf_t));
-        if (!out_buf) {
-            ESP_LOGE(TAG, "Allocation failed for esp_h264_out_buf_t");
-            return NULL;
-        }
-        out_buf->buffer = heap_caps_aligned_calloc(64, 1, enc_data.out_frame.length, MALLOC_CAP_SPIRAM);
-        if (!out_buf->buffer) {
-            ESP_LOGE(TAG, "mem allocation failed for frame_buffer. line %d", __LINE__);
-            free(out_buf);
-            return NULL;
-        }
-        // Good place to add cache flush
-        esp_cache_msync(enc_data.out_frame.raw_data.buffer, (enc_data.out_frame.length + 63) & ~63, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
-        memcpy(out_buf->buffer, enc_data.out_frame.raw_data.buffer, enc_data.out_frame.length);
-        out_buf->len = enc_data.out_frame.length;
-        out_buf->type = enc_data.out_frame.frame_type;
+        /* Make the encoder's DMA writes visible to the CPU before anyone reads. */
+        esp_cache_msync(enc_data.out_frame.raw_data.buffer,
+                        (enc_data.out_frame.length + 63) & ~63, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+
+        out->buffer = enc_data.out_frame.raw_data.buffer;   /* borrowed */
+        out->len    = enc_data.out_frame.length;
+        out->type   = enc_data.out_frame.frame_type;
 
         if (s_gop_overridden && enc_data.out_frame.frame_type == ESP_H264_FRAME_TYPE_IDR) {
             uint8_t restore_gop = enc_data.cfg.gop ? enc_data.cfg.gop : 30;
@@ -233,9 +238,37 @@ esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_le
             ESP_LOGW(TAG, "PLI: IDR emitted, GOP restored to %u", restore_gop);
         }
 
-        return out_buf;
+        return ESP_OK;
     }
-    return NULL;
+}
+
+/**
+ * Allocating wrapper kept for callers that want to own the frame. Costs a
+ * malloc + copy per frame; prefer the borrow form above where the lifetime
+ * allows it.
+ */
+esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len)
+{
+    esp_h264_out_buf_t borrowed = {0};
+    if (esp_h264_hw_enc_encode_frame_borrow(frame, frame_len, &borrowed) != ESP_OK) {
+        return NULL;
+    }
+
+    esp_h264_out_buf_t *out_buf = calloc(1, sizeof(esp_h264_out_buf_t));
+    if (!out_buf) {
+        ESP_LOGE(TAG, "Allocation failed for esp_h264_out_buf_t");
+        return NULL;
+    }
+    out_buf->buffer = heap_caps_aligned_calloc(64, 1, borrowed.len, MALLOC_CAP_SPIRAM);
+    if (!out_buf->buffer) {
+        ESP_LOGE(TAG, "mem allocation failed for frame_buffer. line %d", __LINE__);
+        free(out_buf);
+        return NULL;
+    }
+    memcpy(out_buf->buffer, borrowed.buffer, borrowed.len);
+    out_buf->len  = borrowed.len;
+    out_buf->type = borrowed.type;
+    return out_buf;
 }
 
 void esp_h264_destroy_encoder()
