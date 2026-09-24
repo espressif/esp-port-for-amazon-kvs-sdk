@@ -9,6 +9,7 @@
 #include "H264FrameGrabber.h"
 #include "esp_h264_types.h"
 #include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR */
+#include "esp_err.h"
 
 #define WIDTH               (1920)
 #define HEIGHT              (1080)
@@ -51,6 +52,28 @@ typedef struct {
 /* setup encoder with given parameters */
 esp_err_t esp_h264_setup_encoder(h264_enc_user_cfg_t *cfg);
 esp_err_t esp_h264_hw_enc_process_one_frame();
+/**
+ * @brief Encode one frame, returning a BORROWED view of the encoder's own output.
+ *
+ * No allocation and no copy. @p out points into the encoder's output buffer and
+ * stays valid only until the next encode call, i.e. roughly one frame period.
+ * Callers needing it longer must copy it out - the grabber does that into a
+ * small rotating pool rather than allocating per frame.
+ *
+ * @param frame      Raw input frame
+ * @param frame_len  Length of the raw frame
+ * @param out        Filled with buffer/len/type on success
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, or ESP_FAIL if the encoder rejected it
+ */
+esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
+                                              esp_h264_out_buf_t *out);
+
+/**
+ * @brief Encode one frame into a newly allocated buffer the caller owns.
+ *
+ * Costs a malloc + copy per frame. Prefer esp_h264_hw_enc_encode_frame_borrow()
+ * where the lifetime allows it. Caller frees ->buffer and the struct.
+ */
 esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len);
 esp_err_t esp_h264_hw_enc_set_bitrate(uint32_t bitrate);
 uint32_t esp_h264_hw_enc_get_bitrate(void);

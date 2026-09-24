@@ -297,9 +297,55 @@ menu "Media Stream Configuration"
             int "Video Frame Queue Size"
             range 1 32
             default 8 if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+        config VIDEO_ENC_POOL_SLOTS
+            int "Encoder output buffers (triple buffering)"
+            range 1 8
             default 3
             help
-                Maximum number of video frames that can be queued for processing.
+                Number of pre-allocated buffers the encoder rotates its output
+                through before handing frames to the sinks.
+
+                This exists to keep the allocator off the camera's critical
+                path: without it every frame costs a variable-sized SPIRAM
+                alloc, zero and free at the capture rate.
+
+                3 is the useful default. Dispatch is currently synchronous, so
+                1 would be correct - but a slot is then reused the moment the
+                next frame is encoded, leaving no margin. Three means a
+                published frame survives roughly three frame periods, which is
+                what an asynchronous dispatcher would need and what absorbs a
+                sink that runs long.
+
+                Buffers grow on demand to fit the largest frame seen, so raising
+                this costs roughly one keyframe of PSRAM per extra slot.
+
+        config VIDEO_SINK_MAX
+            int "Maximum number of encoded video sinks"
+            range 1 8
+            default 4
+            help
+                How many consumers may register for encoded video frames at
+                once. One slot is taken by the built-in "legacy-pull" sink
+                that backs video_capture_get_frame().
+
+                Each slot is a small struct, so the cost of raising this is
+                negligible - but remember that every enabled sink runs
+                sequentially on the encoder task and shares one per-frame time
+                budget, so more sinks means less headroom for each.
+
+        config VIDEO_SINK_SLOW_WARN_US
+            int "Slow sink warning threshold (us)"
+            range 100 100000
+            default 5000
+            help
+                A sink callback taking longer than this is named in a
+                rate-limited warning. Sinks run sequentially on the encoder
+                task, so a slow one lowers the capture rate for every consumer.
+
+                The budget to compare against is the frame period: 33333 us at
+                30 fps, shared between the encoder and all sinks. The 5 ms
+                default flags a callback eating ~15% of that, which is well
+                before it starts costing frames.
 
                 When the queue is full the frame is dropped and the stream waits for the
                 next IDR. A UVC camera sets its own GOP (up to 10 s), so one overflow can
@@ -314,18 +360,17 @@ menu "Media Stream Configuration"
                 Maximum number of audio frames that can be queued for processing.
 
         config VIDEO_QUEUE_RECEIVE_WAIT_MS
-            int "Video Queue Receive Wait Time (ms)"
+            int "Camera retry interval (ms)"
             range 10 100
             default 20
             help
-                Maximum time to wait when receiving a frame from the video queue.
+                How long the grabber waits before retrying after the camera
+                returns no frame.
 
-        config VIDEO_QUEUE_SEND_WAIT_MS
-            int "Video Queue Send Wait Time (ms)"
-            range 50 500
-            default 100
-            help
-                Maximum time to wait when sending a frame to the video queue.
+                Named for the output queue it used to pace. That queue is gone -
+                encoded frames go straight to the sinks - so this is now purely
+                a camera-starvation backoff. The symbol is kept to avoid
+                invalidating existing sdkconfig files.
 
         config AUDIO_QUEUE_WAIT_MS
             int "Audio Queue Wait Time (ms)"

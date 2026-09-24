@@ -18,6 +18,7 @@ else()
         "src/OpusAudioPlayer.c"
         "src/resampling.c"
         "src/ringbuf.c"
+        "src/video_sink.c"
         "src/video_capture_adapter.c"
         "src/audio_capture_adapter.c"
         "src/audio_player_adapter.c"

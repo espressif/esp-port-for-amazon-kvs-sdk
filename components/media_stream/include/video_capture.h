@@ -136,12 +136,20 @@ esp_err_t video_capture_start(video_capture_handle_t handle);
 esp_err_t video_capture_stop(video_capture_handle_t handle);
 
 /**
- * @brief Get the next captured video frame
+ * @brief Get the next captured video frame (MJPEG only - deprecated)
+ *
+ * @deprecated For H.264 this returns ESP_ERR_NOT_SUPPORTED. Encoded frames are
+ *             delivered through the sink registry instead.
+ *
+ *             Still functional for MJPEG, which is a separate grabber with its
+ *             own queue. That path is expected to move to sinks too, at which
+ *             point this function goes away.
  *
  * @param handle Video capture handle
  * @param frame Pointer to store the video frame
  * @param wait_ms Time to wait for a frame in milliseconds (0 for non-blocking)
- * @return esp_err_t ESP_OK on success, ESP_ERR_TIMEOUT if no frame available, otherwise an error code
+ * @return esp_err_t ESP_OK on success, ESP_ERR_TIMEOUT if no frame available,
+ *                   ESP_ERR_NOT_SUPPORTED for an H.264 handle
  */
 esp_err_t video_capture_get_frame(video_capture_handle_t handle, video_frame_t **frame, uint32_t wait_ms);
 
@@ -169,12 +177,16 @@ esp_err_t video_capture_get_bitrate(video_capture_handle_t handle, uint32_t *bit
  * One-shot action, typically driven by a Picture Loss Indication (PLI) from the
  * remote peer so a stalled decoder can resync without waiting for the periodic GOP.
  *
- * @return esp_err_t ESP_OK on success, otherwise an error code
+ * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_SUPPORTED when the source's GOP
+ *         cannot be forced (UVC H.264 passthrough; wait for its own keyframe),
+ *         otherwise an error code
  */
 esp_err_t video_capture_request_keyframe(void);
 
 /**
- * @brief Release a video frame when no longer needed
+ * @brief Release a video frame when no longer needed (MJPEG only - deprecated)
+ *
+ * @deprecated Counterpart to video_capture_get_frame(); see its note.
  *
  * @param handle Video capture handle
  * @param frame Frame to release

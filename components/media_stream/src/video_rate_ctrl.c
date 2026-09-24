@@ -26,7 +26,10 @@ typedef struct {
 } vrate_rung_t;
 
 static const vrate_rung_t LADDER[] = {
-    { 27, 100 },  /* L0 - full quality (uplink must prove it can take this) */
+    {  0, 100 },  /* L0 - full quality: fps 0 means the camera's native rate,
+                   *      whatever the driver reported, so this rung is not
+                   *      pinned to one sensor's frame rate (uplink must prove
+                   *      it can take this) */
     { 24,  80 },  /* L1 */
     { 22,  65 },  /* L2 */
     { 20,  50 },  /* L3 - conservative start (smooth connect, then probe up) */
@@ -71,6 +74,7 @@ static const vrate_rung_t LADDER[] = {
 
 static struct {
     bool     inited;
+    bool     enabled;          /* opt-in; inert until a transport asks for it */
     uint32_t camera_fps;
     uint32_t width;
     uint32_t height;
@@ -106,6 +110,9 @@ static uint32_t vrate_rung_bitrate(uint32_t level)
 static uint32_t vrate_rung_fps(uint32_t level)
 {
     uint32_t f = LADDER[level].fps;
+    if (f == 0) {
+        f = s.camera_fps;   /* L0 sentinel: run at whatever the sensor delivers */
+    }
     if (f > s.camera_fps) {
         f = s.camera_fps;
     }
@@ -146,6 +153,19 @@ static void vrate_apply_level(uint32_t level)
     }
 }
 
+/* The inert state: encode every camera frame, leave the encoder at the bitrate
+ * it was configured with. Nothing is queued for the grabber to apply on init,
+ * because that is already the bitrate it just set up with. */
+static void vrate_apply_native(void)
+{
+    s.level              = 0;
+    s.target_fps         = s.camera_fps;
+    s.target_bitrate_bps = s.max_bitrate_bps;
+    s.ema_ms             = 0;
+    s.good_run           = 0;
+    s.accum              = 0;
+}
+
 void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
                           uint32_t width, uint32_t height)
 {
@@ -162,18 +182,62 @@ void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
     s.target_bitrate_bps = 0;   /* force pending_bitrate on the first apply */
     s.pending_bitrate    = 0;
     s.inited             = true;
+    /* s.enabled is deliberately NOT reset: a transport may opt in before the
+     * camera is brought up, and that choice has to survive init. */
 
-    vrate_apply_level(START_LEVEL);
+    if (s.enabled) {
+        vrate_apply_level(START_LEVEL);
+        ESP_LOGI(TAG, "init: cam_fps=%u res=%ux%u max=%ubps floor=%ubps start=L%u(%ufps/%ubps)",
+                 (unsigned)s.camera_fps, (unsigned)width, (unsigned)height,
+                 (unsigned)max_bitrate_bps, (unsigned)s.min_bitrate_bps,
+                 (unsigned)s.level, (unsigned)s.target_fps, (unsigned)s.target_bitrate_bps);
+    } else {
+        vrate_apply_native();
+        ESP_LOGI(TAG, "init: cam_fps=%u res=%ux%u max=%ubps - adaptation off, native rate",
+                 (unsigned)s.camera_fps, (unsigned)width, (unsigned)height,
+                 (unsigned)max_bitrate_bps);
+    }
+}
 
-    ESP_LOGI(TAG, "init: cam_fps=%u res=%ux%u max=%ubps floor=%ubps start=L%u(%ufps/%ubps)",
-             (unsigned)s.camera_fps, (unsigned)width, (unsigned)height,
-             (unsigned)max_bitrate_bps, (unsigned)s.min_bitrate_bps,
-             (unsigned)s.level, (unsigned)s.target_fps, (unsigned)s.target_bitrate_bps);
+void video_rate_ctrl_enable(bool enable)
+{
+    if (enable == s.enabled) {
+        return;
+    }
+    s.enabled = enable;
+
+    if (!s.inited) {
+        /* Opted in before the camera came up; init() will honour it. */
+        ESP_LOGI(TAG, "adaptation %s (pending camera init)", enable ? "on" : "off");
+        return;
+    }
+
+    if (enable) {
+        /* Drop any latency history from a previous session and start from the
+         * conservative rung, same as a fresh init. */
+        s.ema_ms   = 0;
+        s.good_run = 0;
+        s.accum    = 0;
+        vrate_apply_level(START_LEVEL);
+        ESP_LOGI(TAG, "adaptation on: L%u (%ufps/%ubps)", (unsigned)s.level,
+                 (unsigned)s.target_fps, (unsigned)s.target_bitrate_bps);
+    } else {
+        uint32_t prev_bitrate = s.target_bitrate_bps;
+        vrate_apply_native();
+        if (prev_bitrate != s.target_bitrate_bps) {
+            /* Unlike init, the encoder is mid-run at a degraded bitrate here,
+             * so it has to be told to go back up. */
+            s.pending_bitrate = s.target_bitrate_bps;
+        }
+        ESP_LOGI(TAG, "adaptation off: native rate (%ufps/%ubps)",
+                 (unsigned)s.target_fps, (unsigned)s.target_bitrate_bps);
+    }
 }
 
 void video_rate_ctrl_report_send_ms(uint32_t send_ms)
 {
-    if (!s.inited) {
+    if (!s.inited || !s.enabled) {
+        ESP_LOGW(TAG, "Video rate ctrl is not enabled");
         return;
     }
     s.ema_ms = (s.ema_ms * (EMA_A_DEN - EMA_A_NUM) + send_ms * EMA_A_NUM) / EMA_A_DEN;
@@ -221,8 +285,8 @@ void video_rate_ctrl_report_send_ms(uint32_t send_ms)
 
 bool video_rate_ctrl_should_encode(void)
 {
-    if (!s.inited) {
-        return true;
+    if (!s.inited || !s.enabled) {
+        return true;   /* native rate: nothing is skipped */
     }
     /* Bresenham-style even distribution: keep target_fps frames out of
      * every camera_fps frames. */
@@ -246,7 +310,13 @@ void video_rate_ctrl_set_network_ceiling_bps(uint32_t bps)
     if (!s.inited) {
         return;
     }
+    /* Recorded even while disabled, so it is already in force if this transport
+     * later opts in - but not acted on, since a disabled controller must not
+     * touch fps or bitrate. */
     s.net_ceiling_bps = bps;
+    if (!s.enabled) {
+        return;
+    }
     /* Re-clamp the current level to the new ceiling. If the estimate dropped
      * below our current rung, this snaps us down the ladder now (fps + bitrate
      * together) instead of waiting for the local send-latency loop to notice. */

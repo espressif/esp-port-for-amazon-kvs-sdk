@@ -10,7 +10,7 @@
 #include <stdbool.h>
 
 /*
- * Congestion-adaptive TX-video rate controller.
+ * (OPT IN) Congestion-adaptive TX-video rate controller.
  *
  * Strategy: fps and bitrate are tied to a single operating-point LADDER (see
  * video_rate_ctrl.c) rather than tracked independently — each rung is a (fps,
@@ -26,10 +26,11 @@
  *     far recovery may climb (see video_rate_ctrl_set_network_ceiling_bps).
  *
  * Touchpoints:
- *   - kvs_media send loop  -> video_rate_ctrl_report_send_ms()
- *   - grabber encode loop  -> video_rate_ctrl_should_encode() (skip to drop fps)
- *                          -> video_rate_ctrl_pull_bitrate_bps() (apply bitrate)
- *   - RTCP TWCC handler    -> video_rate_ctrl_set_network_ceiling_bps()
+ *   - kvs_media send thread -> video_rate_ctrl_enable() around its lifetime
+ *                           -> video_rate_ctrl_report_send_ms()
+ *   - grabber encode loop   -> video_rate_ctrl_should_encode() (skip to drop fps)
+ *                           -> video_rate_ctrl_pull_bitrate_bps() (apply bitrate)
+ *   - RTCP TWCC handler     -> video_rate_ctrl_set_network_ceiling_bps()
  */
 
 /* camera_fps: native capture rate (skip decisions are relative to this).
@@ -41,12 +42,30 @@
 void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
                           uint32_t width, uint32_t height);
 
+/**
+ * @brief Opt in to (or out of) adaptive rate control.
+ *
+ * Enable this only from a path that also calls
+ * video_rate_ctrl_report_send_ms(); those reports are the only thing that lets
+ * the controller climb back up after backing off. Enabling starts at the
+ * ladder's conservative rung and lets the link earn its way up; disabling
+ * restores native fps and queues the configured bitrate back for the grabber to
+ * apply.
+ *
+ * Order-independent with respect to video_rate_ctrl_init(): the choice is
+ * remembered across init, so a transport may opt in before the camera exists.
+ *
+ * @param enable true to run adaptive control, false for native rate
+ */
+void video_rate_ctrl_enable(bool enable);
+
 /* Report measured send duration (ms) for one video frame. Drives the
- * controller's fps/bitrate state machine. */
+ * controller's fps/bitrate state machine. Ignored while disabled. */
 void video_rate_ctrl_report_send_ms(uint32_t send_ms);
 
 /* Per camera frame: true = encode+send this frame, false = skip it.
- * Skipping is how the effective fps is lowered below the camera rate. */
+ * Skipping is how the effective fps is lowered below the camera rate.
+ * Always true while disabled. */
 bool video_rate_ctrl_should_encode(void);
 
 /* Returns a new encoder bitrate (bps) to apply, or 0 if unchanged since
@@ -56,5 +75,7 @@ uint32_t video_rate_ctrl_pull_bitrate_bps(void);
 /* Network-side bitrate ceiling from WebRTC TWCC sender BWE (viewer feedback),
  * in bps. The controller caps its target at min(configured max, this); the
  * local send-latency loop then operates within that cap. Pass 0 to clear the
- * ceiling (no network limit). Safe to call from the RTCP handler thread. */
+ * ceiling (no network limit). Safe to call from the RTCP handler thread.
+ * Recorded but not acted on while disabled, so it is in force if the caller
+ * later opts in. */
 void video_rate_ctrl_set_network_ceiling_bps(uint32_t bps);

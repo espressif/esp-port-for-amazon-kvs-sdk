@@ -7,12 +7,14 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <inttypes.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 
 #include "esp_heap_caps.h"
 #include "webrtc_mem_utils.h"
@@ -22,6 +24,7 @@
 static const char *TAG __attribute__((unused)) = "H264FrameGrabber";
 
 #include "H264FrameGrabber.h"
+#include "video_sink_priv.h"
 
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -35,7 +38,6 @@ extern void esp32p4_frame_grabber_init(video_frame_preprocess_fn_t);
 extern esp_err_t esp32p4_frame_grabber_start(void);
 extern esp_err_t esp32p4_frame_grabber_stop(void);
 extern esp_err_t esp32p4_frame_grabber_deinit(void);
-extern esp_h264_out_buf_t *esp32p4_grab_one_frame();
 extern bool esp32p4_is_encoder_running(void);
 extern bool esp32p4_is_encoder_initialized(void);
 extern esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
@@ -53,7 +55,6 @@ extern esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
 #if CONFIG_IDF_TARGET_ESP32S3
 
 typedef struct {
-    QueueHandle_t frame_queue;
     TaskHandle_t encoder_task_handle;
     StaticTask_t *task_buffer;
     void *task_stack;
@@ -71,8 +72,41 @@ typedef struct {
 static h264_encoder_data_t s_h264_enc_data = {0};
 static esp_h264_enc_handle_t initialize_h264_encoder();
 
-#define QUEUE_RECEIVE_WAIT_MS  CONFIG_VIDEO_QUEUE_RECEIVE_WAIT_MS
-#define QUEUE_SEND_WAIT_MS     CONFIG_VIDEO_QUEUE_SEND_WAIT_MS
+
+
+/* -------------------------------------------------------------------------- */
+/*  Sink plumbing (S3)                                                        */
+/*                                                                            */
+/*  Mirrors the P4 grabber: the encoder publishes each frame to every enabled  */
+/*  sink with a BORROWED buffer. Consumers register with video_sink_register() */
+/*  and own whatever buffering their own work requires.                       */
+/* -------------------------------------------------------------------------- */
+
+static inline video_frame_type_t h264_to_video_frame_type(esp_h264_frame_type_t t)
+{
+    switch (t) {
+        case ESP_H264_FRAME_TYPE_IDR:
+        case ESP_H264_FRAME_TYPE_I:
+            return VIDEO_FRAME_TYPE_I;
+        case ESP_H264_FRAME_TYPE_P:
+            return VIDEO_FRAME_TYPE_P;
+        default:
+            return VIDEO_FRAME_TYPE_OTHER;
+    }
+}
+
+/* `buffer` is BORROWED by the sinks for the duration of this call. */
+static void publish_encoded_frame(uint8_t *buffer, uint32_t len, esp_h264_frame_type_t type)
+{
+    video_frame_t frame = {
+        .buffer    = buffer,
+        .len       = len,
+        /* Stamped once, so every sink sees an identical PTS for this frame. */
+        .timestamp = esp_timer_get_time(),
+        .type      = h264_to_video_frame_type(type),
+    };
+    video_sink_dispatch(&frame);
+}
 
 static void video_encoder_task(void *arg)
 {
@@ -136,31 +170,12 @@ static void video_encoder_task(void *arg)
             continue;
         }
 
-        esp_h264_out_buf_t frame = {0};
-        /* Calculate the frame length */
-        frame.len = s_h264_enc_data.out_frame.length;
-        frame.type = (esp_h264_frame_type_t)s_h264_enc_data.out_frame.frame_type;
-
-        /* allocate the memory of size *frame_len */
-        frame.buffer = (uint8_t *) heap_caps_calloc(1, frame.len, MALLOC_CAP_SPIRAM);
-
-        if (!frame.buffer) {
-            ESP_LOGE(TAG, "frame.buffer alloc failed, size %d", (int) frame.len);
-            webrtc_mem_utils_print_stats(TAG);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        } else {
-            // ESP_LOGI(TAG, "frame.len %d", (int) frame.len);
-        }
-
-        /* Copy the frame */
-        memcpy(frame.buffer, s_h264_enc_data.out_frame.raw_data.buffer, frame.len);
-
-        /* Insert it into the queue */
-        if (xQueueSend(s_h264_enc_data.frame_queue, &frame, pdMS_TO_TICKS(QUEUE_SEND_WAIT_MS)) != pdTRUE) {
-            // ESP_LOGW(TAG, "Queue full, dropping frame");
-            free(frame.buffer);
-        }
+        /* Publish the encoder's own output buffer. Sinks borrow it for the duration
+         * of the dispatch and copy whatever they need, which removes the alloc +
+         * memcpy this loop used to do on every frame. */
+        publish_encoded_frame(s_h264_enc_data.out_frame.raw_data.buffer,
+                              s_h264_enc_data.out_frame.length,
+                              (esp_h264_frame_type_t)s_h264_enc_data.out_frame.frame_type);
     }
 
     ESP_LOGE(TAG, "H264 encoder task unexpectedly exited!");
@@ -183,12 +198,6 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     }
     webrtc_mem_utils_print_stats(TAG);
 
-    s_h264_enc_data.frame_queue = xQueueCreate(CONFIG_VIDEO_FRAME_QUEUE_SIZE, sizeof(esp_h264_out_buf_t));
-    if (!s_h264_enc_data.frame_queue) {
-        ESP_LOGE(TAG, "Failed to create frame queue");
-        goto cleanup;
-    }
-
     // Create semaphore for start/stop control
     s_h264_enc_data.run_semaphore = xSemaphoreCreateBinary();
     if (!s_h264_enc_data.run_semaphore) {
@@ -206,6 +215,7 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     }
 
     s_h264_enc_data.running = false;  // Start in stopped state
+
     s_h264_enc_data.encoder_task_handle = xTaskCreateStatic(video_encoder_task, "video_encoder", ENC_TASK_STACK_SIZE,
                                                             config->frame_preprocess_fn, ENC_TASK_PRIO, s_h264_enc_data.task_stack, s_h264_enc_data.task_buffer);
     if (s_h264_enc_data.encoder_task_handle == NULL) {
@@ -232,23 +242,21 @@ cleanup:
         vSemaphoreDelete(s_h264_enc_data.run_semaphore);
         s_h264_enc_data.run_semaphore = NULL;
     }
-    if (s_h264_enc_data.frame_queue != NULL) {
-        vQueueDelete(s_h264_enc_data.frame_queue);
-        s_h264_enc_data.frame_queue = NULL;
-    }
-
     ESP_LOGE(TAG, "H264 encoder initialization failed");
     return ESP_ERR_NO_MEM;
 }
 
+/* The H.264 pull path is gone: encoded frames are delivered through the
+ * video_sink registry instead. Kept as a stub so the codec-dispatching adapter
+ * still links; it reports the migration rather than failing silently. */
 esp_h264_out_buf_t *get_h264_encoded_frame(void)
 {
-    esp_h264_out_buf_t *frame_data = heap_caps_calloc(1, sizeof(esp_h264_out_buf_t), MALLOC_CAP_SPIRAM);
-    if (xQueueReceive(s_h264_enc_data.frame_queue, frame_data, pdMS_TO_TICKS(QUEUE_RECEIVE_WAIT_MS)) != pdTRUE) {
-        heap_caps_free(frame_data);
-        return NULL;
+    static bool warned;
+    if (!warned) {
+        warned = true;
+        ESP_LOGE(TAG, "H.264 pull API removed - register a sink with video_sink_register()");
     }
-    return frame_data;
+    return NULL;
 }
 
 static esp_h264_enc_handle_t initialize_h264_encoder()
@@ -347,29 +355,6 @@ esp_err_t h264_encoder_deinit(void)
     // Stop encoding first
     h264_encoder_stop();
 
-    // Drain the frame queue with limited iterations to prevent infinite loop
-    if (s_h264_enc_data.frame_queue != NULL) {
-        ESP_LOGD(TAG, "Draining H264 frame queue...");
-        esp_h264_out_buf_t h264_frame;
-        int drained_count = 0;
-        const int max_drain_iterations = CONFIG_VIDEO_FRAME_QUEUE_SIZE;  // Prevent infinite loop
-
-        while (xQueueReceive(s_h264_enc_data.frame_queue, &h264_frame, 0) == pdTRUE &&
-               drained_count < max_drain_iterations) {
-            if (h264_frame.buffer) {
-                heap_caps_free(h264_frame.buffer);
-            }
-            drained_count++;
-        }
-
-        if (drained_count > 0) {
-            ESP_LOGD(TAG, "Drained %d H264 frames from queue", drained_count);
-        }
-        if (drained_count >= max_drain_iterations) {
-            ESP_LOGI(TAG, "Reached max drain limit, queue may still contain frames");
-        }
-    }
-
     // Singleton pattern: encoder task remains running but paused
     ESP_LOGD(TAG, "H264 encoder is singleton - task remains paused until start() is called");
 
@@ -425,9 +410,16 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     return ESP_OK;
 }
 
+/* See the S3 stub above: the H.264 pull path is replaced by the video_sink
+ * registry. */
 esp_h264_out_buf_t *get_h264_encoded_frame(void)
 {
-    return esp32p4_grab_one_frame();
+    static bool warned;
+    if (!warned) {
+        warned = true;
+        ESP_LOGE(TAG, "H.264 pull API removed - register a sink with video_sink_register()");
+    }
+    return NULL;
 }
 
 esp_err_t video_capture_set_bitrate(video_capture_handle_t handle, uint32_t bitrate_kbps)
