@@ -24,6 +24,7 @@
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 #include "esp_log.h"
 #include "media_stream.h"
+#include "video_rate_ctrl.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -216,6 +217,35 @@ bool kvs_media_adjust_video_bitrate(
     uint32_t max_bitrate_kbps,
     const char *reason,
     uint32_t *current_bitrate);
+
+/**
+ * @brief This component's video rate controller, or NULL before media is started
+ *
+ * Exposed so the TWCC bandwidth-estimation handler in kvs_webrtc.c can feed the
+ * network ceiling to the WebRTC sink's controller specifically, rather than to a
+ * process-global one every other transport would share.
+ */
+video_rate_ctrl_handle_t kvs_media_get_video_rate_ctrl(void);
+
+/**
+ * @brief Report the network's bandwidth estimate for the video stream
+ *
+ * Called by the TWCC sender-bandwidth-estimation handler in kvs_webrtc.c, roughly once a
+ * second while a viewer is sending transport-wide feedback. Applies the estimate as the
+ * controller's network ceiling and, on the FIRST report of a session, enables the
+ * controller - the arrival of feedback being the evidence that this transport has a
+ * congestion signal worth steering on.
+ *
+ * Enabling happens once per session, so an operator's later `rate-adapt off` stays off.
+ * Safe to call before media starts, and with 0 (both are ignored).
+ *
+ * With more than one viewer the last report wins: there is one encoder and one controller
+ * behind it, so the ceiling is necessarily the estimate of whichever peer reported most
+ * recently rather than a per-peer value.
+ *
+ * @param bps Estimated bitrate the network will carry for video
+ */
+void kvs_media_report_network_estimate_bps(uint32_t bps);
 
 #ifdef __cplusplus
 }

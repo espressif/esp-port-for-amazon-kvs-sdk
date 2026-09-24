@@ -1,0 +1,24 @@
+# 1080p profile for this example - OPT IN, on top of sdkconfig.defaults.
+#
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.p4_eye.esp32p4;sdkconfig.defaults.1080p" build
+#
+# 720p remains the tracked default; 1080p fits, but only just.
+
+#
+# The sensor's DEFAULT format is what actually selects the capture resolution - the CSI
+# device is bound to it and rejects VIDIOC_S_FMT for any other size - so both this and the
+# WIDTH/HEIGHT pair have to move together.
+#
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+# CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS is not set
+CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1920X1080_25FPS=y
+CONFIG_PERSON_DETECT_VIDEO_WIDTH=1920
+CONFIG_PERSON_DETECT_VIDEO_HEIGHT=1080
+
+#
+# Five buffers, reserving one. A 1080p capture buffer is 3.11 MB against 1.38 MB at 720p,
+# so six would not leave enough for two network sinks at once. Five is also the minimum
+# the sinks allow: the loan budget is COUNT - RESERVE and they need 4 (preview + detect + encoder 2).
+#
+CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT=5
+CONFIG_MEDIA_STREAM_CAM_BUFFER_RESERVE=1

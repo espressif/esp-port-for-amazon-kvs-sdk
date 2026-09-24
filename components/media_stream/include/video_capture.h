@@ -47,27 +47,61 @@ typedef enum {
     VIDEO_FRAME_TYPE_OTHER /* Other frame types */
 } video_frame_type_t;
 
-typedef enum {
-    PIXFMT_YUV422,    // 2BPP/YUV422
-    PIXFMT_YUV420,    // 1.5BPP/YUV420
-    PIXFMT_OTHER,
-} video_frame_pixformat_t;
+/**
+ * @brief FourCC pixel-format codes
+ *
+ * Values match the V4L2 codes of the same name, so a fourcc read straight out of the
+ * driver compares equal to the constant here. Asserted, not assumed: see the
+ * _Static_asserts in esp32p4_frame_grabber.c, which is where a V4L2 header is in scope.
+ *
+ * DO NOT "simplify" this away by forwarding the driver's fourcc verbatim. On the P4 that
+ * fourcc is wrong: esp_video asks for V4L2_PIX_FMT_YUV420 on the CSI/DVP path, but the ISP
+ * emits the semi-packed O_UYY_E_VYY layout, which V4L2 has no code for and esp_video adds
+ * none. 'YU12' therefore arrives on a buffer that is not I420 - and VIDEO_FOURCC_I420 is
+ * deliberately that same 32-bit value, so the two are indistinguishable downstream. The
+ * capture pump is the only layer that knows which it really is, and it re-labels rather
+ * than forwards (esp32p4_frame_grabber.c, video_pump_task). That relabel is the whole
+ * reason this namespace exists instead of linux/videodev2.h - which a public header may
+ * not include anyway, since esp_video is not a dependency on every target.
+ */
+#define VIDEO_FOURCC(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | \
+                                  ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
 
-typedef struct {
-    uint8_t *buffer;
-    uint16_t height;
-    uint16_t width;
-    size_t len;
-    video_frame_pixformat_t pixfmt;
-} video_frame_raw_t;
+/* Semi-packed YUV420: odd rows U Y Y, even rows V Y Y. What the P4 ISP emits and the
+ * only layout the P4 hardware H.264 encoder accepts */
+#define VIDEO_FOURCC_O_UYY_E_VYY  VIDEO_FOURCC('O', 'U', 'E', 'V')
+
+#define VIDEO_FOURCC_I420         VIDEO_FOURCC('Y', 'U', '1', '2')  /* planar YUV 4:2:0 */
+#define VIDEO_FOURCC_YUYV         VIDEO_FOURCC('Y', 'U', 'Y', 'V')  /* packed YUV 4:2:2 */
+#define VIDEO_FOURCC_UYVY         VIDEO_FOURCC('U', 'Y', 'V', 'Y')
+#define VIDEO_FOURCC_RGB565       VIDEO_FOURCC('R', 'G', 'B', 'P')  /* little-endian */
+#define VIDEO_FOURCC_RGB24        VIDEO_FOURCC('R', 'G', 'B', '3')
+#define VIDEO_FOURCC_GREY         VIDEO_FOURCC('G', 'R', 'E', 'Y')  /* 8-bit luma only */
+#define VIDEO_FOURCC_SBGGR8       VIDEO_FOURCC('B', 'A', '8', '1')  /* raw Bayer, ISP bypassed */
+#define VIDEO_FOURCC_H264         VIDEO_FOURCC('H', '2', '6', '4')
 
 /**
- * @brief Callback to preprocess raw frame before h264 encoding
+ * @brief A raw (uncompressed) frame handed to a raw sink
  *
- * @param frame_raw Raw frame data
- * @return esp_err_t ESP_OK on success, otherwise an error code
+ * Deliberately small and free of pointers-to-owned-things: it is passed BY VALUE through
+ * queues, so a frame costs no allocation to deliver.
+ *
+ * @c slot and @c generation are the frame's identity for release purposes. Do not modify
+ * them, and pass the descriptor back unchanged - releasing a mutated or stale descriptor
+ * is detected and refused rather than corrupting the buffer pool.
  */
-typedef esp_err_t (*video_frame_preprocess_fn_t)(video_frame_raw_t frame_raw);
+typedef struct {
+    uint8_t *buffer;        /* Pixel data */
+    size_t   len;           /* Bytes valid in @c buffer */
+    uint16_t width;
+    uint16_t height;
+    uint32_t fourcc;        /* VIDEO_FOURCC_*: what @c buffer actually contains */
+    uint64_t timestamp_us;  /* Capture time, microseconds since boot */
+    uint32_t seq;           /* Monotonic capture counter; a gap means frames were dropped */
+    uint8_t  slot;          /* Opaque: which capture buffer this is */
+    uint8_t  generation;    /* Opaque: stale-release detector */
+    bool     owned;         /* true when this is a private converted buffer, not a camera one */
+} video_raw_frame_t;
 
 /**
  * @brief Video capture configuration
@@ -77,8 +111,6 @@ typedef struct {
     video_resolution_t resolution;
     uint8_t quality;            /* 0-100, higher is better quality */
     uint32_t bitrate;           /* Target bitrate in kbps */
-    video_frame_preprocess_fn_t
-        frame_preprocess_fn;    /* Callback to preprocess raw frame */
     void *codec_specific;       /* Codec-specific parameters if needed */
 } video_capture_config_t;
 
@@ -94,6 +126,41 @@ typedef struct {
  * @return ESP_OK, or ESP_ERR_NOT_SUPPORTED where the capture layer cannot tell
  */
 esp_err_t video_capture_get_active_resolution(video_resolution_t *resolution);
+
+/**
+ * @brief What the capture pipeline MEASURED over its most recent one-second window
+ *
+ * These are achieved rates, not targets - the same numbers the grabber logs as its
+ * `cap_fps:` and `enc_fps:` lines, kept instead of only printed so a UI can show them.
+ * For what the rate controller is ASKING for, see video_rate_ctrl_get_stats(); the two
+ * differing is the interesting case (a target the hardware cannot meet).
+ *
+ * Sampled without a lock: each field is published independently at the end of its window,
+ * so a reader can in principle catch @c cap_fps from one window and @c enc_fps from the
+ * next. Harmless at a one-second cadence, and cheaper than serialising the pump against a
+ * display task.
+ */
+typedef struct {
+    uint32_t cap_fps;              /* Camera frames published to the raw bus */
+    uint32_t enc_fps;              /* Encoded frames the encoder produced */
+    uint32_t enc_kbps;             /* Encoded bitrate produced. NOT uplink load: each
+                                    * transport adds framing, and with two sinks live the
+                                    * same video leaves the device twice. */
+    uint32_t enc_max_frame_bytes;  /* Largest encoded frame in the window, i.e. a keyframe */
+} video_capture_live_stats_t;
+
+/**
+ * @brief Snapshot the measured capture/encode rates
+ *
+ * Zeroes any field whose first window has not closed yet, so a caller may display it
+ * immediately after boot.
+ *
+ * Implemented by the ESP32-P4 CSI grabber. Other capture backends do not define it.
+ *
+ * @param[out] out Filled in on success
+ * @return ESP_OK or ESP_ERR_INVALID_ARG
+ */
+esp_err_t video_capture_get_live_stats(video_capture_live_stats_t *out);
 
 /**
  * @brief Video frame buffer structure

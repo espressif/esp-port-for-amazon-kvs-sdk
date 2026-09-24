@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include "dirent.h"
 #include <stdio.h>
@@ -30,6 +31,11 @@
 // #include "allocators.h"
 
 static char *TAG = "h264_hw_enc";
+
+#ifndef CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB
+#define CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB 1024
+#endif
+
 static void audio_mem_print(const char *tag, int line, const char *func)
 {
 #ifdef CONFIG_SPIRAM_BOOT_INIT
@@ -170,10 +176,10 @@ esp_err_t esp_h264_hw_enc_process_one_frame()
  * Encode one frame and hand back a BORROWED view of the encoder's own output
  * buffer - no allocation, no copy.
  *
- * The buffer stays valid until the next call to this function (or to
- * esp_h264_hw_enc_encode_frame()), i.e. for one frame period. Callers that need
- * it for longer must copy it out; components/media_stream's grabber does that
- * into a small rotating pool rather than malloc'ing per frame.
+ * The buffer stays valid until the next call to this function, i.e. for one
+ * frame period. Callers that need it for longer must copy it out;
+ * components/media_stream's grabber does that into a small rotating pool
+ * rather than malloc'ing per frame.
  */
 esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
                                               esp_h264_out_buf_t *out)
@@ -242,35 +248,6 @@ esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
     }
 }
 
-/**
- * Allocating wrapper kept for callers that want to own the frame. Costs a
- * malloc + copy per frame; prefer the borrow form above where the lifetime
- * allows it.
- */
-esp_h264_out_buf_t *esp_h264_hw_enc_encode_frame(uint8_t *frame, size_t frame_len)
-{
-    esp_h264_out_buf_t borrowed = {0};
-    if (esp_h264_hw_enc_encode_frame_borrow(frame, frame_len, &borrowed) != ESP_OK) {
-        return NULL;
-    }
-
-    esp_h264_out_buf_t *out_buf = calloc(1, sizeof(esp_h264_out_buf_t));
-    if (!out_buf) {
-        ESP_LOGE(TAG, "Allocation failed for esp_h264_out_buf_t");
-        return NULL;
-    }
-    out_buf->buffer = heap_caps_aligned_calloc(64, 1, borrowed.len, MALLOC_CAP_SPIRAM);
-    if (!out_buf->buffer) {
-        ESP_LOGE(TAG, "mem allocation failed for frame_buffer. line %d", __LINE__);
-        free(out_buf);
-        return NULL;
-    }
-    memcpy(out_buf->buffer, borrowed.buffer, borrowed.len);
-    out_buf->len  = borrowed.len;
-    out_buf->type = borrowed.type;
-    return out_buf;
-}
-
 void esp_h264_destroy_encoder()
 {
     esp_h264_enc_close(enc_data.enc);
@@ -300,10 +277,24 @@ esp_err_t esp_h264_setup_encoder(h264_enc_user_cfg_t *user_cfg)
     audio_mem_print("H264 HW", __LINE__, __func__);
     enc_data.in_frame.raw_data.len = (width * height + (width * height >> 1));
 
-    enc_data.out_frame.raw_data.len = enc_data.in_frame.raw_data.len;
-    // uint32_t actual_size = 0;
-    // enc_data.out_frame.raw_data.buffer = esp_h264_aligned_calloc(64, 1, enc_data.out_frame.raw_data.len, &actual_size, MALLOC_CAP_SPIRAM);
+    /* The output buffer holds compressed frames, so size it from the compressed-frame
+     * bound rather than from the input frame - the same bound the UVC capture buffers use
+     * in esp_video_if.c, because it answers the same question. */
+    {
+        const uint32_t uncompr = enc_data.in_frame.raw_data.len;
+        uint32_t       out_len = (uint32_t) CONFIG_MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB * 1024u;
+
+        if (out_len == 0 || out_len > uncompr) {
+            /* 0 means "no cap", and a cap above the uncompressed size cannot be reached
+             * by a compressed frame either way. */
+            out_len = uncompr;
+        }
+        enc_data.out_frame.raw_data.len = out_len;
+    }
     enc_data.out_frame.raw_data.buffer = heap_caps_aligned_calloc(64, 1, enc_data.out_frame.raw_data.len, MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "encoder output buffer: %" PRIu32 " bytes for %ux%u (uncompressed frame is %" PRIu32 ")",
+             (uint32_t) enc_data.out_frame.raw_data.len, width, height,
+             (uint32_t) enc_data.in_frame.raw_data.len);
 
     if (!enc_data.out_frame.raw_data.buffer) {
         printf("mem allocation failed.line %d \n", __LINE__);

@@ -1,0 +1,74 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# P4-EYE BSP (ST7789 SPI display). Without it bsp_selector defaults to
+# ESP32_P4_FUNCTION_EV_BOARD, which pulls the EV-board MIPI stack - wrong panel.
+#
+CONFIG_BSP_SELECT_ESP32_P4_EYE=y
+
+#
+# esp_hosted board select: P4-EYE SDIO pin map and C6 reset GPIO (9). Without it
+# esp_hosted uses the default P4 map (GPIO 54) and the C6 never resets.
+#
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+
+#
+# Camera sensor: P4-EYE ships OV2710 (the base esp32p4 overlay enables only SC2336,
+# whose auto-detect then fails). Both stay on; auto-detect picks whichever responds.
+#
+CONFIG_CAMERA_OV2710=y
+
+# Compile BOTH sensor formats, keeping 720p as the default. The DEFAULT_FMT line is what
+# picks the capture resolution, not PERSON_DETECT_VIDEO_WIDTH/HEIGHT: the CSI device is bound
+# to it and rejects VIDIOC_S_FMT for any other size. 1080p is not viable on this board.
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1280X720_25FPS=y
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS=y
+CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS=y
+
+#
+# Chip revision
+#
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_0=y
+
+#
+# Slave Flasher
+#
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0x8000
+CONFIG_SLAVE_APPLICATION_ADDRESS=0x10000
+CONFIG_SLAVE_UART_RX_PIN=36
+CONFIG_SLAVE_UART_TX_PIN=35
+CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
+
+#
+# Video player (receive path) OFF: this example shows the LOCAL camera on the LCD, and
+# leaving it on lets media_stream's render backend take over the preview screen.
+#
+# CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
+
+#
+# ST7789 SPI panel byte order. Without it the preview renders with red/blue swapped; the PPA
+# cannot do the swap for us (byte_swap acts on ARGB8888/RGB565 inputs, ours is YUV420).
+#
+CONFIG_LV_COLOR_16_SWAP=y
+
+#
+# esp-dl wants XIP-from-PSRAM. It also wants COMPILER_OPTIMIZATION_PERF and the 256KB/128B
+# L2 cache options, deliberately NOT set here: -O2 breaks esp_lvgl_port under -Werror (the
+# example applies it to esp-dl alone), and a 128 B line breaks esp_cache_msync() alignment.
+#
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+#
+# The model lives in a flash partition, not the app image (see partitions.16mb.csv).
+#
+CONFIG_PEDESTRIAN_DETECT_MODEL_IN_FLASH_PARTITION=y
+
+#
+# 16 MB flash + slave partition for in-system C6/C5 flashing (slave_flasher)
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"

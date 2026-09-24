@@ -264,6 +264,20 @@ menu "Media Stream Configuration"
                 Leave this off to capture raw and encode locally, which keeps rate control,
                 a short GOP and PLI-driven keyframes.
 
+        config MEDIA_STREAM_H264_COMPRESSED_FRAME_MAX_KB
+            int "Max compressed H.264/MJPEG frame (KB)"
+            default 1024
+            help
+                Upper bound on one compressed frame, in KB. Every buffer that holds a
+                compressed frame is sized from this, on both paths that have one:
+
+                  - the UVC capture buffers, when the camera hands us H.264 or MJPEG.
+                    There are three, so capture memory is 3x this.
+                  - the hardware encoder's output buffer, when we encode ourselves.
+
+                1 MB carries a 1080p keyframe with room to spare. Raise it if overflow messages
+                appear for either of those cases.
+
         config MEDIA_STREAM_UVC_CAPTURE_WIDTH
             int "UVC capture width"
             depends on MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
@@ -293,10 +307,6 @@ menu "Media Stream Configuration"
 
                 0 leaves the camera at whatever its descriptors default to.
 
-        config VIDEO_FRAME_QUEUE_SIZE
-            int "Video Frame Queue Size"
-            range 1 32
-            default 8 if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
         config VIDEO_ENC_POOL_SLOTS
             int "Encoder output buffers (triple buffering)"
             range 1 8
@@ -319,6 +329,55 @@ menu "Media Stream Configuration"
                 Buffers grow on demand to fit the largest frame seen, so raising
                 this costs roughly one keyframe of PSRAM per extra slot.
 
+        config MEDIA_STREAM_CAM_BUFFER_COUNT
+            int "Camera capture buffers"
+            range 3 8
+            default 4
+            help
+                How many V4L2 capture buffers the camera rotates through.
+
+                This is the pool every raw consumer borrows from. One buffer is
+                always being filled by the camera, and each raw sink that takes
+                a zero-copy (passthrough) frame holds one for as long as it is
+                working on it. MEDIA_STREAM_CAM_BUFFER_RESERVE decides how many
+                are held back for the camera; the rest are loanable.
+
+                Each buffer is a full frame in PSRAM, so the cost is real:
+
+                  1280x720 YUV420   1.32 MiB each   4 buffers = 5.27 MiB
+                  1920x1080 YUV420  2.97 MiB each   4 buffers = 11.87 MiB
+
+        # Largest reserve that still leaves 2 loanable buffers, which is what the
+        # mandatory encoder sink registers for. Without this the pair
+        # COUNT=3 / RESERVE=2 passes menuconfig and the encoder sink is then
+        # refused at registration, leaving the camera running with nothing
+        # encoding it.
+        config MEDIA_STREAM_CAM_BUFFER_RESERVE_MAX
+            int
+            default 1 if MEDIA_STREAM_CAM_BUFFER_COUNT = 3
+            default 2 if MEDIA_STREAM_CAM_BUFFER_COUNT = 4
+            default 3 if MEDIA_STREAM_CAM_BUFFER_COUNT = 5
+            default 4
+
+        config MEDIA_STREAM_CAM_BUFFER_RESERVE
+            int "Camera buffers never loaned to sinks"
+            range 1 MEDIA_STREAM_CAM_BUFFER_RESERVE_MAX
+            default 2
+            help
+                Buffers held back from the loan budget so the camera always has
+                somewhere to write.
+
+                Must be at least 1 (the buffer currently being filled). 2 is the
+                useful default: one being filled, one queued behind it, so the
+                camera keeps running at full rate while every other buffer is
+                out with a sink.
+
+                The upper end is bounded by MEDIA_STREAM_CAM_BUFFER_COUNT: what
+                is left over after the reserve has to cover the encoder sink,
+                which is always registered and always claims 2 (one queued, one
+                being encoded). So a count of 3 forces a reserve of 1, and
+                raising the reserve means raising the count with it.
+
         config VIDEO_SINK_MAX
             int "Maximum number of encoded video sinks"
             range 1 8
@@ -332,6 +391,56 @@ menu "Media Stream Configuration"
                 negligible - but remember that every enabled sink runs
                 sequentially on the encoder task and shares one per-frame time
                 budget, so more sinks means less headroom for each.
+
+        config VIDEO_RATE_CTRL_FPS_FLOOR
+            int "Rate control: lowest frame rate the ladder may schedule"
+            range 1 30
+            default 12
+            help
+                The ladder never asks for fewer frames per second than this, whatever
+                the link is doing. Its rungs are clamped up to it, so raising this
+                shortens the ladder rather than changing its shape.
+
+                12 is the historical default, measured on a contended 2.4 GHz uplink
+                where a single frame took ~70 ms to send: a 15-fps budget (67 ms) stays
+                under water and the controller cannot catch up, while 12 fps (~83 ms)
+                has the headroom to match those sends.
+
+                Raise it when a consumer has a hard frame-rate requirement and would
+                rather lose quality than smoothness - an archive upload that must stay
+                at 20 fps, say. The bitrate floor rises with it in effect, since fewer
+                bits per frame at more frames is what the encoder is then asked for.
+
+        config VIDEO_RATE_CTRL_MIN_MBPS_PER_PX
+            int "Rate control: bitrate floor in milli-bits per pixel per second"
+            range 0 2000
+            default 280
+            help
+                Lowest bitrate the ladder may ask for at the current resolution,
+                expressed per pixel so it scales: floor = width * height * this / 1000.
+
+                280 puts 720p at 258 kbps and 1080p at 581 kbps, which is where the
+                UVC test camera independently clamps and just above the measured bottom
+                of usable. Below a floor like this the encoder answers a low target with
+                a few KB per key frame - technically a stream, not usefully a picture.
+
+                Raise it for a quality-sensitive deployment (326 gives 300 kbps at
+                720p); 0 disables it and leaves only the encoder's own minimum, which
+                is resolution-independent and therefore means something very different
+                at 320x240 than at 1080p.
+
+        config VIDEO_RATE_CTRL_MAX
+            int "Maximum number of video rate controllers"
+            range 1 8
+            default 4
+            help
+                How many sinks may run their own congestion-adaptive rate
+                controller at once. One per transport that opts in.
+
+                Each controller keeps its own ladder position and congestion
+                history; the grabber applies the strict minimum of their targets,
+                because a single encoder cannot serve a fast consumer and a slow
+                one at the same time.
 
         config VIDEO_SINK_SLOW_WARN_US
             int "Slow sink warning threshold (us)"
@@ -347,10 +456,69 @@ menu "Media Stream Configuration"
                 default flags a callback eating ~15% of that, which is well
                 before it starts costing frames.
 
-                When the queue is full the frame is dropped and the stream waits for the
-                next IDR. A UVC camera sets its own GOP (up to 10 s), so one overflow can
-                stall the viewer for that long; the deeper UVC default absorbs send-side
-                jitter instead.
+        config VIDEO_RAW_SINK_MAX
+            int "Maximum number of raw video sinks"
+            range 1 8
+            default 5
+            help
+                How many consumers may register for raw camera frames at once.
+
+                This is a table size, not a budget. The budget is separate: a
+                passthrough or converted sink claims queue_depth + 1 camera buffers
+                and registration fails once MEDIA_STREAM_CAM_BUFFER_COUNT minus
+                MEDIA_STREAM_CAM_BUFFER_RESERVE runs out. Converted sinks are
+                charged the same as passthrough ones - they hand the buffers back
+                after the conversion rather than after the consumer's work, which
+                makes them cheaper in time, not in count. Inline sinks claim
+                nothing, so this ceiling is the only one that applies to them.
+
+        config VIDEO_RAW_SINK_SLOW_WARN_US
+            int "Slow raw sink warning threshold (us)"
+            range 100 1000000
+            default 20000
+            help
+                An inline raw sink holding a frame longer than this is named in
+                a rate-limited warning.
+
+                This applies to VIDEO_RAW_MODE_INLINE only, because those run on
+                the pump task and delay every other sink.
+
+        config VIDEO_RAW_SINK_BLOCK_TIMEOUT_MS
+            int "Default timeout for blocking raw sinks (ms)"
+            range 1 5000
+            default 100
+            help
+                How long the pump waits for a VIDEO_RAW_OVERFLOW_BLOCK sink
+                before giving up on a frame and counting dropped_timeout.
+
+                Only VIDEO_RAW_OVERFLOW_BLOCK sinks are affected, and each may
+                override this in its own config.
+
+        config VIDEO_RAW_SINK_TASK_STACK
+            int "Default stack for push-mode raw sink tasks (bytes)"
+            range 2048 32768
+            default 4096
+            help
+                Stack for the task the bus runs on behalf of a raw sink that
+                supplied an on_frame callback. Allocated from SPIRAM.
+
+                4 KB suits a callback that copies or forwards. Anything running
+                a model needs considerably more and should say so in its own
+                config, or use the pull API and own its task outright.
+
+        config VIDEO_CAPTURE_PUMP_TASK_STACK
+            int "Capture pump task stack (bytes)"
+            range 2048 32768
+            default 4096
+            help
+                Stack for the task that dequeues camera frames and publishes
+                them to the raw sinks. Allocated from SPIRAM.
+
+                The pump itself needs very little - it dequeues, stamps and
+                publishes, and the encoder moved to its own sink task with
+                VIDEO_ENCODER_TASK_STACK_SIZE. Raise this only if a sink is
+                registered as VIDEO_RAW_MODE_INLINE, which runs on the pump
+                and can need whatever it needs.
 
         config AUDIO_FRAME_QUEUE_SIZE
             int "Audio Frame Queue Size"

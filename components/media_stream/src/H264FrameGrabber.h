@@ -13,7 +13,8 @@
 
 #include <stdint.h>
 #include "video_capture.h"
-#if CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S3
+#include "media_stream_caps.h"
+#if MEDIA_STREAM_HAS_HW_H264_ENC || CONFIG_IDF_TARGET_ESP32S3
 #include <esp_h264_types.h>
 #else
 /**

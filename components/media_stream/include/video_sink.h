@@ -112,6 +112,17 @@ typedef struct {
     uint32_t    gate_held;  /* Frames withheld while waiting for the first keyframe */
     uint32_t    max_us;     /* Longest callback observed */
     uint32_t    avg_us;     /* Mean callback duration */
+    /* Encoded bytes actually handed to this sink, and the rate that works out
+     * to since the last reset. Counted per sink rather than once, because a
+     * sink whose keyframe gate is still holding is charged nothing - which is
+     * what makes calls/gate_held/bytes agree with each other.
+     *
+     * This is encoded payload DELIVERED, not uplink consumed: each transport
+     * adds its own framing on top (RTP+SRTP+UDP+IP for WebRTC), and with two
+     * sinks live the same video leaves the device twice. Do not read this as
+     * radio load. */
+    uint32_t    bytes_kb;   /* Encoded bytes delivered, KiB */
+    uint32_t    kbps;       /* Mean delivered rate since the last reset */
 } video_sink_stats_t;
 
 /**

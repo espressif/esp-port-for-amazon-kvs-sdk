@@ -1,5 +1,32 @@
 menu "KVS WebRTC Configuration"
 
+    # DTLS-SRTP cannot work without this, so it is forced rather than offered.
+    #
+    # WebRTC must check the certificate the peer presented during the DTLS handshake against
+    # the a=fingerprint line in its SDP; that check is what makes the media path trustworthy,
+    # and it is mandatory in the protocol. IDF keeps it off by default to save memory
+    config KVS_WEBRTC_KEEP_PEER_CERTIFICATE
+        bool
+        default y
+        select MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+
+    # These are properties of the SDK's crypto backend, not choices an application makes.
+    #
+    #   SSL_PROTO_DTLS   - the media path is DTLS; without it there is no handshake at all.
+    #   SSL_DTLS_SRTP    - RFC 5764 negotiation. Dtls_mbedtls.c calls
+    #                      mbedtls_ssl_conf_dtls_srtp_protection_profiles() and
+    #                      mbedtls_ssl_get_dtls_srtp_negotiation_result(), both compiled out
+    #                      without it, so the SRTP profile is never agreed.
+    #   X509_CREATE_C    - each peer connection generates its own ephemeral self-signed
+    #                      certificate through the mbedtls_x509write_crt_* family.
+    config KVS_WEBRTC_MBEDTLS_DTLS_SRTP
+        bool
+        default y
+        select MBEDTLS_SSL_PROTO_DTLS
+        select MBEDTLS_SSL_DTLS_SRTP
+        select MBEDTLS_X509_CREATE_C
+        select MBEDTLS_X509_CRT_WRITE_C
+
     config ENABLE_DATA_CHANNEL
         bool "Enable Data channel support using usrsctp"
         default y

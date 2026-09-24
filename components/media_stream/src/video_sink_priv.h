@@ -5,16 +5,15 @@
  */
 
 /**
- * @brief Internal dispatch entry points for the sink registries.
+ * @brief Internal dispatch entry points for the encoded sink registry.
  *
- * Not part of the public API: only the grabber (raw side) and the H.264 encoder sink
- * (encoded side) call these.
+ * Not part of the public API: only the H.264 encoder sink calls these. The raw side has
+ * its own producer header, video_raw_bus_priv.h.
  */
 
 #pragma once
 
 #include "video_sink.h"
-#include "video_raw_sink.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,14 +28,6 @@ extern "C" {
  * @param frame Borrowed frame; not retained past this call
  */
 void video_sink_dispatch(const video_frame_t *frame);
-
-/**
- * @brief Deliver one raw frame to the registered raw sink, if any.
- *
- * @param frame Borrowed raw frame; not retained past this call
- * @return The sink's return value, or ESP_ERR_INVALID_STATE if none is registered
- */
-esp_err_t video_raw_sink_dispatch(const video_frame_raw_t *frame);
 
 /**
  * @brief Whether at least one encoded sink is currently enabled.

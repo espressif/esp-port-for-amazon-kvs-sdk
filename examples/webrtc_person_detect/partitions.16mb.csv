@@ -1,0 +1,27 @@
+# Name,           Type,  SubType,   Offset,    Size,      Flags
+# 16 MB flash. Differs from the webrtc_classic table in two deliberate ways.
+#
+# SINGLE APP PARTITION, NOT DUAL OTA. esp-dl links roughly 2.7 MB of quantized
+# operator kernels, which puts this app at ~5.4 MB against webrtc_classic's
+# ~2.8 MB. Two OTA slots that size would need 11.5 MB and leave no room for the
+# C6 image and the model. A detection demo does not need field update, so the
+# space goes to the app instead. An application that does need OTA would have to
+# prune esp-dl's operator set.
+#
+# A 'pedestrian_det' PARTITION for the model. The name is not arbitrary - the
+# pedestrian_detect component hardcodes it and hooks esptool_py_flash_to_partition
+# onto the flash target, so plain `idf.py flash` writes it with everything else.
+# 640K for a 435,280-byte model.
+#
+# 'slave' holds the C6/C5 co-processor image that slave_flasher writes in-system.
+# 'storage' is SPIFFS for certificates; the shipped image is ~256 KB.
+# Partition table itself at 0xC000 (CONFIG_PARTITION_TABLE_OFFSET).
+esp_secure_cert,  0x3F,  ,          0xD000,    0x2000,    encrypted
+nvs_key,          data,  nvs_keys,  0xF000,    0x1000,    encrypted
+nvs,              data,  nvs,       0x10000,   0x6000,
+phy_init,         data,  phy,       0x16000,   0x1000,
+fctry,            data,  nvs,       0x17000,   0x6000,
+factory,          app,   factory,   0x20000,   0x900000,
+slave,            data,  spiffs,    0x920000,  0x2E0000,
+pedestrian_det,   data,  spiffs,    0xC00000,  0xA0000,
+storage,          data,  spiffs,    0xCA0000,  0x360000,

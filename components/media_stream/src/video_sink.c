@@ -5,10 +5,14 @@
  */
 
 /**
- * @brief Sink registries for raw and encoded video frames.
+ * @brief Sink registry for encoded video frames.
  *
- * Encoded side: N sinks, dispatched sequentially on the encoder task with a borrowed
- * frame. Raw side: exactly one sink (the H.264 encoder), same borrowing rules.
+ * N sinks, dispatched sequentially on the encoder task with a borrowed frame.
+ *
+ * Raw frames used to be handled here too, in a single hardcoded slot. They now live in
+ * video_raw_bus.c, which refcounts camera buffers so several consumers can hold them at
+ * once - see video_raw_sink.h. Encoded frames stay here because they are small and the
+ * borrow-and-copy contract suits them: this side has no queue to overflow.
  *
  * Nothing here queues or copies a frame. That is the whole point - a borrowed frame
  * cannot overflow, so there is no drop policy to get wrong, which matters because
@@ -53,28 +57,32 @@ struct video_sink_s {
     uint32_t                max_us;
     uint64_t                total_us;
     uint32_t                slow_warns;
+    /* Encoded bytes handed to this sink. Charged inside the per-sink loop, so a
+     * sink still holding for its first keyframe accrues none. */
+    uint64_t                bytes;
 };
 
 static struct video_sink_s s_sinks[CONFIG_VIDEO_SINK_MAX];
 static SemaphoreHandle_t   s_lock;
 static uint32_t            s_enabled_count;
 
-/* Spinlock, not s_lock: it needs no init, and dispatch only copies the slot
- * under it before calling out, so an unregister cannot leave it a NULL fn. */
-static portMUX_TYPE        s_raw_mux = portMUX_INITIALIZER_UNLOCKED;
-static video_raw_sink_t    s_raw_sink;
-static bool                s_raw_registered;
-
 /* Total time spent inside sink callbacks since the last read. The grabber folds
  * this into its 1 s enc_fps line so a drop in capture rate can be attributed to
  * the sinks (or exonerated) at a glance, without correlating two logs. */
 static uint64_t            s_window_dispatch_us;
+
+/* When the per-sink byte counters were last zeroed, so a rate can be derived
+ * from them without the caller having to time the interval itself. */
+static int64_t             s_stats_epoch_us;
 
 /* Recursive so a callback may call back into this API (e.g. a sink disabling itself)
  * without deadlocking against the dispatch that is running it. */
 static esp_err_t sink_lock_init(void)
 {
     if (s_lock == NULL) {
+        /* First use is as good a zero as any for the rate interval; without it
+         * the first snapshot before any reset would divide by all of uptime. */
+        s_stats_epoch_us = esp_timer_get_time();
         s_lock = xSemaphoreCreateRecursiveMutex();
         if (s_lock == NULL) {
             ESP_LOGE(TAG, "Failed to create sink mutex");
@@ -182,6 +190,9 @@ uint32_t video_sink_take_window_us(void)
 
 void video_sink_dispatch(const video_frame_t *frame)
 {
+    /* s_enabled_count is read without the lock on purpose: this early-out runs on every
+     * frame, and a stale value only dispatches or skips one frame around an enable/disable.
+     * The loop below re-checks each sink under the lock. */
     if (frame == NULL || s_lock == NULL || s_enabled_count == 0) {
         return;
     }
@@ -212,6 +223,7 @@ void video_sink_dispatch(const video_frame_t *frame)
             continue;
         }
         s->calls++;
+        s->bytes += frame->len;
         s->total_us += dt;
         if (dt > s->max_us) {
             s->max_us = dt;
@@ -239,6 +251,10 @@ esp_err_t video_sink_get_stats(video_sink_stats_t *out, size_t max, size_t *coun
     if (s_lock == NULL) {
         return ESP_OK;
     }
+    /* One clock read for the whole snapshot, so every row's kbps is over the
+     * same interval and the rows can be compared with each other. */
+    const int64_t elapsed_ms = s_stats_epoch_us
+                               ? (esp_timer_get_time() - s_stats_epoch_us) / 1000 : 0;
     sink_lock();
     for (int i = 0; i < CONFIG_VIDEO_SINK_MAX && *count < max; i++) {
         struct video_sink_s *s = &s_sinks[i];
@@ -252,6 +268,9 @@ esp_err_t video_sink_get_stats(video_sink_stats_t *out, size_t max, size_t *coun
         o->gate_held = s->gate_held;
         o->max_us    = s->max_us;
         o->avg_us    = s->calls ? (uint32_t)(s->total_us / s->calls) : 0;
+        o->bytes_kb  = (uint32_t)(s->bytes / 1024);
+        o->kbps      = (elapsed_ms > 0)
+                       ? (uint32_t)((s->bytes * 8ULL) / (uint64_t) elapsed_ms) : 0;
     }
     sink_unlock();
     return ESP_OK;
@@ -270,58 +289,10 @@ void video_sink_reset_stats(void)
         }
         s->calls = s->gate_held = s->max_us = s->slow_warns = 0;
         s->total_us = 0;
+        s->bytes = 0;
     }
+    /* Restart the interval the per-sink kbps is derived from, so it describes
+     * the window the caller just opened rather than all of time. */
+    s_stats_epoch_us = esp_timer_get_time();
     sink_unlock();
-}
-
-esp_err_t video_raw_sink_register(const video_raw_sink_t *sink)
-{
-    if (sink == NULL || sink->on_frame == NULL || sink->name == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    const char *holder = NULL;
-    taskENTER_CRITICAL(&s_raw_mux);
-    if (s_raw_registered) {
-        holder = s_raw_sink.name;
-    } else {
-        s_raw_sink = *sink;
-        s_raw_registered = true;
-    }
-    taskEXIT_CRITICAL(&s_raw_mux);
-    if (holder != NULL) {
-        ESP_LOGE(TAG, "Raw sink '%s' rejected: '%s' already holds the single slot",
-                 sink->name, holder);
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-    ESP_LOGI(TAG, "Registered raw sink '%s'", sink->name);
-    return ESP_OK;
-}
-
-esp_err_t video_raw_sink_unregister(void)
-{
-    taskENTER_CRITICAL(&s_raw_mux);
-    s_raw_registered = false;
-    memset(&s_raw_sink, 0, sizeof(s_raw_sink));
-    taskEXIT_CRITICAL(&s_raw_mux);
-    return ESP_OK;
-}
-
-bool video_raw_sink_is_registered(void)
-{
-    return s_raw_registered;
-}
-
-esp_err_t video_raw_sink_dispatch(const video_frame_raw_t *frame)
-{
-    if (frame == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    taskENTER_CRITICAL(&s_raw_mux);
-    esp_err_t (*on_frame)(const video_frame_raw_t *, void *) = s_raw_registered ? s_raw_sink.on_frame : NULL;
-    void *user = s_raw_sink.user;
-    taskEXIT_CRITICAL(&s_raw_mux);
-    if (on_frame == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    return on_frame(frame, user);
 }

@@ -27,6 +27,8 @@ jobs:
           - { example: signaling_only, target: esp32c6 }
           # streaming_only: esp32p4
           - { example: streaming_only, target: esp32p4 }
+          # webrtc_person_detect: esp32p4 (raw sinks + PPA + HW H.264)
+          - { example: webrtc_person_detect, target: esp32p4 }
           # network_adapter: esp32c6
           - { example: network_adapter, target: esp32c6 }
 
@@ -82,6 +84,8 @@ jobs:
           - { example: signaling_only, target: esp32c5 }
           # streaming_only: esp32p4
           - { example: streaming_only, target: esp32p4 }
+          # webrtc_person_detect: esp32p4 (raw sinks + PPA + HW H.264)
+          - { example: webrtc_person_detect, target: esp32p4 }
           # network_adapter: esp32c6, esp32c5
           - { example: network_adapter, target: esp32c6 }
           - { example: network_adapter, target: esp32c5 }
