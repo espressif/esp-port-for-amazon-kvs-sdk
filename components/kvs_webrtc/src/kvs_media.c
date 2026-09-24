@@ -52,6 +52,13 @@ static struct {
     UINT32 audio_buffer_size;
 } g_global_media = {0};
 
+/* Sender-side key-frame resync state. Module scope rather than function-static so it
+ * can be re-armed for every session: a session that ended mid-GOP would otherwise
+ * leave the gate open and put a P-frame on the wire as the next session's first
+ * frame. */
+static volatile ATOMIC_BOOL g_sender_wait_for_idr = TRUE;
+static UINT32 g_sender_resync_skipped;
+
 // Sample file fallback settings
 #define KVS_SAMPLE_VIDEO_FRAME_DURATION (HUNDREDS_OF_NANOS_IN_A_SECOND / 30)  // 30 FPS
 #define KVS_SAMPLE_AUDIO_FRAME_DURATION (20 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND)  // 20ms audio frames
@@ -358,6 +365,32 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
         }
 
         if (frame_available) {
+            /* Second half of the resync discipline (the grabber does the same at the
+             * capture end): after a failed send the peer is missing a reference frame,
+             * so every P-frame that follows decodes to garbage. Hold off until the next
+             * key frame. Armed by kvs_media_start_global_transmission() so the first
+             * frame of every session is a key frame. */
+            if (ATOMIC_LOAD_BOOL(&g_sender_wait_for_idr)) {
+                if ((frame.flags & FRAME_FLAG_KEY_FRAME) == FRAME_FLAG_NONE) {
+                    g_sender_resync_skipped++;
+                    if ((g_sender_resync_skipped % 30) == 1) {
+                        ESP_LOGW(TAG, "sender waiting for key frame, skipped %" PRIu32 " frame(s)",
+                                 g_sender_resync_skipped);
+                    }
+                    /* Must release: the capture pool is finite and get_frame() hands us
+                     * a reference, not a copy. */
+                    video_capture->release_frame(g_global_media.video_handle, video_frame);
+                    frame_available = FALSE;
+                } else {
+                    ESP_LOGI(TAG, "sender resynced on key frame after %" PRIu32 " skipped frame(s)",
+                             g_sender_resync_skipped);
+                    g_sender_resync_skipped = 0;
+                    ATOMIC_STORE_BOOL(&g_sender_wait_for_idr, FALSE);
+                }
+            }
+        }
+
+        if (frame_available) {
             // Check termination before send to avoid blocking on shutdown
             if (ATOMIC_LOAD_BOOL(&g_global_media.terminated)) {
                 ESP_LOGD(TAG, "Video thread: termination observed before send - breaking loop");
@@ -371,6 +404,7 @@ static PVOID kvs_global_video_sender_thread(PVOID args)
 
             if (STATUS_FAILED(send_status)) {
                 ESP_LOGW(TAG, "Failed to send frame to sessions: 0x%08" PRIx32, (UINT32)send_status);
+                ATOMIC_STORE_BOOL(&g_sender_wait_for_idr, TRUE);   /* hole in the stream: resync on the next key frame */
             }
 
             // Get end time after send completes
@@ -811,6 +845,10 @@ STATUS kvs_media_start_global_transmission(void* client_data, kvs_media_config_t
 
     CHK(client_data != NULL && config != NULL, STATUS_NULL_ARG);
     CHK(IS_VALID_MUTEX_VALUE(g_global_media.global_media_mutex), STATUS_INVALID_OPERATION);
+
+    /* Every session starts on a key frame: the previous one may have ended mid-GOP. */
+    ATOMIC_STORE_BOOL(&g_sender_wait_for_idr, TRUE);
+    g_sender_resync_skipped = 0;
 
     MUTEX_LOCK(g_global_media.global_media_mutex);
     mutext_locked = TRUE;

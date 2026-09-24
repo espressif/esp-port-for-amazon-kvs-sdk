@@ -47,6 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `${{ github.repository_owner }}` so it auto-adapts to any fork.
 - **Media pipeline** — JPEG snapshot, YUV420 → RGB565 conversion, OV2710
   sensor bring-up path.
+- **Camera interface selection** — `media_stream` can bring up MIPI-CSI, DVP,
+  SPI or USB-UVC cameras, chosen in menuconfig. BSP boards still go through
+  `bsp_camera_start()`.
+- **UVC H.264 passthrough** on ESP32-P4 — a UVC camera's own H.264 is sent
+  without re-encoding (`CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264`).
+
+### Changed
+
+- **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under
+  *Media Stream Configuration → Video Initialization Configuration*. Only the
+  prefix changes, e.g. `CONFIG_EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR` →
+  `CONFIG_MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR`. This covers the
+  `ENABLE_*_CAM_*`, `SCCB_*`, `MIPI_CSI_*`, `DVP_*`, `SPI_*`, `USB_*` and
+  `SELECT_JPEG_*` groups.
+
+  **Migration:** Kconfig ignores unknown keys without a warning, so old names in
+  an `sdkconfig` or `sdkconfig.defaults*` overlay just stop applying and the
+  camera falls back to defaults.
 
 ### Fixed
 

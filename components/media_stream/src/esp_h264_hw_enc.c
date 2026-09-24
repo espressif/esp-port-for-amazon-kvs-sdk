@@ -277,7 +277,7 @@ esp_err_t esp_h264_setup_encoder(h264_enc_user_cfg_t *user_cfg)
         audio_mem_print("H264 HW", __LINE__, __func__);
         return ESP_FAIL;
     }
-    esp_cache_msync(enc_data.out_frame.raw_data.buffer, enc_data.out_frame.raw_data.len,
+    esp_cache_msync(enc_data.out_frame.raw_data.buffer, (enc_data.out_frame.raw_data.len + 63) & ~63U,
                     ESP_CACHE_MSYNC_FLAG_DIR_M2C);
 
     ret = esp_h264_enc_hw_new(&cfg, &enc_data.enc);

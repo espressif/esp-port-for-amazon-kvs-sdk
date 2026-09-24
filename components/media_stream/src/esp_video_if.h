@@ -6,10 +6,17 @@
 
 #pragma once
 
+#include "sdkconfig.h"
 #include "esp_err.h"
 #include "H264FrameGrabber.h"
 #include "video_capture.h"
 #include <sys/time.h>
+
+/* Fallback when the Kconfig symbol is absent — a project whose sdkconfig
+ * predates this option simply will not define it. */
+#ifndef CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS
+#define CONFIG_ESP_VIDEO_IF_DQBUF_TIMEOUT_MS    1000
+#endif
 
 /**
  * @brief Frame buffer structure
@@ -81,6 +88,28 @@ void esp_video_if_release_frame(video_fb_t *fb);
  *  - ESP_ERR_INVALID_STATE: Video interface not initialized
  */
 esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution);
+
+/**
+ * @brief Get the current video pixelformat
+ *
+ * @param pixelformat Pointer to store the current pixelformat
+ * @return esp_err_t
+ *  - ESP_OK: Successfully retrieved pixelformat
+ *  - ESP_ERR_INVALID_ARG: pixelformat pointer is NULL
+ *  - ESP_ERR_INVALID_STATE: Video interface not initialized
+ */
+esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat);
+
+/**
+ * @brief Get the resolution capture will first ask the camera for
+ *
+ * Usable before capture starts. The camera may still settle on a fallback, so prefer
+ * esp_video_if_get_resolution() once it is running.
+ *
+ * @param resolution Pointer to store the expected resolution
+ * @return ESP_OK, or ESP_ERR_INVALID_ARG if resolution is NULL
+ */
+esp_err_t esp_video_if_get_expected_resolution(video_resolution_t *resolution);
 
 /**
  * @brief Set desired resolution before init (called by video_capture_adapter)
