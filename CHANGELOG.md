@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `app_webrtc_terminate()` called from an app task raced the WebRTC task's own
+  teardown, and a terminate with a live session never finished.
 - `signalingMessageReceived()` read uninitialised locals on its NULL-argument
   error path; the same pattern in the SDK's
   `findTransceiversByRemoteDescription()` is fixed upstream (awslabs#2415).
