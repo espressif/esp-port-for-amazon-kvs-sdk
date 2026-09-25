@@ -168,6 +168,11 @@ typedef struct {
     MUTEX sampleConfigurationObjLock;           /* Main configuration lock */
     CVAR cvar;                                  /* Condition variable */
     MUTEX streamingSessionListReadLock;         /* Session list read lock */
+    /* The peer whose session is being created but is not in webrtcSessionList yet, and
+     * whether app_webrtc_close_session() asked for that session to close meanwhile. Both
+     * guarded by streamingSessionListReadLock. */
+    char sessionPendingPeerId[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN + 1];
+    bool closeSessionPending;
     MUTEX signalingSendMessageLock;             /* Signaling send lock */
 
     // === Logging & Debugging ===
@@ -207,6 +212,7 @@ struct __AppWebRTCSession {
     volatile ATOMIC_BOOL terminateFlag;        //!< Flag to indicate session should be terminated
     volatile ATOMIC_BOOL connectedAnnounced;   //!< PEER_CONNECTED was raised for this session, so PEER_DISCONNECTED is owed
     volatile SIZE_T streamingState;            //!< STREAMING_STATE_*: STREAMING_STARTED and STREAMING_STOPPED each at most once, in order
+    volatile ATOMIC_BOOL endReported;          //!< The end-of-session events were raised; they are raised once
     volatile ATOMIC_BOOL peerIdReceived;       //!< Flag indicating peer ID has been received
     volatile ATOMIC_BOOL firstFrame;           //!< Flag for first frame handling
     char peerId[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN + 1]; //!< Peer identifier string

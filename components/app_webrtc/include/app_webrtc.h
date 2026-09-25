@@ -207,6 +207,25 @@ WEBRTC_STATUS app_webrtc_terminate(void);
  */
 WEBRTC_STATUS app_webrtc_close_all_sessions(void);
 
+/**
+ * @brief Close one streaming session, e.g. because its signaling session ended
+ *
+ * Marks the peer's session for teardown and returns; the session-cleanup loop
+ * closes the peer connection and frees it. PEER_DISCONNECTED and
+ * STREAMING_STOPPED are raised when the session is freed, each pairing with
+ * the PEER_CONNECTED / STREAMING_STARTED that was raised for it, once per
+ * session whichever way it ends (failure, this call, close_all_sessions(),
+ * or app teardown).
+ *
+ * A close that arrives while the peer's session is still being created (its
+ * offer is being handled) takes effect as soon as the session is added.
+ *
+ * @param peer_id  Peer ID the session was created for
+ * @return WEBRTC_STATUS_SUCCESS, also when the peer has no session (already
+ *         closed); WEBRTC_STATUS_NULL_ARG when peer_id is NULL
+ */
+WEBRTC_STATUS app_webrtc_close_session(const char *peer_id);
+
 
 /********************************************************************************
  *                      Advanced Configuration APIs                             *

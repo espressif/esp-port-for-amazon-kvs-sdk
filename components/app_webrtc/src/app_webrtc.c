@@ -81,6 +81,10 @@ static WEBRTC_STATUS app_webrtc_trigger_progressive_ice(const char* context, boo
 // Forward declarations for wrapper functions
 static WEBRTC_STATUS signalingMessageReceivedWrapper(uint64_t customData, webrtc_message_t* pWebRtcMessage);
 static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webrtc_peer_state_t state);
+static VOID reportSessionEnded(PAppWebRTCSession pAppWebRTCSession);
+static VOID sessionPendingBegin(PSampleConfiguration pSampleConfiguration, const char *peer_id);
+static BOOL sessionPendingEndLocked(PSampleConfiguration pSampleConfiguration, PAppWebRTCSession pAppWebRTCSession);
+static VOID sessionPendingAbort(PSampleConfiguration pSampleConfiguration);
 
 // Core WebRTC app function declarations
 STATUS getIceCandidatePairStatsCallback(UINT32, UINT64, UINT64);
@@ -340,43 +344,39 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
             if (pAppWebRTCSession != NULL) {
                 // FIXED: Mark only the specific session that failed, not the first one found!
                 ESP_LOGI(TAG, "Peer %s failed/disconnected - marking for cleanup", pAppWebRTCSession->peerId);
-                // Only report a disconnect for a peer we reported as connected. A session
-                // evicted before it ever connected (liveness watchdog, or an SDK-delivered
-                // FAILED) was never announced, and an unpaired PEER_DISCONNECTED walks the
-                // app's peer count down for a connection it never counted up -- power_save
-                // then arms deep sleep while another viewer is still streaming.
-                if (ATOMIC_EXCHANGE_BOOL(&pAppWebRTCSession->connectedAnnounced, FALSE)) {
-                    raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, pAppWebRTCSession->peerId, "Peer disconnected");
+                // Report before publishing terminateFlag: once the flag is visible the
+                // cleanup loop may free the session under this callback.
+                reportSessionEnded(pAppWebRTCSession);
+                if (!ATOMIC_EXCHANGE_BOOL(&pAppWebRTCSession->terminateFlag, TRUE)) {
+                    CVAR_BROADCAST(pSampleConfiguration->cvar);
+                    ESP_LOGI(TAG, "Marked specific peer for termination (not affecting other peers)");
                 }
-                // A gate of its own: STREAMING_STOPPED pairs with STREAMING_STARTED, which
-                // is raised on MEDIA_STARTING while the offer is handled -- before ICE
-                // completes and so before connectedAnnounced is set. A session whose offer
-                // was rejected before media started never raised STREAMING_STARTED, and an
-                // unpaired STREAMING_STOPPED would count down another viewer's session.
-                if (ATOMIC_EXCHANGE(&pAppWebRTCSession->streamingState, STREAMING_STATE_ENDED) ==
-                    STREAMING_STATE_STARTED) {
-                    raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, pAppWebRTCSession->peerId, "Media streaming stopped");
-                }
-                ATOMIC_STORE_BOOL(&pAppWebRTCSession->terminateFlag, TRUE);  // Mark THIS session
-                CVAR_BROADCAST(pSampleConfiguration->cvar);
-                ESP_LOGI(TAG, "Marked specific peer %s for termination (not affecting other peers)",
-                         pAppWebRTCSession->peerId);
             } else {
                 // Bridge mode - use old logic as fallback
                 ESP_LOGI(TAG, "Bridge mode connection failed/disconnected");
+                // The peer ID is copied out so the events can be raised after the
+                // unlock: the list lock is not recursive and a handler may take it
+                // again, and the session may be freed once terminateFlag is visible.
+                char bridgePeerId[SIZEOF(((PAppWebRTCSession) NULL)->peerId)];
+                BOOL bridgeSessionMarked = FALSE;
                 MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
                 for (UINT32 i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
                     PAppWebRTCSession s = pSampleConfiguration->webrtcSessionList[i];
                     if (s != NULL && s->pPeerConnection == NULL && s->interface_session_handle != NULL) {
-                        raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, s->peerId, "Peer disconnected");
-                        raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, s->peerId, "Media streaming stopped");
+                        STRNCPY(bridgePeerId, s->peerId, SIZEOF(bridgePeerId));
+                        bridgePeerId[SIZEOF(bridgePeerId) - 1] = '\0';
                         ATOMIC_STORE_BOOL(&s->terminateFlag, TRUE);
-                        CVAR_BROADCAST(pSampleConfiguration->cvar);
-                        ESP_LOGI(TAG, "Bridge mode: marked session %s for termination", s->peerId);
+                        bridgeSessionMarked = TRUE;
                         break;
                     }
                 }
                 MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+                if (bridgeSessionMarked) {
+                    raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, bridgePeerId, "Peer disconnected");
+                    raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, bridgePeerId, "Media streaming stopped");
+                    CVAR_BROADCAST(pSampleConfiguration->cvar);
+                    ESP_LOGI(TAG, "Bridge mode: marked session %s for termination", bridgePeerId);
+                }
             }
             break;
 
@@ -624,6 +624,10 @@ STATUS freeAppWebRTCSession(PAppWebRTCSession* ppAppWebRTCSession)
     } else {
         ESP_LOGW(TAG, "Session has no interface_session_handle for peer: %s", pAppWebRTCSession->peerId);
     }
+
+    // Every session ends here, whichever way it ended: a peer failure reported it
+    // already, close_session()/close_all_sessions() and teardown report it now.
+    reportSessionEnded(pAppWebRTCSession);
 
     // Drop this departed peer's buffered ICE candidates so the re-trickle buffer
     // frees the slots now instead of at the retry cap (optional; NULL if unused).
@@ -1223,7 +1227,7 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
     PSampleConfiguration pSampleConfiguration = (PSampleConfiguration) HANDLE_TO_POINTER(customData);
 
     // Declared before the first CHK: it jumps to CleanUp, which reads most of these.
-    BOOL peerConnectionFound = FALSE, locked = FALSE, freeStreamingSession = FALSE;
+    BOOL peerConnectionFound = FALSE, locked = FALSE, freeStreamingSession = FALSE, sessionPending = FALSE;
     UINT32 clientIdHash;
     UINT64 hashValue = 0;
     PPendingMessageQueue pPendingMessageQueue = NULL;
@@ -1335,6 +1339,9 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
                 CHK(FALSE, STATUS_INVALID_OPERATION);
             }
 
+            sessionPendingBegin(pSampleConfiguration, pWebRtcMessage->peer_client_id);
+            sessionPending = TRUE;
+
             // Check if we have a pluggable interface or need to use legacy functions directly
             pc_interface = gWebRtcAppConfig.peer_connection_if;
 
@@ -1420,8 +1427,14 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
 
             MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
             pSampleConfiguration->webrtcSessionList[pSampleConfiguration->streamingSessionCount++] = pAppWebRTCSession;
+            BOOL closeNow = sessionPendingEndLocked(pSampleConfiguration, pAppWebRTCSession);
             MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+            sessionPending = FALSE;
             freeStreamingSession = FALSE;
+            if (closeNow) {
+                ESP_LOGI(TAG, "Closing session for peer %s on request", pWebRtcMessage->peer_client_id);
+                CVAR_BROADCAST(pSampleConfiguration->cvar);
+            }
 
             break;
 
@@ -1559,6 +1572,10 @@ CleanUp:
 
     if (pPendingMessageQueue != NULL) {
         freeMessageQueue(pPendingMessageQueue);
+    }
+
+    if (sessionPending) {
+        sessionPendingAbort(pSampleConfiguration);
     }
 
     if (freeStreamingSession && pAppWebRTCSession != NULL) {
@@ -2174,9 +2191,118 @@ CleanUp:
     return retStatus;
 }
 
-/**
- * @brief Terminate the WebRTC application
- */
+/* Raise the end-of-session events exactly once per session. Must be called with
+ * the session still allocated and without streamingSessionListReadLock held:
+ * the lock is not recursive, and a handler may call back into app_webrtc. */
+static VOID reportSessionEnded(PAppWebRTCSession pAppWebRTCSession)
+{
+    if (ATOMIC_EXCHANGE_BOOL(&pAppWebRTCSession->endReported, TRUE)) {
+        return;
+    }
+    // Each event pairs with the one that was actually raised for this session. A
+    // session evicted before it connected (liveness watchdog, or an SDK-delivered
+    // FAILED) was never announced, and an unpaired PEER_DISCONNECTED walks the
+    // app's peer count down for a connection it never counted up -- power_save
+    // then arms deep sleep while another viewer is still streaming. Likewise
+    // STREAMING_STOPPED pairs with STREAMING_STARTED, raised on MEDIA_STARTING.
+    if (ATOMIC_EXCHANGE_BOOL(&pAppWebRTCSession->connectedAnnounced, FALSE)) {
+        raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, pAppWebRTCSession->peerId, "Peer disconnected");
+    }
+    if (ATOMIC_EXCHANGE(&pAppWebRTCSession->streamingState, STREAMING_STATE_ENDED) == STREAMING_STATE_STARTED) {
+        raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, pAppWebRTCSession->peerId, "Media streaming stopped");
+    }
+}
+
+/* Session creation runs under sampleConfigurationObjLock, from the session's
+ * create_session() until it is added to webrtcSessionList. A close asked for in that
+ * window cannot find it in the list, so the peer is published here for the length of
+ * that window. */
+static VOID sessionPendingBegin(PSampleConfiguration pSampleConfiguration, const char *peer_id)
+{
+    MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
+    STRNCPY(pSampleConfiguration->sessionPendingPeerId, peer_id, SIZEOF(pSampleConfiguration->sessionPendingPeerId) - 1);
+    pSampleConfiguration->sessionPendingPeerId[SIZEOF(pSampleConfiguration->sessionPendingPeerId) - 1] = '\0';
+    pSampleConfiguration->closeSessionPending = FALSE;
+    MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+}
+
+/* With streamingSessionListReadLock held, as the session is added to the list (or with
+ * pAppWebRTCSession NULL when its creation failed). TRUE when a close was asked for
+ * meanwhile and the session is now flagged; the caller broadcasts cvar once unlocked. */
+static BOOL sessionPendingEndLocked(PSampleConfiguration pSampleConfiguration, PAppWebRTCSession pAppWebRTCSession)
+{
+    BOOL closeNow = pSampleConfiguration->closeSessionPending && pAppWebRTCSession != NULL;
+    if (closeNow) {
+        ATOMIC_STORE_BOOL(&pAppWebRTCSession->terminateFlag, TRUE);
+    }
+    pSampleConfiguration->sessionPendingPeerId[0] = '\0';
+    pSampleConfiguration->closeSessionPending = FALSE;
+    return closeNow;
+}
+
+static VOID sessionPendingAbort(PSampleConfiguration pSampleConfiguration)
+{
+    MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
+    sessionPendingEndLocked(pSampleConfiguration, NULL);
+    MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+}
+
+/* Flag the peer's session for the cleanup loop, or, while that session is still being
+ * created, have it flagged as it is added to the list. TRUE when this call asked for
+ * the close. */
+static BOOL markSessionForClose(PSampleConfiguration pSampleConfiguration, const char *peer_id)
+{
+    /* Marked under the list lock so the cleanup loop cannot free the session
+     * between finding it and flagging it. Nothing of the session is touched
+     * after the flag is published; its end is reported by
+     * freeAppWebRTCSession() once the cleanup loop has closed the peer
+     * connection, outside this lock. */
+    BOOL found = FALSE, marked = FALSE, deferred = FALSE;
+    MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
+    for (UINT32 i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
+        PAppWebRTCSession s = pSampleConfiguration->webrtcSessionList[i];
+        if (s != NULL && STRCMP(s->peerId, peer_id) == 0) {
+            found = TRUE;
+            marked = !ATOMIC_EXCHANGE_BOOL(&s->terminateFlag, TRUE);
+            break;
+        }
+    }
+    if (!found && !pSampleConfiguration->closeSessionPending && pSampleConfiguration->sessionPendingPeerId[0] != '\0' &&
+        STRCMP(pSampleConfiguration->sessionPendingPeerId, peer_id) == 0) {
+        pSampleConfiguration->closeSessionPending = TRUE;
+        deferred = TRUE;
+    }
+    MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+
+    if (marked) {
+        CVAR_BROADCAST(pSampleConfiguration->cvar);
+    }
+    return marked || deferred;
+}
+
+WEBRTC_STATUS app_webrtc_close_session(const char *peer_id)
+{
+    if (peer_id == NULL) {
+        return WEBRTC_STATUS_NULL_ARG;
+    }
+
+    /* A signaling EndSession can race the app shutting down. The teardown frees
+     * the context, and announces itself under gRunTaskLock first, so the context
+     * is only used with that lock held and no teardown under way. A teardown
+     * frees and reports every session itself, so there is nothing to close. */
+    BOOL marked = FALSE;
+    pthread_mutex_lock(&gRunTaskLock);
+    if (!gRunTaskTearingDown && !gTerminateTeardownBusy && gSampleConfiguration != NULL) {
+        marked = markSessionForClose(gSampleConfiguration, peer_id);
+    }
+    pthread_mutex_unlock(&gRunTaskLock);
+
+    if (marked) {
+        ESP_LOGI(TAG, "Closing session for peer %s on request", peer_id);
+    }
+    return WEBRTC_STATUS_SUCCESS;
+}
+
 WEBRTC_STATUS app_webrtc_close_all_sessions(void)
 {
     PSampleConfiguration pSampleConfiguration = gSampleConfiguration;
@@ -2452,7 +2578,7 @@ int app_webrtc_trigger_offer(char *pPeerId)
     STATUS retStatus = STATUS_SUCCESS;
     PSampleConfiguration pSampleConfiguration = NULL;
     PAppWebRTCSession pAppWebRTCSession = NULL;
-    BOOL locked = FALSE;
+    BOOL locked = FALSE, sessionPending = FALSE;
 
     CHK(pPeerId != NULL, STATUS_NULL_ARG);
     CHK(gSampleConfiguration != NULL, STATUS_INVALID_OPERATION);
@@ -2502,6 +2628,9 @@ int app_webrtc_trigger_offer(char *pPeerId)
          */
         app_webrtc_trigger_progressive_ice("offer creation", true);
 
+        sessionPendingBegin(pSampleConfiguration, pPeerId);
+        sessionPending = TRUE;
+
         // Use pluggable interface
         void* session_handle = NULL;
         // Create the session
@@ -2546,7 +2675,15 @@ int app_webrtc_trigger_offer(char *pPeerId)
         }
 
         // Add to the list and hash table
+        MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
         pSampleConfiguration->webrtcSessionList[pSampleConfiguration->streamingSessionCount++] = pAppWebRTCSession;
+        BOOL closeNow = sessionPendingEndLocked(pSampleConfiguration, pAppWebRTCSession);
+        MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+        sessionPending = FALSE;
+        if (closeNow) {
+            ESP_LOGI(TAG, "Closing session for peer %s on request", pPeerId);
+            CVAR_BROADCAST(pSampleConfiguration->cvar);
+        }
 
         CHK_STATUS(hashTablePut(pSampleConfiguration->pRtcPeerConnectionForRemoteClient, clientIdHash, POINTER_TO_HANDLE(pAppWebRTCSession)));
     }
@@ -2591,6 +2728,10 @@ int app_webrtc_trigger_offer(char *pPeerId)
     }
 
 CleanUp:
+
+    if (sessionPending) {
+        sessionPendingAbort(pSampleConfiguration);
+    }
 
     if (locked) {
         MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
