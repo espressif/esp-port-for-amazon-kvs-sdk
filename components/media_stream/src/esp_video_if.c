@@ -84,6 +84,8 @@ typedef struct v4l2 {
     bool                fb_used[BUFFER_COUNT];
     struct v4l2_buffer  v4l2_buf[BUFFER_COUNT];
     bool                buffers_allocated;
+    bool                streaming;     /* Between a successful STREAMON and the next STREAMOFF */
+    unsigned            users;         /* Consumers that started the camera and have not stopped it */
     video_fb_t          fb[BUFFER_COUNT];
 } v4l2_src_t;
 
@@ -91,6 +93,23 @@ static v4l2_src_t *g_v4l2 = NULL;
 static uint32_t g_current_pixelformat = 0;
 static video_resolution_t g_current_resolution = {.width = 0, .height = 0, .fps = 0};
 static bool s_sensor_is_ov2710 = false;
+
+/* The live stream, the viewfinder and a snapshot each start and stop the camera
+ * from their own task. The camera streams while any of them holds it, so start
+ * and stop are counted, and counted under one lock so two starters cannot both
+ * see it idle. */
+static SemaphoreHandle_t s_stream_lock;
+static StaticSemaphore_t s_stream_lock_storage;
+
+static void stream_lock(void)
+{
+    xSemaphoreTake(s_stream_lock, portMAX_DELAY);
+}
+
+static void stream_unlock(void)
+{
+    xSemaphoreGive(s_stream_lock);
+}
 /* esp_video_init() registers the ISP video device as a side-effect that
  * persists for the life of the process (there is no esp_video_deinit()). Track
  * that we've called it so we never call it twice — a second call faults with
@@ -303,6 +322,8 @@ static void video_stop_cb(void *cb_ctx)
 
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     ioctl(v4l2->cap_fd, VIDIOC_STREAMOFF, &type);
+    v4l2->streaming = false;
+    v4l2->users = 0;
 }
 
 static void requeue_used_buffers(v4l2_src_t *v4l2)
@@ -564,17 +585,27 @@ void esp_video_if_release_frame(video_fb_t *fb)
 
 esp_err_t esp_video_if_stop(void)
 {
-    if (g_v4l2) {
-        requeue_used_buffers(g_v4l2);
-        video_stop_cb(g_v4l2);
-        /* Keep buffers allocated to avoid fragmentation - they'll be reused on next
-         * start. UVC cannot reuse them at all, but that release happens in
-         * esp_video_if_start(): doing it here races the USB host task, which may still
-         * be delivering frames while the stream is being stopped. */
-        ESP_LOGD(TAG, "Streaming stopped (buffers kept allocated for reuse)");
+    if (!g_v4l2) {
+        return ESP_FAIL;
+    }
+
+    stream_lock();
+    if (g_v4l2->users > 1) {
+        g_v4l2->users--;
+        ESP_LOGD(TAG, "Camera still held by %u consumer(s); not stopping", g_v4l2->users);
+        stream_unlock();
         return ESP_OK;
     }
-    return ESP_FAIL;
+    requeue_used_buffers(g_v4l2);
+    video_stop_cb(g_v4l2);
+    stream_unlock();
+
+    /* Keep buffers allocated to avoid fragmentation - they'll be reused on next
+     * start. UVC cannot reuse them at all, but that release happens in
+     * esp_video_if_start(): doing it here races the USB host task, which may still
+     * be delivering frames while the stream is being stopped. */
+    ESP_LOGD(TAG, "Streaming stopped (buffers kept allocated for reuse)");
+    return ESP_OK;
 }
 
 esp_err_t esp_video_if_deinit(void)
@@ -1003,14 +1034,27 @@ static esp_err_t restart_streaming_with_existing_buffers(v4l2_src_t *v4l2)
     return ESP_OK;
 }
 
-esp_err_t esp_video_if_start(void)
+/* Record the outcome of a STREAMON attempt: the caller is the first holder on success */
+static esp_err_t started(v4l2_src_t *v4l2, esp_err_t ret)
 {
-    if (!g_v4l2) {
-        ESP_LOGE(TAG, "Camera not initialized");
-        return ESP_FAIL;
-    }
+    v4l2->streaming = (ret == ESP_OK);
+    v4l2->users = v4l2->streaming ? 1 : 0;
+    return ret;
+}
 
-    v4l2_src_t *v4l2 = g_v4l2;
+static esp_err_t start_locked(v4l2_src_t *v4l2)
+{
+    /* Several consumers (stream, viewfinder, snapshot) bring the camera up
+     * independently. Restarting a running camera would queue buffers the
+     * driver already holds, which it rejects with EINVAL, so a later starter
+     * joins the running stream instead. It joins at the running format: a
+     * desired resolution set meanwhile is not applied until the camera has
+     * stopped, so read the format back with esp_video_if_get_resolution(). */
+    if (v4l2->streaming) {
+        v4l2->users++;
+        ESP_LOGD(TAG, "Camera already streaming; now held by %u consumer(s)", v4l2->users);
+        return ESP_OK;
+    }
 
     ESP_LOGD(TAG, "Starting video (buffers_allocated=%d, fd=%d, mode=%s)",
              v4l2->buffers_allocated, v4l2->cap_fd, USE_V4L2_USERPTR ? "USERPTR" : "MMAP");
@@ -1037,7 +1081,7 @@ esp_err_t esp_video_if_start(void)
 
     /* Fast path: buffers already allocated, just restart streaming */
     if (v4l2->buffers_allocated) {
-        return restart_streaming_with_existing_buffers(v4l2);
+        return started(v4l2, restart_streaming_with_existing_buffers(v4l2));
     }
 
     /* Slow path: First-time setup or after cleanup */
@@ -1091,7 +1135,20 @@ esp_err_t esp_video_if_start(void)
     }
 
     /* Apply flip controls and start streaming */
-    return start_streaming(v4l2);
+    return started(v4l2, start_streaming(v4l2));
+}
+
+esp_err_t esp_video_if_start(void)
+{
+    if (!g_v4l2) {
+        ESP_LOGE(TAG, "Camera not initialized");
+        return ESP_FAIL;
+    }
+
+    stream_lock();
+    esp_err_t ret = start_locked(g_v4l2);
+    stream_unlock();
+    return ret;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1535,6 +1592,10 @@ esp_err_t esp_video_if_init(void)
 #if CONFIG_ESP_VIDEO_IF_VERBOSE_DRIVER_LOGS
     enable_verbose_driver_logs();
 #endif
+
+    if (!s_stream_lock) {
+        s_stream_lock = xSemaphoreCreateMutexStatic(&s_stream_lock_storage);
+    }
 
     if (g_v4l2) {
         ESP_LOGD(TAG, "video interface already initialized, restarting streaming");

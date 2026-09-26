@@ -111,6 +111,29 @@ static volatile bool s_task_parked = true;
 /* Set by esp32p4_frame_grabber_stop(): did every sink give its frames back? Consulted by
  * deinit before it frees anything a sink callback could still be touching. */
 static bool s_drain_clean = true;
+
+/* True while the grabber holds one of esp_video_if's camera holds. init() takes it, and
+ * deinit() or a failed init() gives it back. A deinit that leaves the camera up keeps it,
+ * so the next init() does not stack a second hold that no deinit would give back. */
+static bool s_cam_held;
+
+static esp_err_t cam_hold(void)
+{
+    if (s_cam_held) {
+        return ESP_OK;
+    }
+    esp_err_t ret = esp_video_if_init();
+    s_cam_held = (ret == ESP_OK);
+    return ret;
+}
+
+static void cam_release(void)
+{
+    if (s_cam_held) {
+        esp_video_if_deinit();
+        s_cam_held = false;
+    }
+}
 #endif
 
 /* A UVC camera's YUY2 is repacked for the hardware encoder; the software encoder reads it as
@@ -1368,8 +1391,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
             }
         }
         // Reinitialize esp_video_if if it was deinitialized (for power/security reasons)
-        // esp_video_if_init() will check internally and return early if already initialized
-        esp_err_t ret = esp_video_if_init();
+        esp_err_t ret = cam_hold();
         if (ret != ESP_OK) {
             /* Must be reported, not just logged: the caller starts the pump next, and
                that task would immediately DQBUF a camera that is not there. */
@@ -1381,6 +1403,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
          * correct follows from that. No-op when the format is unchanged. */
         ret = register_raw_sink();
         if (ret != ESP_OK) {
+            cam_release();
             return ret;
         }
 #endif
@@ -1407,7 +1430,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
      * outright here kills the whole session for what is often a transient miss. */
     esp_err_t ret = ESP_FAIL;
     for (int attempt = 1; attempt <= CAMERA_INIT_MAX_ATTEMPTS; attempt++) {
-        ret = esp_video_if_init();
+        ret = cam_hold();
         if (ret == ESP_OK) {
             if (attempt > 1) {
                 ESP_LOGW(TAG, "video interface initialized on attempt %d", attempt);
@@ -1620,6 +1643,9 @@ cleanup:
         vSemaphoreDelete(s_p4_enc_data.run_semaphore);
         s_p4_enc_data.run_semaphore = NULL;
     }
+#if USE_ESP_VIDEO_IF
+    cam_release();
+#endif
     ESP_LOGE(TAG, "ESP32P4 frame grabber initialization failed");
     return ESP_FAIL;
 }
@@ -1778,7 +1804,7 @@ esp_err_t esp32p4_frame_grabber_deinit(void)
                       "rather than reclaiming buffers it may be reading");
         return ESP_ERR_INVALID_STATE;
     }
-    esp_video_if_deinit();
+    cam_release();
 #endif
     return ESP_OK;
 }
@@ -1875,7 +1901,6 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
         ESP_LOGE(TAG, "Snapshot intercept timed out");
         return ESP_ERR_TIMEOUT;
     }
-
     *len = s_snapshot.frame_len;
     *width = s_snapshot.width;
     *height = s_snapshot.height;
@@ -1883,9 +1908,35 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
     return ESP_OK;
 }
 
+/* Copy the next camera frame out. */
+static esp_err_t copy_one_raw_frame(uint8_t *buf, size_t buf_size, size_t *len,
+                                    uint16_t *width, uint16_t *height)
+{
+    video_fb_t *raw_frame = esp_video_if_get_frame();
+    if (!raw_frame) {
+        ESP_LOGE(TAG, "Failed to get raw frame for snapshot");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    size_t copy_len = (raw_frame->len <= buf_size) ? raw_frame->len : buf_size;
+    memcpy(buf, raw_frame->buf, copy_len);
+
+    video_resolution_t resolution = {0};
+    esp_video_if_get_resolution(&resolution);
+    *len = copy_len;
+    *width = resolution.width;
+    *height = resolution.height;
+
+    esp_video_if_release_frame(raw_frame);
+    return ESP_OK;
+}
+
 /**
  * Directly grab a raw frame from the camera when the capture pump is NOT running.
- * This is safe only when the pump is paused (not consuming frames).
+ *
+ * The camera is held for the duration of the grab and released afterwards. If a live
+ * stream starts meanwhile, esp_video_if's start/stop count keeps the camera on for it;
+ * this grab only gives back its own hold.
  *
  * @param buf[out]        Pre-allocated buffer for the raw frame
  * @param buf_size        Size of the buffer
@@ -1904,79 +1955,37 @@ esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
         return ESP_ERR_INVALID_ARG;
     }
 
-    bool need_init = false;
-    bool need_start = false;
-
-    /* If esp_video_if is not initialized, temporarily init it */
     if (!s_p4_enc_data.encoder_initialized) {
         /* Full initialization needed (chip, clock, video interface) */
         init_chip();
         init_clock();
-        esp_err_t ret = esp_video_if_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to init video interface for snapshot: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        need_init = true;
-        need_start = true;
-    } else {
-        /* Camera is initialized but encoder might be paused.
-         * esp_video_if might have been deinitialized (streaming stopped).
-         * Reinit to restart streaming if needed. */
-        esp_err_t ret = esp_video_if_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to reinit video interface for snapshot: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        need_start = true;
+    }
+
+    /* Brings the camera up, or joins a stream another consumer already started. */
+    esp_err_t ret = esp_video_if_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init video interface for snapshot: %s", esp_err_to_name(ret));
+        return ret;
     }
 
     /* Discard initial frames after STREAMON to let sensor/ISP settle
      * (exposure, white balance). Without this the first frame is often
      * noisy and produces an abnormally large JPEG. */
-    if (need_start) {
-        const int warmup_frames = 5;
-        for (int i = 0; i < warmup_frames; i++) {
-            video_fb_t *discard = esp_video_if_get_frame();
-            if (discard) {
-                esp_video_if_release_frame(discard);
-            }
+    const int warmup_frames = 5;
+    for (int i = 0; i < warmup_frames; i++) {
+        video_fb_t *discard = esp_video_if_get_frame();
+        if (discard) {
+            esp_video_if_release_frame(discard);
         }
-        ESP_LOGD(TAG, "Discarded %d warmup frames", warmup_frames);
     }
+    ESP_LOGD(TAG, "Discarded %d warmup frames", warmup_frames);
 
-    /* Get one raw frame */
-    video_fb_t *raw_frame = esp_video_if_get_frame();
-    if (!raw_frame) {
-        ESP_LOGE(TAG, "Failed to get raw frame for snapshot");
-        if (need_init) {
-            esp_video_if_deinit();
-        }
-        return ESP_ERR_NOT_FOUND;
-    }
+    ret = copy_one_raw_frame(buf, buf_size, len, width, height);
 
-    /* Copy frame data */
-    size_t copy_len = (raw_frame->len <= buf_size) ? raw_frame->len : buf_size;
-    memcpy(buf, raw_frame->buf, copy_len);
-
-    video_resolution_t resolution = {0};
-    esp_video_if_get_resolution(&resolution);
-
-    *len = copy_len;
-    *width = resolution.width;
-    *height = resolution.height;
-
-    /* Release the raw frame back to the driver */
-    esp_video_if_release_frame(raw_frame);
-
-    /* Stop streaming so the next snapshot can cleanly restart */
+    /* Give the camera back; it stops only when no other consumer holds it. */
     esp_video_if_stop();
 
-    if (need_init) {
-        esp_video_if_deinit();
-    }
-
-    return ESP_OK;
+    return ret;
 }
 #endif /* USE_ESP_VIDEO_IF */
 

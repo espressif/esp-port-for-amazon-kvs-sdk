@@ -44,23 +44,32 @@ typedef struct {
 } video_fb_t;
 
 /**
- * @brief Initialize the video interface
+ * @brief Initialize the video interface and start the camera
+ *
+ * Counts as one esp_video_if_start(): pair it with esp_video_if_stop() or
+ * esp_video_if_deinit(). On an initialized interface this is the same as
+ * esp_video_if_start().
  *
  * @return esp_err_t ESP_OK on success, otherwise an error code
  */
 esp_err_t esp_video_if_init(void);
 
 /**
- * @brief Stop the video interface
+ * @brief Release the camera
  *
- * @return esp_err_t ESP_OK on success, otherwise an error code
+ * The camera stops streaming once every consumer that started it has stopped
+ * it; until then the call only drops this consumer's hold. Safe to call from
+ * any task.
+ *
+ * @return esp_err_t ESP_OK on success, ESP_FAIL when the interface is not initialized
  */
 esp_err_t esp_video_if_stop(void);
 
 /**
  * @brief Deinitialize the video interface while retaining mmap buffers
  *
- * This function stops streaming but keeps the mmap buffers and fd open so the next
+ * Releases the camera like esp_video_if_stop() (it stops streaming once no other
+ * consumer holds it) but keeps the mmap buffers and fd open so the next
  * init/start cycle can reuse them without reallocation. The camera hardware may
  * remain powered because the fd stays open.
  *
@@ -72,7 +81,11 @@ esp_err_t esp_video_if_stop(void);
 esp_err_t esp_video_if_deinit(void);
 
 /**
- * @brief Start the video interface
+ * @brief Start the camera, or join a stream another consumer already started
+ *
+ * Each successful call must be balanced by esp_video_if_stop(). A joining
+ * consumer gets the running format, not a resolution it set meanwhile; read
+ * it back with esp_video_if_get_resolution(). Safe to call from any task.
  *
  * @return esp_err_t ESP_OK on success, otherwise an error code
  */
