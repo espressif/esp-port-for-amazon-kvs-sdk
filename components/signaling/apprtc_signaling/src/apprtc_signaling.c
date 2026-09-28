@@ -492,12 +492,12 @@ static void ws_event_work_handler(void *priv_data)
     switch (work_item->event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "WEBSOCKET_EVENT_CONNECTED");
-            update_state(APPRTC_SIGNALING_STATE_CONNECTED);
-            // Register with room after connection
+            // Register before CONNECTED, as the collider drops a send from an unregistered client
             if (register_with_room(apprtc_client.room_id) != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to register with room");
                 update_state(APPRTC_SIGNALING_STATE_ERROR);
             } else {
+                update_state(APPRTC_SIGNALING_STATE_CONNECTED);
                 apprtc_client.reconnect_attempts = 0;
                 send_initial_messages();
 
