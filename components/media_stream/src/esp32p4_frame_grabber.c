@@ -511,7 +511,8 @@ typedef struct {
     SemaphoreHandle_t done;             /* Signaled when raw frame is copied */
     uint8_t *buffer;                    /* Destination buffer (caller-allocated) */
     size_t buffer_size;                 /* Allocated buffer size */
-    size_t frame_len;                   /* Actual copied frame length */
+    size_t frame_len;                   /* Length of the offered frame, copied or not */
+    bool copied;                        /* The frame fit the buffer and was copied */
     uint16_t width;                     /* Frame width */
     uint16_t height;                    /* Frame height */
 } snapshot_intercept_t;
@@ -982,10 +983,13 @@ static void snapshot_sink_on_frame(const video_raw_frame_t *frame, void *user)
         return;
     }
 
-    const size_t copy_len = (frame->len <= s_snapshot.buffer_size)
-                            ? frame->len : s_snapshot.buffer_size;
-    memcpy(s_snapshot.buffer, frame->buffer, copy_len);
-    s_snapshot.frame_len = copy_len;
+    /* Never truncate: the JPEG encoder sizes its read from width x height, so a
+     * partial frame would have it read past the buffer. The request fails instead. */
+    s_snapshot.copied = (frame->len <= s_snapshot.buffer_size);
+    if (s_snapshot.copied) {
+        memcpy(s_snapshot.buffer, frame->buffer, frame->len);
+    }
+    s_snapshot.frame_len = frame->len;
     s_snapshot.width     = frame->width;
     s_snapshot.height    = frame->height;
     s_snapshot.requested = false;
@@ -1876,6 +1880,7 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
     s_snapshot.buffer = buf;
     s_snapshot.buffer_size = buf_size;
     s_snapshot.frame_len = 0;
+    s_snapshot.copied = false;
     s_snapshot.width = 0;
     s_snapshot.height = 0;
 
@@ -1901,6 +1906,12 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
         ESP_LOGE(TAG, "Snapshot intercept timed out");
         return ESP_ERR_TIMEOUT;
     }
+    if (!s_snapshot.copied) {
+        ESP_LOGE(TAG, "Snapshot: a %zu byte frame does not fit the %zu byte buffer",
+                 s_snapshot.frame_len, buf_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     *len = s_snapshot.frame_len;
     *width = s_snapshot.width;
     *height = s_snapshot.height;
@@ -1908,7 +1919,8 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
     return ESP_OK;
 }
 
-/* Copy the next camera frame out. */
+/* Copy the next camera frame out whole. A frame larger than the buffer fails the
+ * grab rather than being cut short: the JPEG encoder reads width x height from it. */
 static esp_err_t copy_one_raw_frame(uint8_t *buf, size_t buf_size, size_t *len,
                                     uint16_t *width, uint16_t *height)
 {
@@ -1918,17 +1930,22 @@ static esp_err_t copy_one_raw_frame(uint8_t *buf, size_t buf_size, size_t *len,
         return ESP_ERR_NOT_FOUND;
     }
 
-    size_t copy_len = (raw_frame->len <= buf_size) ? raw_frame->len : buf_size;
-    memcpy(buf, raw_frame->buf, copy_len);
-
-    video_resolution_t resolution = {0};
-    esp_video_if_get_resolution(&resolution);
-    *len = copy_len;
-    *width = resolution.width;
-    *height = resolution.height;
+    esp_err_t ret = ESP_OK;
+    if (raw_frame->len > buf_size) {
+        ESP_LOGE(TAG, "Snapshot: a %zu byte frame does not fit the %zu byte buffer",
+                 raw_frame->len, buf_size);
+        ret = ESP_ERR_INVALID_SIZE;
+    } else {
+        memcpy(buf, raw_frame->buf, raw_frame->len);
+        video_resolution_t resolution = {0};
+        esp_video_if_get_resolution(&resolution);
+        *len = raw_frame->len;
+        *width = resolution.width;
+        *height = resolution.height;
+    }
 
     esp_video_if_release_frame(raw_frame);
-    return ESP_OK;
+    return ret;
 }
 
 /**
@@ -1944,7 +1961,7 @@ static esp_err_t copy_one_raw_frame(uint8_t *buf, size_t buf_size, size_t *len,
  * @param width[out]      Frame width
  * @param height[out]     Frame height
  * @param timeout_ms      Maximum wait time
- * @return ESP_OK on success
+ * @return ESP_OK on success, ESP_ERR_INVALID_SIZE when the frame is larger than the buffer
  */
 esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
                                        size_t *len, uint16_t *width,

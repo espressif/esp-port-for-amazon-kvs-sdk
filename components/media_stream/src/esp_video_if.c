@@ -1660,6 +1660,20 @@ esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution)
     return ESP_OK;
 }
 
+esp_err_t esp_video_if_get_frame_size(size_t *size)
+{
+    if (!size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!g_v4l2 || !g_v4l2->streaming || g_v4l2->buffer_size[0] == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    *size = g_v4l2->buffer_size[0];
+    return ESP_OK;
+}
+
 esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat)
 {
     if (!pixelformat) {

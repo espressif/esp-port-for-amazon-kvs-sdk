@@ -623,6 +623,23 @@ cleanup:
     return ret;
 }
 
+/* Largest raw frame the capture layer delivers: 1920x1080 in a packed 4:2:2 format
+ * (YUYV / UYVY, 2 bytes per pixel). A YUV420 frame of the same size is smaller. */
+#define SNAPSHOT_MAX_RAW_FRAME_SIZE (1920 * 1080 * 2)
+
+/* A streaming camera says exactly how big its frames are, whoever started it, and a
+ * snapshot joins it at that format. Only a camera that is off has to be allowed for the
+ * largest frame. Should the camera restart at another size in between, the grab fails
+ * with ESP_ERR_INVALID_SIZE rather than overrun the buffer. */
+static size_t snapshot_raw_buffer_size(void)
+{
+    size_t frame_size = 0;
+    if (esp_video_if_get_frame_size(&frame_size) == ESP_OK) {
+        return frame_size;
+    }
+    return SNAPSHOT_MAX_RAW_FRAME_SIZE;
+}
+
 esp_err_t video_capture_get_snapshot_scaled(uint8_t **jpeg_buf, size_t *jpeg_len,
                                             uint8_t quality, uint16_t out_width,
                                             uint16_t out_height, uint32_t timeout_ms)
@@ -642,16 +659,15 @@ esp_err_t video_capture_get_snapshot_scaled(uint8_t **jpeg_buf, size_t *jpeg_len
     uint16_t width = 0, height = 0;
     size_t raw_len = 0;
 
-    /* Allocate a raw frame buffer large enough for the maximum expected resolution.
-     * YUV420 = 1.5 bytes/pixel. For 1920x1080 that's ~3.1 MB. */
-    size_t raw_buf_size = 1920 * 1080 * 3 / 2;  /* Max expected YUV420 frame size */
+    const bool encoder_running = h264_encoder_is_running();
+    const size_t raw_buf_size = snapshot_raw_buffer_size();
     uint8_t *raw_buf = heap_caps_aligned_calloc(64, 1, raw_buf_size, MALLOC_CAP_SPIRAM);
     if (!raw_buf) {
-        ESP_LOGE(TAG, "Failed to allocate raw frame buffer for snapshot");
+        ESP_LOGE(TAG, "Failed to allocate a %zu byte raw frame buffer for snapshot", raw_buf_size);
         return ESP_ERR_NO_MEM;
     }
 
-    if (h264_encoder_is_running()) {
+    if (encoder_running) {
         /* Path 1: Encoder is running - intercept a frame from the pipeline */
         ESP_LOGI(TAG, "Snapshot: intercepting frame from active encoder pipeline");
         ret = esp32p4_snapshot_intercept_frame(raw_buf, raw_buf_size,

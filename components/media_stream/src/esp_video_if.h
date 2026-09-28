@@ -128,6 +128,17 @@ esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution);
 esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat);
 
 /**
+ * @brief Get the size of one capture buffer, i.e. the largest frame the camera can deliver
+ *
+ * @param size Pointer to store the size in bytes
+ * @return esp_err_t
+ *  - ESP_OK: Successfully retrieved the size
+ *  - ESP_ERR_INVALID_ARG: size pointer is NULL
+ *  - ESP_ERR_INVALID_STATE: Capture is not streaming
+ */
+esp_err_t esp_video_if_get_frame_size(size_t *size);
+
+/**
  * @brief Get the resolution capture will first ask the camera for
  *
  * Usable before capture starts. The camera may still settle on a fallback, so prefer
