@@ -42,3 +42,9 @@ CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
 # board name: they decide the capture path and the players.
 CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
 CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n
+
+# Match the C5's Wi-Fi init config. On a deep-sleep wake esp_wifi_init() goes to
+# the co-processor, which re-initialises Wi-Fi -- dropping the association and the
+# KVS session -- whenever the host's config differs from its own.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n
