@@ -245,30 +245,43 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL));
 
-    ESP_ERROR_CHECK(esp_wifi_start());
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    /* On a deep-sleep wake the co-processor kept the association and network
+     * split has restored the address. Restarting the station would drop it. */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        ESP_ERROR_CHECK(esp_wifi_start());
+        vTaskDelay(pdMS_TO_TICKS(1000));
 
-    /* Under network split the credentials live on the co-processor, and nothing
-     * here ever set them: it answered ESP_ERR_WIFI_SSID and the host retried for
-     * a minute before giving up. Provisioned credentials still win; the Kconfig
-     * pair only fills in when the driver holds none. */
-    {
-        wifi_config_t sta = {0};
-        /* Provisioning wins: `wifi-set` stores credentials the co-processor
-         * keeps in its own NVS, and those must survive a reflash. The Kconfig
-         * pair is only a fallback for a board that has never been provisioned. */
-        if (esp_wifi_get_config(WIFI_IF_STA, &sta) == ESP_OK &&
-            sta.sta.ssid[0] == '\0' && CONFIG_ESP_WIFI_SSID[0] != '\0') {
-            strlcpy((char *)sta.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(sta.sta.ssid));
-            strlcpy((char *)sta.sta.password, CONFIG_ESP_WIFI_PASSWORD,
-                    sizeof(sta.sta.password));
-            ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-            ESP_LOGI(TAG, "not provisioned; using Kconfig SSID '%s'",
-                     CONFIG_ESP_WIFI_SSID);
+        /* Under network split the credentials live on the co-processor, and nothing
+         * here ever set them: it answered ESP_ERR_WIFI_SSID and the host retried for
+         * a minute before giving up. Provisioned credentials still win; the Kconfig
+         * pair only fills in when the driver holds none. */
+        {
+            wifi_config_t sta = {0};
+            /* Provisioning wins: `wifi-set` stores credentials the co-processor
+             * keeps in its own NVS, and those must survive a reflash. The Kconfig
+             * pair is only a fallback for a board that has never been provisioned. */
+            if (esp_wifi_get_config(WIFI_IF_STA, &sta) == ESP_OK &&
+                sta.sta.ssid[0] == '\0' && CONFIG_ESP_WIFI_SSID[0] != '\0') {
+                strlcpy((char *)sta.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(sta.sta.ssid));
+                strlcpy((char *)sta.sta.password, CONFIG_ESP_WIFI_PASSWORD,
+                        sizeof(sta.sta.password));
+                ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
+                ESP_LOGI(TAG, "not provisioned; using Kconfig SSID '%s'",
+                         CONFIG_ESP_WIFI_SSID);
+            }
         }
+
+        esp_wifi_connect();
     }
 
-    esp_wifi_connect();
+    /* The address can predate the handler (always, on a wake), so its event is
+     * gone; take it from the netif instead of waiting on one that never comes. */
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(sta_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+        ESP_LOGI(TAG, "got ip:" IPSTR " (already up)", IP2STR(&ip_info.ip));
+        xEventGroupSetBits(s_wifi_event_group, GOT_IP_BIT);
+    }
+
     // ESP_ERROR_CHECK(esp_hosted_wait_for_slave());
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
