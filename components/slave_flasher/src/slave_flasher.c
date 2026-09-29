@@ -7,6 +7,7 @@
 #include "esp_loader.h"
 #include "esp32_port.h"
 #include "slave_flasher.h"
+#include "driver/uart.h"
 #include "loader_utils.h"
 
 #if CONFIG_SLAVE_FLASHER_IMAGE_SPIFFS
@@ -432,6 +433,33 @@ static void register_slave_commands(void)
 
     ESP_ERROR_CHECK(esp_console_cmd_register(&write_slave_cmd));
     ESP_LOGI(TAG, "Registered CLI command: write_slave");
+}
+
+/* Deep-sleep wake: the co-processor kept running, so do not touch its reset or
+ * GPIO0 lines -- just reattach its console and the write_slave command. */
+esp_err_t slave_flasher_attach_console(void)
+{
+#if CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
+    const uart_config_t cfg = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    esp_err_t err = uart_driver_install(UART_NUM_1, BUF_LEN * 2, 0, 0, NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "console attach: uart install failed (%s)", esp_err_to_name(err));
+        return err;
+    }
+    uart_param_config(UART_NUM_1, &cfg);
+    uart_set_pin(UART_NUM_1, CONFIG_SLAVE_UART_TX_PIN, CONFIG_SLAVE_UART_RX_PIN,
+                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    xTaskCreate(slave_monitor, "slave_monitor", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
+#endif
+    register_slave_commands();
+    return ESP_OK;
 }
 
 esp_err_t flash_slave()

@@ -565,6 +565,7 @@ void app_main(void)
      * away, so skip it: nothing can have changed while we were asleep. */
     if (reset_reason == ESP_RST_DEEPSLEEP) {
         ESP_LOGI(TAG, "deep-sleep wake: leaving the co-processor untouched");
+        slave_flasher_attach_console();
     } else {
         s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
 

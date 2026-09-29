@@ -18,3 +18,6 @@
 #include "driver/gpio.h"
 
 esp_err_t flash_slave(void);
+
+/* Reattach the co-processor console after a deep-sleep wake, without resetting it. */
+esp_err_t slave_flasher_attach_console(void);
