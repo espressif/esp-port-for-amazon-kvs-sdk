@@ -57,10 +57,12 @@ dependencies:
     rules:
       - if: "target not in [esp32c5, esp32c6, linux]"
 
+  # P4: the JPEG snapshot path. S3: VIDEO_RAW_MODE_CONVERTED sinks, which have no PPA
+  # there (video_frame_convert_imgfx.c).
   espressif/esp_image_effects:
     version: "^1.0.1"
     rules:
-      - if: "target in [esp32p4]"
+      - if: "target in [esp32p4, esp32s3]"
 
   # LVGL is required when the video player receive path is enabled;
   # the render backend targets an LVGL canvas on the BSP's display.

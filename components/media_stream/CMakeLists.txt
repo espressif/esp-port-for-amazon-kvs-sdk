@@ -33,6 +33,7 @@ else()
         "src/video_sink.c"
         "src/video_raw_bus.c"
         "src/video_frame_convert.c"
+        "src/video_frame_convert_imgfx.c"
         "src/video_capture_adapter.c"
         "src/audio_capture_adapter.c"
         "src/audio_player_adapter.c"
