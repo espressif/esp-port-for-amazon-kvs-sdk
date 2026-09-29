@@ -34,13 +34,13 @@
 #include "kvs_peer_connection.h"
 #include "esp_hosted.h"
 #include "power_save_handler.h"
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
+#if CONFIG_SLAVE_FLASHER_ENABLE || CONFIG_SLAVE_CONSOLE_ENABLE
 #include "slave_flasher.h"
 #endif
 /* Recovery is universal (called unconditionally in app_main), not gated on the
  * in-system slave flasher — EV builds the C6 as a separate bin (flasher off). */
 #include "hosted_recovery.h"
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
+#if CONFIG_SLAVE_CONSOLE_ENABLE
 static vprintf_like_t s_original_vprintf = NULL;
 
 static int custom_vprintf(const char* fmt, va_list args)
@@ -558,23 +558,26 @@ void app_main(void)
     ESP_LOGI(TAG, "reset reason: %d%s", (int)reset_reason,
              reset_reason == ESP_RST_DEEPSLEEP ? " (deep-sleep wake)" : "");
 
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
+#if CONFIG_SLAVE_CONSOLE_ENABLE
+    /* [HOST] tells the host's own lines from the forwarded [SLAVE] ones. */
+    s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
+#endif
+#if CONFIG_SLAVE_FLASHER_ENABLE
     /* A deep-sleep wake re-runs app_main, but the co-processor kept running and
      * still holds the Wi-Fi association and the signaling session. flash_slave()
-     * drives its reset pin to read back image hashes, which would throw both
-     * away, so skip it: nothing can have changed while we were asleep. */
+     * drives its reset pin, which would throw both away, so skip it on a wake. */
     if (reset_reason == ESP_RST_DEEPSLEEP) {
         ESP_LOGI(TAG, "deep-sleep wake: leaving the co-processor untouched");
-        slave_flasher_attach_console();
     } else {
-        s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
-
         ret = flash_slave();
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to flash slave: %s", esp_err_to_name(ret));
             return;
         }
     }
+#endif
+#if CONFIG_SLAVE_CONSOLE_ENABLE
+    slave_console_attach();     /* no-op if flash_slave() already attached it */
 #endif
 
     ESP_LOGI(TAG, "ESP32 WebRTC Streaming Example");

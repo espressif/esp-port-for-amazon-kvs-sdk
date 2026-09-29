@@ -141,7 +141,7 @@ test instead; the single-port path is the more constrained one, so it is what th
 ### Co-processor console: `--cp-port`
 
 Where the C6's log comes from is read from the P4 build's config. With
-`CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR=y` (the default) the P4 re-prints it behind
+`CONFIG_SLAVE_CONSOLE_ENABLE=y` (the default with the flasher on) the P4 re-prints it behind
 `[SLAVE]` and the test reads the P4's port only. A P4 built without it does not forward
 the C6 log, so pass the C6's own UART:
 

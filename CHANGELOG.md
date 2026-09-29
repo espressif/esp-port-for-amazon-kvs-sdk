@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the in-tree 2.x.
 - **Split mode on esp_hosted 3.x:** `signaling_only` and `streaming_only` use esp_hosted
   3.x and its network split.
+- **Co-processor console without the flasher:** `CONFIG_SLAVE_CONSOLE_ENABLE` forwards the
+  co-processor log and registers `write_slave` on its own. It replaces
+  `CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR`, and `sdkconfig.rename` maps the old name.
+  `write_slave` now needs `CONFIG_SLAVE_CONSOLE_ENABLE=y`. A project that set
+  `CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR=n` loses it. After flashing, the host
+  releases the co-processor UART, so without the console there is no line to send on.
 - `KVS_SDK_PATH` pointing at a directory that does not exist (or one with no
   `components/kvs_webrtc`) is now a configure-time `FATAL_ERROR` instead of a warning
   that scrolled past while every `kvs_*` component silently resolved elsewhere.

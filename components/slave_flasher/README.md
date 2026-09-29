@@ -51,7 +51,7 @@ C6 — and stage them per the `target-firmware/README.md` in the example.
 | `CONFIG_SLAVE_FLASHER_IMAGE_DIR`          | `target-firmware` | Image directory for both sources |
 | `CONFIG_SLAVE_UART_RX_PIN` / `_TX_PIN`    | 22 / 21 | Host UART pins to the target |
 | `CONFIG_SLAVE_GPIO0_TRIGGER_PIN`          | 20    | Drives the target BOOT pin into download mode |
-| `CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR` | `n`   | Pipe the target's UART output to the host log after flashing (debug only) |
+| `CONFIG_SLAVE_CONSOLE_ENABLE`             | `y` if the flasher is on | Forward the target's UART output to the host log behind `[SLAVE]`, and register `write_slave` |
 
 ### Per-board pins
 

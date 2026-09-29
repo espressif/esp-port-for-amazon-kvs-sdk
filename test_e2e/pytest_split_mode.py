@@ -12,7 +12,7 @@ kit like P4-EYE there is no separate C6 console, so:
 
   - the C6's log arrives on the P4's console, re-printed with a `[SLAVE]` prefix by
     the slave_flasher monitor task (`slave_flasher.c:116`, continuous task started
-    at `:414`, gated on CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR)
+    at `:414`, gated on CONFIG_SLAVE_CONSOLE_ENABLE)
   - the C6's console is written through the P4's `write_slave <data>` command
     (`slave_flasher.c:321`)
 
@@ -49,8 +49,9 @@ SLAVE_BOOT_TIMEOUT = 180
 
 
 # Whether the P4 tags its own lines with [HOST]. Only the custom_vprintf that
-# streaming_only installs under CONFIG_SLAVE_FLASHER_ENABLE adds the tag, because
-# only then does the C6's log share the P4's console. Set per test from the build.
+# streaming_only installs under CONFIG_SLAVE_CONSOLE_ENABLE adds the tag, because
+# only then does the C6's log share the P4's console (builds from before that
+# option gate it on SLAVE_FLASHER_ENABLE). Set per test from the build.
 _HOST_TAGGED = True
 
 
@@ -58,7 +59,7 @@ _HOST_TAGGED = True
 def _host_tag(request):
     global _HOST_TAGGED
     _, cfg = _built_config(request)
-    _HOST_TAGGED = bool(cfg.get('SLAVE_FLASHER_ENABLE', False))
+    _HOST_TAGGED = bool(cfg.get('SLAVE_CONSOLE_ENABLE', cfg.get('SLAVE_FLASHER_ENABLE', False)))
     yield
 
 

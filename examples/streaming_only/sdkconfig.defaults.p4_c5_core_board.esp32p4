@@ -34,6 +34,13 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
 # do, for the reason given below.
 CONFIG_SLAVE_FLASHER_ENABLE=n
 
+# The console is separate from flashing: keep the C5's log ([SLAVE]) and
+# write_slave on the host. Only RX is held; TX is driven per write, so the C5's
+# own USB-UART bridge can share these lines.
+CONFIG_SLAVE_CONSOLE_ENABLE=y
+CONFIG_SLAVE_UART_RX_PIN=45
+CONFIG_SLAVE_UART_TX_PIN=46
+
 #
 # Select Hosted Board
 #
