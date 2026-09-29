@@ -517,7 +517,11 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
                 ESP_LOGD(TAG, "Received WebSocket data: %.*s", data->data_len, data->data_ptr);
 
                 // Process the message now using our buffer append function
-                STATUS bufferStatus = appendToWebSocketBuffer(data->data_ptr, data->data_len, data->fin);
+                /* fin is the frame's FIN bit and is set on every chunk of a frame larger than
+                 * the RX buffer; only the chunk that reaches payload_len ends the message. */
+                BOOL lastChunk = data->fin &&
+                                 (data->payload_offset + data->data_len >= data->payload_len);
+                STATUS bufferStatus = appendToWebSocketBuffer(data->data_ptr, data->data_len, lastChunk);
 
                 // If buffer is complete, process it using work queue
                 if (bufferStatus == STATUS_DATA_BUFFER_COMPLETE) {
