@@ -899,7 +899,8 @@ menu "Media Stream Configuration"
                     default 10000000 if IDF_TARGET_ESP32S3
                     default 20000000
                     help
-                        Master clock frequency for DVP camera sensor.
+                        Master clock frequency for DVP camera sensor. Used only without a
+                        BSP (BSP_SELECT_NONE); a BSP drives XCLK itself.
 
                         Common values:
                         - 20000000 Hz (20MHz): Standard for most DVP sensors

@@ -881,7 +881,11 @@ static bool capture_fourcc(uint32_t pixfmt, uint32_t *out)
     case V4L2_PIX_FMT_RGB24:  *out = VIDEO_FOURCC_RGB24;  return true;
     /* See the static asserts at the top: V4L2 has no separate code for the ISP's layout, so
      * this is the one place the relabel happens. */
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR
+    /* The ISP's semi-packed layout travels under the plain YUV420 label. Only behind an
+     * ISP; a DVP sensor claiming YUV420 is refused rather than misread. */
     case V4L2_PIX_FMT_YUV420: *out = VIDEO_FOURCC_O_UYY_E_VYY; return true;
+#endif
     default:                                              return false;
     }
 }
