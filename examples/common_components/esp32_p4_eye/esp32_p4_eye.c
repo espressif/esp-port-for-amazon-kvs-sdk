@@ -665,11 +665,12 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
          * spi_master allocates an internal DMA buffer the size of the flushed area (up to
          * 240*240*2) and memcpy's into it on every flush.
          *
-         * The flag arrived partway through the 5.5 line, not at 6.0: absent in 5.4.4 and
-         * 5.5.4, present in 5.5.5, 6.0.2 and master. Testing MAJOR >= 6 compiles everywhere
-         * but silently drops the saving on 5.5.5 - the IDF in CI and in users' hands.
+         * The flag arrived partway through both the 5.5 and the 6.0 line: absent in 5.4.4,
+         * 5.5.4, 6.0 and 6.0.1, present in 5.5.5, 6.0.2 and master. Testing >= 5.5.5 alone
+         * breaks the build on 6.0 and 6.0.1; testing MAJOR >= 6 drops the saving on 5.5.5.
          */
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 5)
+#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 5) && ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)) || \
+    ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 2)
         .flags = {
             .psram_dma_direct = 1,
         },
