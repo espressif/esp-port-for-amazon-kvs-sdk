@@ -107,6 +107,15 @@ static esp_err_t sdcard_init(void)
 #endif  // CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_4
 #endif  // CONFIG_IDF_TARGET_ESP32S3
 
+#if (CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4) && defined(CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_4)
+    /* 4-bit with D1-D3 unset (the S3 defaults leave them at -1) would fail the slot
+     * init, so the card would never mount. Fall back to 1-bit. */
+    if (slot_config.d1 < 0 || slot_config.d2 < 0 || slot_config.d3 < 0) {
+        ESP_LOGW(TAG, "4-bit SD bus chosen but D1-D3 are not all set; using 1-bit");
+        slot_config.width = 1;
+    }
+#endif
+
     // Enable internal pullups on enabled pins. The internal pullups
     // are insufficient however, please make sure 10k external pullups are
     // connected on the bus. This is for debug / example purpose only.
