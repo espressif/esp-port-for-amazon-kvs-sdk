@@ -102,6 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deferred cached ICE server apply to the work queue — avoids 22 s+ stall on
   offer processing.
 - Moved KVS threads to SPIRAM, fixed thread-naming collision with lwIP.
+- SCTP init stalling 1 s on every boot. usrsctp handed its lwIP calls to the
+  tcpip thread even when already on it, then waited for itself (esp_usrsctp bump).
 
 ### CI and testing
 
