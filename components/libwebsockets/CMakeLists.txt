@@ -152,12 +152,12 @@ else()
     target_link_libraries(websockets PRIVATE idf::mbedtls)
 endif()
 
-# add_subdirectory bypasses lws's own mbedtls-version detection; set
+# add_subdirectory bypasses the mbedtls-version probe of older lws; set
 # LWS_HAVE_MBEDTLS_V4 so libwebsockets.h uses the v4 include paths (lws sources +
-# public consumers of the header). On linux we pin LWS_MBEDTLS_INCLUDE_DIRS, so
-# lws's own v4 probe runs and sets LWS_HAVE_MBEDTLS_V4 in lws_config.h — setting
-# it manually too would redefine it.
-if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
+# public consumers of the header). Not where lws defines it itself, since a second
+# definition is a -Werror redefinition: newer lws probes it into lws_config.h, and
+# on linux we pin LWS_MBEDTLS_INCLUDE_DIRS, so lws's own v4 probe runs there too.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux" AND NOT LWS_HAVE_MBEDTLS_V4)
     target_compile_definitions(websockets PUBLIC LWS_HAVE_MBEDTLS_V4=1)
     target_compile_definitions(${COMPONENT_LIB} INTERFACE LWS_HAVE_MBEDTLS_V4=1)
 endif()
@@ -176,3 +176,4 @@ endif()
 # Supply our own dependency-free UTC timegm() (picolibc's symbol isn't linkable here)
 # so lws's date.c resolves it under LWS_HAVE_TIMEGM.
 target_sources(websockets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lws_timegm.c)
+target_sources(websockets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lws_fd_cloexec.c)

@@ -21,7 +21,8 @@ static int is_leap(int y)
     return ((y % 4 == 0) && (y % 100 != 0)) || (y % 400 == 0);
 }
 
-time_t timegm(struct tm *tm)
+/* weak: newer lws calls mktime(), which links picolibc's object that also defines timegm */
+__attribute__((weak)) time_t timegm(struct tm *tm)
 {
     static const int mdays_cum[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
 
