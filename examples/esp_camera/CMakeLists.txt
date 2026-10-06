@@ -10,11 +10,23 @@ option(ENABLE_STREAMING_ONLY "enable only the streaming" ON)
 option(ENABLE_DATA_CHANNEL "enable data channel support" ON)
 option(ENABLE_SIGNALLING_ONLY "enable only the streaming" OFF)
 
+if(IDF_TARGET STREQUAL "linux")
+    # Host build: only main's dependency closure, so IDF's linux target does not
+    # pull peripheral esp_driver_* components that self-exclude on linux.
+    set(COMPONENTS main)
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 idf_build_set_property(__BUILD_COMPONENT_DEPGRAPH_ENABLED 1)
 
 project(esp_camera)
+
+if(IDF_TARGET STREQUAL "linux" AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # IDF's linux toolchain config injects a GCC-only warning option that Apple
+    # Clang rejects under -Werror (same as linux_test).
+    idf_build_set_property(COMPILE_OPTIONS "-Wno-unknown-warning-option" APPEND)
+endif()
 
 # When SLAVE_FLASHER_ENABLE is on (P4-EYE with on-board C6), the P4 host writes
 # the C6 image — read from the `slave` SPIFFS partition — to the co-processor on
@@ -41,5 +53,20 @@ if(CONFIG_SLAVE_FLASHER_ENABLE)
             "(see target-firmware/README.md).")
     else()
         spiffs_create_partition_image(slave ${_slave_fw_dir} FLASH_IN_PROJECT)
+    endif()
+endif()
+
+# esp_websocket_client (1.8.0 and earlier) stores portMAX_DELAY in an `int`
+# (`const int lock_timeout = portMAX_DELAY;`). On the Linux target TickType_t is
+# unsigned long, so the value overflows int and IDF 6 builds that as an error.
+# The stored -1 converts back to ULONG_MAX (= portMAX_DELAY) when passed to the
+# semaphore calls, so behaviour is unchanged; relax only this warning, only for
+# that component, only on the host, until the upstream fix is released.
+if(IDF_TARGET STREQUAL "linux")
+    # idf_component_get_property() is fatal for a component that is not in the build
+    idf_build_get_property(_build_components BUILD_COMPONENTS)
+    if("espressif__esp_websocket_client" IN_LIST _build_components)
+        idf_component_get_property(_ws_lib espressif__esp_websocket_client COMPONENT_LIB)
+        target_compile_options(${_ws_lib} PRIVATE -Wno-error=overflow)
     endif()
 endif()

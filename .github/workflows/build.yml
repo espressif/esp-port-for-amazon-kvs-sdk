@@ -147,6 +147,31 @@ jobs:
           idf.py build
           pytest --embedded-services idf --target linux -k test_all -s
 
+  build_linux_examples:
+    name: "Examples | Linux host"
+    runs-on: ubuntu-22.04
+    container: espressif/idf:release-v5.5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # No manual `git am`: rely on the SDK's auto-apply (CONFIG_KVS_AUTO_APPLY_PATCHES).
+      - name: Allow git to operate on the CI checkout
+        shell: bash
+        run: git config --global --add safe.directory "*"
+
+      - name: Build linux_test and esp_camera for the Linux target
+        shell: bash
+        run: |
+          . ${IDF_PATH}/export.sh
+          cd examples/linux_test
+          idf.py --preview set-target linux
+          idf.py build
+          cd ../esp_camera
+          idf.py --preview -D SDKCONFIG_DEFAULTS=sdkconfig.defaults.linux set-target linux
+          idf.py build
+
   build_docs:
     name: "Build Documentation"
     runs-on: ubuntu-22.04

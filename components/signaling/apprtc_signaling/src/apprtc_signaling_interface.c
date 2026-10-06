@@ -11,6 +11,11 @@
 #include "signaling_conversion.h"
 #include "apprtc_signaling.h"
 #include "apprtc_signaling_internal.h"
+#include "sdkconfig.h"
+#if CONFIG_IDF_TARGET_LINUX
+#include <stdlib.h>
+#include "esp_work_queue.h"
+#endif
 
 static const char *TAG = "apprtc_signaling_if";
 
@@ -158,6 +163,66 @@ static WEBRTC_STATUS apprtcDisconnect(void *pSignalingClient)
     return WEBRTC_STATUS_SUCCESS;
 }
 
+#if CONFIG_IDF_TARGET_LINUX
+/* The SDK sends trickled ICE candidates from its own timer thread, a plain pthread on
+ * the host, and esp_websocket_client takes FreeRTOS mutexes, which must not happen
+ * there. So on the host every outgoing message is copied and sent from the work
+ * queue task (a single FIFO worker, so the order is kept). The send result is
+ * therefore asynchronous on the host: apprtcSendMessage() reports the hand-off, and
+ * a failed send is only logged. */
+typedef struct {
+    webrtc_message_t msg;
+    char room_id[64];       /* the room the message was sent for; empty if none yet */
+} deferred_send_t;
+
+static void send_deferred(void *arg)
+{
+    deferred_send_t *d = (deferred_send_t *) arg;
+    const char *room = apprtc_signaling_get_room_id();
+    if (d->room_id[0] != '\0' && (room == NULL || strcmp(room, d->room_id) != 0)) {
+        /* Sent for a room the device has left (join-room ran first on the work
+         * queue): the new room's peer must not get the old session's messages */
+        ESP_LOGI(TAG, "Dropping a message for room %s, which was left", d->room_id);
+    } else {
+        int result = apprtc_signaling_send_webrtc_message(&d->msg);
+        if (result != 0 && result != 1) {
+            ESP_LOGE(TAG, "Failed to send message via AppRTC signaling interface, result: %d", result);
+        }
+    }
+    free(d->msg.payload);
+    free(d);
+}
+
+static WEBRTC_STATUS send_on_work_queue(const webrtc_message_t *pMessage)
+{
+    deferred_send_t *d = calloc(1, sizeof(*d));
+    if (d == NULL) {
+        return WEBRTC_STATUS_NOT_ENOUGH_MEMORY;
+    }
+    d->msg = *pMessage;
+    d->msg.payload = NULL;
+    if (pMessage->payload != NULL) {
+        d->msg.payload = malloc(pMessage->payload_len + 1);
+        if (d->msg.payload == NULL) {
+            free(d);
+            return WEBRTC_STATUS_NOT_ENOUGH_MEMORY;
+        }
+        memcpy(d->msg.payload, pMessage->payload, pMessage->payload_len);
+        d->msg.payload[pMessage->payload_len] = '\0';
+    }
+    const char *room = apprtc_signaling_get_room_id();
+    if (room != NULL) {
+        strncpy(d->room_id, room, sizeof(d->room_id) - 1);
+    }
+    if (esp_work_queue_add_task(send_deferred, d) != ESP_OK) {
+        free(d->msg.payload);
+        free(d);
+        return WEBRTC_STATUS_INTERNAL_ERROR;
+    }
+    return WEBRTC_STATUS_SUCCESS;
+}
+#endif
+
 static WEBRTC_STATUS apprtcSendMessage(void *pSignalingClient, webrtc_message_t *pMessage)
 {
     WEBRTC_STATUS retStatus = WEBRTC_STATUS_SUCCESS;
@@ -167,6 +232,10 @@ static WEBRTC_STATUS apprtcSendMessage(void *pSignalingClient, webrtc_message_t 
     if (pSignalingClient == NULL || pMessage == NULL) {
         return WEBRTC_STATUS_NULL_ARG;
     }
+
+#if CONFIG_IDF_TARGET_LINUX
+    return send_on_work_queue(pMessage);
+#endif
 
     int result = apprtc_signaling_send_webrtc_message(pMessage);
 

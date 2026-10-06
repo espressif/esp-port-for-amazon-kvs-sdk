@@ -89,6 +89,23 @@ test_host:
     # the host and pulls pytest-embedded-serial-esp, which the image lacks.
     - pytest pytest_kvs_webrtc.py --target linux --embedded-services idf --junitxml=$CI_PROJECT_DIR/test_app/report.xml
 
+# Examples with a linux-target branch, built for the host so shared-code changes
+# cannot break the host build unnoticed.
+build_linux_examples:
+  stage: build
+  tags:
+    - build
+  image: espressif/idf:release-v5.5
+  script:
+    - apt-get update && apt-get install -y pkg-config
+    - *apply_sdk_patches
+    - cd $CI_PROJECT_DIR/examples/linux_test
+    - idf.py --preview set-target linux
+    - idf.py build
+    - cd $CI_PROJECT_DIR/examples/esp_camera
+    - idf.py --preview -D SDKCONFIG_DEFAULTS=sdkconfig.defaults.linux set-target linux
+    - idf.py build
+
 .build_template:
   stage: build
   tags:

@@ -23,16 +23,17 @@ menu "ESP WebRTC Camera Configuration"
         default 1
         range 0 1
         help
-            Role type for the WebRTC connection.
-            0: MASTER - Creates a room and waits for viewers to connect.
-            1: VIEWER - Can create a room or join an existing one via CLI.
+            Role reported by get-role and in the logs (0: MASTER, 1: VIEWER).
+            With AppRTC it does not change the session: the device sends the
+            offer when it is first in the room and answers when it joins a room
+            a browser is already in.
 
     config APPRTC_AUTO_CONNECT
         bool "Auto-connect to signaling server on startup"
         default y
         help
-            If enabled, automatically connects to the signaling server on startup.
-            If disabled, connection must be initiated manually via CLI commands.
+            Selects the boot log banner only: the device connects to the signaling
+            server on startup either way.
 
     config APPRTC_LOG_VERBOSE
         bool "Enable verbose AppRTC logging"

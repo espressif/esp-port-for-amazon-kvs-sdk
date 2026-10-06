@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
+  with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
+  master.
 - **`linux_test` host example** — the SDK as a KVS master on the IDF linux target
   (Linux and macOS hosts), streaming file-backed H.264 + Opus; `tests/linux_test_e2e`
   checks what an aiortc viewer receives against the sample frames. Builds on IDF
@@ -80,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- esp_camera: `join-room` leaves the current room first instead of failing with
+  "Already connected"; a separate `disconnect` is no longer needed.
 - **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under
   *Media Stream Configuration → Video Initialization Configuration*. Only the
   prefix changes, e.g. `CONFIG_EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR` →
