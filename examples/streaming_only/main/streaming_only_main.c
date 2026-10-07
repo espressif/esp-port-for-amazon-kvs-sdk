@@ -247,6 +247,27 @@ static void wifi_init_sta(void)
 
     ESP_ERROR_CHECK(esp_wifi_start());
     vTaskDelay(pdMS_TO_TICKS(1000));
+
+    /* Under network split the credentials live on the co-processor, and nothing
+     * here ever set them: it answered ESP_ERR_WIFI_SSID and the host retried for
+     * a minute before giving up. Provisioned credentials still win; the Kconfig
+     * pair only fills in when the driver holds none. */
+    {
+        wifi_config_t sta = {0};
+        /* Provisioning wins: `wifi-set` stores credentials the co-processor
+         * keeps in its own NVS, and those must survive a reflash. The Kconfig
+         * pair is only a fallback for a board that has never been provisioned. */
+        if (esp_wifi_get_config(WIFI_IF_STA, &sta) == ESP_OK &&
+            sta.sta.ssid[0] == '\0' && CONFIG_ESP_WIFI_SSID[0] != '\0') {
+            strlcpy((char *)sta.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(sta.sta.ssid));
+            strlcpy((char *)sta.sta.password, CONFIG_ESP_WIFI_PASSWORD,
+                    sizeof(sta.sta.password));
+            ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
+            ESP_LOGI(TAG, "not provisioned; using Kconfig SSID '%s'",
+                     CONFIG_ESP_WIFI_SSID);
+        }
+    }
+
     esp_wifi_connect();
     // ESP_ERROR_CHECK(esp_hosted_wait_for_slave());
 
@@ -520,13 +541,25 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
-    s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "reset reason: %d%s", (int)reset_reason,
+             reset_reason == ESP_RST_DEEPSLEEP ? " (deep-sleep wake)" : "");
 
-    ret = flash_slave();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to flash slave: %s", esp_err_to_name(ret));
-        return;
+#ifdef CONFIG_SLAVE_FLASHER_ENABLE
+    /* A deep-sleep wake re-runs app_main, but the co-processor kept running and
+     * still holds the Wi-Fi association and the signaling session. flash_slave()
+     * drives its reset pin to read back image hashes, which would throw both
+     * away, so skip it: nothing can have changed while we were asleep. */
+    if (reset_reason == ESP_RST_DEEPSLEEP) {
+        ESP_LOGI(TAG, "deep-sleep wake: leaving the co-processor untouched");
+    } else {
+        s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
+
+        ret = flash_slave();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to flash slave: %s", esp_err_to_name(ret));
+            return;
+        }
     }
 #endif
 

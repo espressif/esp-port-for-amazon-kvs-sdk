@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <stddef.h>
 #include "host_ps_integration.h"
 #include "sdkconfig.h"
+
+static void (*s_cli_register_cb)(void);
+
+void host_ps_integration_set_cli_register_cb(void (*cb)(void))
+{
+	s_cli_register_cb = cb;
+}
 
 #if CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS
 
@@ -70,6 +78,9 @@ static inline void start_cli_after_light_sleep(void)
     defined(CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_PERIPHERAL_POWERDOWN)
 	ESP_EARLY_LOGI(TAG, "Restarting CLI (UART powered up)");
 	(void)eh_cp_feat_cli_start(NULL);
+	if (s_cli_register_cb != NULL) {
+		s_cli_register_cb();
+	}
 #endif
 }
 

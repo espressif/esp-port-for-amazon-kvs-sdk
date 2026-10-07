@@ -36,6 +36,7 @@
 #include "bridge_peer_connection.h"
 #include "webrtc_bridge.h"
 #include "power_save_handler.h"
+#include "host_ps_integration.h"
 
 static const char *TAG = "signaling_only";
 
@@ -44,6 +45,20 @@ extern int query_resolution_command_register_cli(void);
 extern int query_resolution_command_register_response_handler(void);
 extern int query_snapshot_command_register_cli(void);
 extern int query_snapshot_command_register_response_handler(void);
+
+static void register_app_cli(void)
+{
+    wifi_register_cli(); // for wifi-set command
+    trigger_offer_command_register_cli();
+    query_resolution_command_register_cli();
+    query_snapshot_command_register_cli();
+}
+
+static void register_cli_after_wake(void)
+{
+    esp_cli_register_cmds();
+    register_app_cli();
+}
 
 // Global configuration - keep same structure as before for IoT Core compatibility
 static kvs_signaling_config_t g_kvsSignalingConfig = {0};
@@ -128,6 +143,7 @@ static esp_err_t signaling_pre_wifi_init(void *ctx)
 #endif /* IS_VALID_SLAVE_CHIPSET */
 
 
+#if CONFIG_EXAMPLE_MEMPROBE
 static void memprobe_task(void *arg)
 {
     for (int i = 0; i < 20; i++) {
@@ -142,6 +158,7 @@ static void memprobe_task(void *arg)
     }
     vTaskDelete(NULL);
 }
+#endif /* CONFIG_EXAMPLE_MEMPROBE */
 
 void app_main(void)
 {
@@ -159,7 +176,7 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP32 WebRTC Signaling-Only Example");
 
     /* ESP_EFUSE_TEMP and PSRAM_CAP are C5-only; the emulated CP is a C6. */
-#if CONFIG_IDF_TARGET_ESP32C5
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_EXAMPLE_BOOT_DIAG
     {
         /* An unburned block also reads zero. MAC and wafer version share BLK1. */
         uint8_t mac[6] = {0}, cap = 0, vendor = 0, pkg = 0, wmaj = 0, wmin = 0, blkv = 0;
@@ -185,11 +202,11 @@ void app_main(void)
 #endif
 
     esp_cli_start();
+#if CONFIG_EXAMPLE_MEMPROBE
     xTaskCreate(memprobe_task, "memprobe", 3072, NULL, 1, NULL);
-    wifi_register_cli(); // for wifi-set command
-    trigger_offer_command_register_cli();
-    query_resolution_command_register_cli();
-    query_snapshot_command_register_cli();
+#endif
+    register_app_cli();
+    host_ps_integration_set_cli_register_cb(register_cli_after_wake);
 
     /* Whoever calls esp_wifi_init() second must pass the same WIFI_INIT_CONFIG,
      * or eh_cp_feat_rpc_ext_v2 reinitialises the driver and drops the link. */

@@ -254,4 +254,59 @@ menu "Example: CP Light Sleep on Host Deep Sleep"
 
             Example-level only; nothing in the hosted libraries is involved.
 
+
+	config EXAMPLE_MEMPROBE
+		bool "Print a heap snapshot every 15 s for the first 5 minutes"
+		default n
+		help
+			Bring-up aid. Each line wakes the CPU and blocks on UART, which
+			shows up in co-processor sleep current, so it stays off by default.
+
+			For ongoing memory reporting prefer hosted's mem monitor feature,
+			which the host drives on its own timer.
+
+	config EXAMPLE_BOOT_DIAG
+		bool "Log co-processor diagnostics at boot"
+		default n
+		help
+			Bring-up aid. At boot the C5 logs its eFuse fields: MAC, wafer
+			and block versions, flash and PSRAM capability. They print as
+			warnings on every boot, so this stays off by default.
+
+
+	choice EXAMPLE_WIFI_PS_MODE
+		prompt "Wi-Fi modem power save"
+		default EXAMPLE_WIFI_PS_MIN_MODEM
+		help
+			The co-processor owns the radio in split mode, so this is what
+			decides its idle current between beacons.
+
+		config EXAMPLE_WIFI_PS_NONE
+			bool "None - radio always on"
+			help
+				Lowest latency, highest current. Use when a viewer offer must
+				be caught with no DTIM delay.
+
+		config EXAMPLE_WIFI_PS_MIN_MODEM
+			bool "Min modem - wake every DTIM"
+			help
+				Wakes at every DTIM beacon. listen_interval does not apply.
+
+		config EXAMPLE_WIFI_PS_MAX_MODEM
+			bool "Max modem - wake every listen_interval beacons"
+			help
+				Sleeps across several beacons, set below. Adds latency of up
+				to listen_interval beacon periods before the device hears a
+				buffered frame.
+	endchoice
+
+	config EXAMPLE_WIFI_LISTEN_INTERVAL
+		int "Wi-Fi listen interval (beacons)"
+		depends on EXAMPLE_WIFI_PS_MAX_MODEM
+		range 1 100
+		default 3
+		help
+			Beacons skipped between wakes. Only MAX_MODEM honours this; it is
+			hidden otherwise so the inert combination cannot be selected.
+
 endmenu

@@ -57,6 +57,9 @@ HOST = (
     "build_emu",
     "sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.e2e;sdkconfig.ci.emu",
 )
+# Same host, plus the example's automatic deep-sleep timer. Separate build dir so
+# a power-save run never leaves its image behind for the ordinary emu tests.
+HOST_PS = (HOST[0], HOST[1], "build_emu_ps", HOST[3] + ";sdkconfig.ci.emu_ps")
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -187,7 +190,8 @@ def run_pair(host_wait_for: str, emu_seconds: int = 900,
              cp_inject: tuple = None,
              wifi_ssid: str = "myssid", wifi_password: str = "mypassword",
              cp_wait_for: str = None, cp_settle_seconds: int = 240,
-             while_running=None) -> Run:
+             while_running=None, wake_port: int = 0,
+             host_spec: tuple = None) -> Run:
     """Start a fresh CP, then a fresh host, and wait until `host_wait_for`
     appears in the host log or the wall clock runs out.
 
@@ -208,22 +212,36 @@ def run_pair(host_wait_for: str, emu_seconds: int = 900,
     assert EMU.is_file(), \
         "esp-emu not found: set ESP_EMU to the binary or put esp-emu on PATH"
     cp_img, cp_elf = build(CP)
-    host_img, host_elf = build(HOST)
+    host_img, host_elf = build(host_spec or HOST)
 
     # Kept, not temp: the two logs are the only record of why an assertion failed.
     root = Path(os.environ.get("KVS_EMU_LOGS", tempfile.gettempdir())) / "kvs_emu"
     work = root / f"{int(time.time())}_{host_wait_for.split()[0].lower()}"
     work.mkdir(parents=True, exist_ok=True)
+    # Set before the emulators start: while_running runs before the teardown that
+    # fills run.host_log, so a callback that needs live output reads this file.
+    run_log_dir = work
     sock = work / "pair.sock"
     run = Run()
+    run.log_dir = run_log_dir
     cp_out, host_out = work / "cp.log", work / "host.log"
     cp_proc = host_proc = None
     cp_fh = host_fh = None
     try:
         # esp-emu raises a SoftAP with these; sdkconfig.ci.emu compiles the same
         # pair into the CP, so it associates unattended.
+        # wake_port: wire the CP->host wake line and forward a host-reserved port
+        # so a packet can be fired at a sleeping host. The bridge carries the line
+        # as OP_WAKE; without --hosted-wake-gpio there is no wake path at all and
+        # a slept host never comes back. CP-side pin mirrors the firmware Kconfig
+        # (2 on this board); the host arms its own pin.
+        wake_args = []
+        net_arg = ["--net", "user"]
+        if wake_port:
+            wake_args = ["--hosted-wake-gpio", "2"]
+            net_arg = ["--net", f"user,hostfwd=tcp:127.0.0.1:{wake_port}-:22"]
         cp_args = ["--chip", "esp32c6", "--firmware", str(cp_img), "--elf", str(cp_elf),
-                   "--hosted", f"bridge:slave:{sock}", "--net", "user",
+                   "--hosted", f"bridge:slave:{sock}", *wake_args, *net_arg,
                    "--wifi-ssid", wifi_ssid, "--wifi-password", wifi_password,
                    "--timeout", f"{emu_seconds}s"]
         if cp_inject:

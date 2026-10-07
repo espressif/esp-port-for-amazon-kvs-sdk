@@ -38,6 +38,14 @@ typedef esp_err_t (*hosted_recovery_restore_cb_t)(void);
 esp_err_t hosted_recovery_start(hosted_recovery_teardown_cb_t teardown,
                                 hosted_recovery_restore_cb_t restore);
 
+/* Stop and restart the co-processor heartbeat around host power save.
+ *
+ * The heartbeat is traffic addressed to the host, so hosted wakes the host to
+ * deliver it. Left running it pulls the host out of deep sleep within one
+ * interval, and the co-processor leaves light sleep with it. */
+esp_err_t hosted_recovery_pause(void);
+esp_err_t hosted_recovery_resume(void);
+
 #ifdef __cplusplus
 }
 #endif

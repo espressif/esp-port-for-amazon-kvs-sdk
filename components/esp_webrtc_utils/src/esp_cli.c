@@ -286,7 +286,8 @@ int esp_cli_start()
      * the REPL the light-sleep integration stops and restarts when the UART
      * powers down, so the app must not run one alongside it. Commands go into
      * esp_console's global table, so the ones registered above are reachable
-     * from that REPL. */
+     * from that REPL. A restart wipes that table, so the app registers its
+     * commands again after one. */
     cli_started = 1;
     return 0;
 #else

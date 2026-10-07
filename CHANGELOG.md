@@ -66,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the emulator chain.
 - **P4 core boards and the P4X-C5 Function EV Board:** board overlays for the ESP32-P4
   core boards with a C5 or C6 co-processor, and for the ESP32-P4X-C5 Function EV Board.
+- **Host deep sleep with co-processor light sleep:** with `CONFIG_EXAMPLE_ENABLE_POWER_SAVE`,
+  the `streaming_only` host deep-sleeps when no viewer is connected. The `signaling_only`
+  co-processor stays in light sleep, holds the Wi-Fi link and the signaling session, and
+  wakes the host for an offer or for traffic addressed to it.
 - **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
   with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
   master.

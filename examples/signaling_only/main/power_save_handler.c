@@ -35,47 +35,87 @@ static const char *TAG = "power_save";
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
-
-
-/* Part 1: Wi-Fi Modem sleep enforcement */
-/* Part 2: Mandate non critical tasks to suspend */
-
-/* Part 1 : Wi-Fi Modem sleep */
 #include "esp_wifi.h"
 #include "esp_pm.h"
+#include "esp_event.h"
+
+/* power_save_init() is reached only from signaling_pre_wifi_init(), which the
+ * example arms on the co-processor targets alone. Mirror that condition here,
+ * or these helpers are dead code on every other target. */
+#if defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C5)
+#define PS_WIFI_KNOBS_ENABLED 1
+#else
+#define PS_WIFI_KNOBS_ENABLED 0
+#endif
+
+#if PS_WIFI_KNOBS_ENABLED
 
 static esp_err_t configure_wifi_power_save(void)
 {
-    esp_err_t ret;
+#if CONFIG_EXAMPLE_WIFI_PS_NONE
+    const wifi_ps_type_t mode = WIFI_PS_NONE;
+    const char *mode_name = "NONE";
+#elif CONFIG_EXAMPLE_WIFI_PS_MAX_MODEM
+    const wifi_ps_type_t mode = WIFI_PS_MAX_MODEM;
+    const char *mode_name = "MAX_MODEM";
+#else
+    const wifi_ps_type_t mode = WIFI_PS_MIN_MODEM;
+    const char *mode_name = "MIN_MODEM";
+#endif
 
-    /* Enable WiFi modem sleep */
-    /* WIFI_PS_MIN_MODEM: Minimum modem power saving (better performance) */
-    /* WIFI_PS_MAX_MODEM: Maximum modem power saving (better power savings) */
-    ret = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    /* Read back rather than trust the write. Until this function was wired to
+     * an event it never ran, and the radio kept the driver default silently.
+     * Any power figure is only meaningful beside this line. */
+    wifi_ps_type_t before = WIFI_PS_NONE;
+    esp_wifi_get_ps(&before);
+
+    esp_err_t ret = esp_wifi_set_ps(mode);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set WiFi power save mode: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "esp_wifi_set_ps(%s) failed: %s", mode_name, esp_err_to_name(ret));
         return ret;
     }
 
-    ESP_LOGI(TAG, "WiFi modem sleep enabled");
+    wifi_ps_type_t after = WIFI_PS_NONE;
+    esp_wifi_get_ps(&after);
+    ESP_LOGI(TAG, "Wi-Fi power save mode: %s (was %d, now %d)",
+             mode_name, (int) before, (int) after);
 
-    /* Optional: Configure listen interval for better power savings */
+#if CONFIG_EXAMPLE_WIFI_PS_MAX_MODEM
+    /* Only MAX_MODEM honours listen_interval. Under MIN_MODEM the radio wakes
+     * at every DTIM, so the field is inert.
+     *
+     * `wifi-set` rebuilds wifi_config_t from zero and restarts the station, so
+     * a one-shot write at boot is lost at the first provisioning. Rewriting it
+     * on every WIFI_EVENT_STA_START keeps the value in the driver. The driver
+     * reads the field when the station associates, and esp_wifi_start() only
+     * posts the event, so a write may land after the association it was meant
+     * for. The value then applies from the next association. */
     wifi_config_t wifi_config = {};
     ret = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
     if (ret == ESP_OK) {
-        wifi_config.sta.listen_interval = 3; /* Listen every 3 beacons (default is 3) */
+        wifi_config.sta.listen_interval = CONFIG_EXAMPLE_WIFI_LISTEN_INTERVAL;
         ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "WiFi listen interval configured");
-        }
     }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "listen_interval not applied: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "Wi-Fi listen interval: %d beacons", CONFIG_EXAMPLE_WIFI_LISTEN_INTERVAL);
+#endif
 
-    return ret;
+    return ESP_OK;
 }
 
+static void on_sta_start(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    configure_wifi_power_save();
+}
 
-/* Part 2: Mandate non critical tasks to suspend */
+#endif /* PS_WIFI_KNOBS_ENABLED */
+
+#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
+
+/* Mandate non critical tasks to suspend */
 
 #if SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING
 
@@ -298,6 +338,20 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
 esp_err_t power_save_init(void)
 {
     esp_err_t ret = ESP_OK;
+
+#if PS_WIFI_KNOBS_ENABLED
+    /* Runs before esp_wifi_init(), so the Wi-Fi power-save mode cannot be set
+     * here. Register for the start event instead and apply it there. A failure
+     * costs power, not function, so it must not bring the co-processor down:
+     * a reboot here takes the host's wake path with it. */
+    esp_err_t evt_ret = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
+                                                   &on_sta_start, NULL);
+    if (evt_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi power save will stay at the driver default: %s",
+                 esp_err_to_name(evt_ret));
+    }
+#endif
+
 #if SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && HOST_PS_INTEGRATION_ENABLED
     ESP_LOGI(TAG, "Initializing power save API");
 

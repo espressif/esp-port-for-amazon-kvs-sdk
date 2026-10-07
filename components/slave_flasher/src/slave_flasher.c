@@ -492,6 +492,15 @@ esp_err_t flash_slave()
         // Delay for skipping the boot message of the targets
         vTaskDelay(500 / portTICK_PERIOD_MS);
 
+    } else {
+        /* connect_to_target() drives reset together with GPIO0 to force serial
+         * download mode. A co-processor that does not answer -- it is in light
+         * sleep with its UART powered down, say -- is then left sitting in the
+         * bootloader, so it never runs its app and SDIO never enumerates. Reset
+         * it without GPIO0 so it boots normally. */
+        ESP_LOGW(TAG, "co-processor did not answer the loader; resetting it to run its app");
+        esp_loader_reset_target();
+        vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 
 #if CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
