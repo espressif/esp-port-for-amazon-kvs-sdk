@@ -263,6 +263,7 @@ static STATUS priv_file_credential_provider_read(PFileCredentialProvider pFileCr
     FSEEK(fp, 0, SEEK_SET);
 
     // empty buffers
+    credentialMarker[0] = '\0';
     thirdTokenStr[0] = '\0';
     fourthTokenStr[0] = '\0';
     accessKeyId[0] = '\0';
@@ -273,8 +274,12 @@ static STATUS priv_file_credential_provider_read(PFileCredentialProvider pFileCr
      * the other is just "CREDENTIALS accessKey secretKey". So the second token can be either expiration or secret key.
      */
 
-    FSCANF(fp, "%11s %" STR(MAX_ACCESS_KEY_LEN) "s %" STR(MAX_EXPIRATION_LEN) "s %" STR(MAX_SECRET_KEY_LEN) "s %" STR(MAX_SESSION_TOKEN_LEN) "s",
-           credentialMarker, accessKeyId, thirdTokenStr, fourthTokenStr, sessionToken);
+    // Both formats have at least the marker, the access key and one more token
+    CHK(FSCANF(fp,
+               "%11s %" STR(MAX_ACCESS_KEY_LEN) "s %" STR(MAX_EXPIRATION_LEN) "s %" STR(MAX_SECRET_KEY_LEN) "s %" STR(
+                   MAX_SESSION_TOKEN_LEN) "s",
+               credentialMarker, accessKeyId, thirdTokenStr, fourthTokenStr, sessionToken) >= 3,
+        STATUS_FILE_CREDENTIAL_PROVIDER_INVALID_FILE_FORMAT);
 
     // if the fourth token is empty, it means the credential file only has accessKey and secretKey
     if (fourthTokenStr[0] == '\0') {
