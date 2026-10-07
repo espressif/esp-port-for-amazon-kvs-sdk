@@ -1,0 +1,42 @@
+# ESP32-P4X-C5-Function-EV-Board: P4X host with an on-board C5 co-processor.
+#
+# Build:
+#   idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;\
+#              sdkconfig.defaults.p4x_c5_func_board.esp32p4;sdkconfig.ci.e2e;\
+#              ../../test_e2e/sdkconfig.creds" set-target esp32p4
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# Chip revision. P4X is rev >= 3 silicon (measured on this board: v3.2).
+# Revisions >= 3.0 and < 3.0 are mutually exclusive, so an image built with
+# ESP32P4_SELECTS_REV_LESS_V3=y does not boot here -- it dies in the
+# second-stage bootloader with no message.
+#
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+
+#
+# Console: the P4 enumerates as a USB CDC device (/dev/cu.usbmodem*), so the
+# log and the test's `wifi-set` command both go over USB Serial/JTAG.
+#
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+
+#
+# Co-processor. The C5 has its own USB port on this board, so it is flashed
+# directly (hold the P4 in download mode first, which frees the shared lines)
+# rather than in-system through the P4. The board symbol brings the SDIO pin
+# map and the slave-reset GPIO with it.
+#
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+CONFIG_ESP_HOSTED_P4X_C5_DEV_BOARD_FUNC_BOARD=y
+# CONFIG_SLAVE_FLASHER_ENABLE is not set
+
+#
+# 16 MB flash (measured: c8/4018).
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"

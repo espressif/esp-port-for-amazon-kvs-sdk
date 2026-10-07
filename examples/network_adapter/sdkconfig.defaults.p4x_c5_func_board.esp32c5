@@ -1,0 +1,14 @@
+# ESP32-P4X-C5-Function-EV-Board, co-processor (C5) side.
+#
+# Pairs with examples/webrtc_classic/sdkconfig.defaults.p4x_c5_func_board.esp32p4.
+# esp_hosted defines ESP_HOSTED_P4X_C5_DEV_BOARD_FUNC_BOARD on both the host and
+# the co-processor and resolves it to each side's own GPIO map, so the SDIO lines
+# and the reset GPIO come from one name and cannot drift apart.
+#
+# Build:
+#   idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c5;\
+#              sdkconfig.defaults.p4x_c5_func_board.esp32c5" set-target esp32c5
+#
+# Flash: hold the P4 in download mode first, otherwise the C5's USB port does not
+# answer -- the two share lines on this board.
+CONFIG_ESP_HOSTED_P4X_C5_DEV_BOARD_FUNC_BOARD=y

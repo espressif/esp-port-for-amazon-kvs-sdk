@@ -7,8 +7,16 @@ applied but the build never sees it. This compares each assignment in the
 defaults files against the generated sdkconfig.h and lists the ones that did
 not survive.
 
-Usage: check_sdkconfig_roundtrip.py <project_dir> <build_dir> [more build dirs]
+Usage:
+  check_sdkconfig_roundtrip.py <project_dir> <build_dir> [more build dirs]
+  check_sdkconfig_roundtrip.py --defaults a.defaults,b.defaults <project_dir> <build_dir>
+
 Build the project first; the build directory must hold config/sdkconfig.h.
+
+Without --defaults the tool assumes the plain idf.py chain (sdkconfig.defaults
+then sdkconfig.defaults.<target>). Pass --defaults to check a build made with an
+explicit SDKCONFIG_DEFAULTS list, such as a board overlay; give the same files in
+the same order the build used.
 """
 import re
 import sys
@@ -101,24 +109,39 @@ def check(defaults_files, generated):
 
 
 def main():
-    if len(sys.argv) < 3:
+    argv = sys.argv[1:]
+    explicit = None
+    if argv and argv[0] == "--defaults":
+        if len(argv) < 2:
+            sys.exit(__doc__)
+        explicit = [a.strip() for a in argv[1].split(",") if a.strip()]
+        argv = argv[2:]
+    if len(argv) < 2:
         sys.exit(__doc__)
-    project = Path(sys.argv[1])
+    project = Path(argv[0])
     files = sorted(project.glob("sdkconfig.defaults*"))
     if not files:
         sys.exit(f"no sdkconfig.defaults* under {project}")
 
     failures = 0
-    for build_dir in sys.argv[2:]:
+    for build_dir in argv[1:]:
         generated = load_generated(build_dir)
         target = generated.get("IDF_TARGET", "?")
         # A per-target defaults file only applies to its own target.
         chip = target.strip('"')
-        # idf.py reads sdkconfig.defaults then sdkconfig.defaults.<target>.
-        # A board overlay (sdkconfig.defaults.<board>.<target>) is only read
-        # when named explicitly, so it is not part of this build.
-        applicable = [f for f in files
-                      if f.name in ("sdkconfig.defaults", f"sdkconfig.defaults.{chip}")]
+        if explicit:
+            applicable = []
+            for name in explicit:
+                f = project / name
+                if not f.is_file():
+                    sys.exit(f"no such defaults file: {f}")
+                applicable.append(f)
+        else:
+            # idf.py reads sdkconfig.defaults then sdkconfig.defaults.<target>.
+            # A board overlay (sdkconfig.defaults.<board>.<target>) is only read
+            # when named explicitly, so it is not part of this build.
+            applicable = [f for f in files
+                          if f.name in ("sdkconfig.defaults", f"sdkconfig.defaults.{chip}")]
         dropped = check(applicable, generated)
         print(f"\n{project.name} / {build_dir} (target {target})")
         if not dropped:

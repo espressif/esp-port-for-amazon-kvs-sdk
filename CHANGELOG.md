@@ -64,6 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames. It lets the player run under ESP-EMU, which models no display
   (`webrtc_classic/sdkconfig.ci.player_headless`). CI builds it on its own and in
   the emulator chain.
+- **P4 core boards and the P4X-C5 Function EV Board:** board overlays for the ESP32-P4
+  core boards with a C5 or C6 co-processor, and for the ESP32-P4X-C5 Function EV Board.
 - **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
   with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
   master.

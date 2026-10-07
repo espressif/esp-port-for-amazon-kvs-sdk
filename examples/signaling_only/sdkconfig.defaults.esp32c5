@@ -15,12 +15,20 @@ CONFIG_PARTITION_TABLE_OFFSET=0xC000
 # 2. BT Configuration
 #---------------------
 CONFIG_BT_ENABLED=y
-CONFIG_BT_CONTROLLER_ONLY=y
-CONFIG_BT_BLUEDROID_ENABLED=
 CONFIG_BT_LE_SLEEP_ENABLE=y
 # BLE is used only for provisioning, so the controller runs from flash and
 # leaves its internal RAM to TLS and media forwarding.
 CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
+
+# The co-processor provisions over BLE itself (app_wifi_prov_init in
+# signaling_only_main.c); the host has BT off entirely. So it needs its own
+# NimBLE host, which comes from CONFIG_BT_NIMBLE_ENABLED in sdkconfig.defaults.
+# esp_hosted's co-processor example sets CONFIG_BT_CONTROLLER_ONLY here because
+# in that design the host runs the BT host stack over HCI-over-SDIO. Copying it
+# removed provisioning on C5 while C6 kept it.
+#
+# The image costs 0x209F40, so partitions.esp32c5.csv carries a single app
+# partition. Co-processor OTA is not available on C5.
 
 # 3.1 BLE over SPI/SDIO
 #-----------------------
@@ -106,6 +114,10 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=y
+# Keep internal RAM for Wi-Fi, TLS and the SDIO transport: the NimBLE host and
+# the NVS cache go to PSRAM.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_NVS_ALLOCATE_CACHE_IN_SPIRAM=y
 
 #
 # ESP-Hosted - Network coprocessor
@@ -147,7 +159,9 @@ CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_POWER_MAX=y
 CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_MIN_FREQ_MHZ=12
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
-CONFIG_ESP_HOST_DEV_BOARD_P4_C5_CORE=y
+# The board is selected by sdkconfig.defaults.p4_c5_core_board.esp32c5, not
+# here: these defaults stay board-neutral. The old name assigned at this
+# point had no 3.x counterpart and did nothing.
 
 # ─── Aligned with esp_hosted's power-save reference ────────────────────────────
 # examples/power_save/host+cp/network_split__host_deep_sleep_cp_light_sleep/cp,
