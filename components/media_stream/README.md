@@ -159,12 +159,17 @@ later callers join it — a mismatch is logged, not silently applied.
 person detection and an LCD preview — each start/stoppable from the console.
 
 > **Note on the file-based source.** `media_stream_get_file_video_capture_if()`
-> serves `.h264` files from SPIFFS through the pull API, and
-> `examples/streaming_only` can select it with its `USE_FILE_STREAM` toggle
-> (compiled out by default). Since consumers now take frames from the sink
-> registry, that toggle no longer feeds WebRTC — the file source produces nothing
-> into the registry. Making it a sink producer (a small paced task calling the
-> internal dispatch) is the fix if the path is wanted again.
+> serves the H.264 sample frames from SPIFFS (`samples/video.pack`), paced to the
+> frame interval; the audio source does the same with `samples/audio.pack`. While
+> started, the video source also publishes each frame to the sink registry from
+> its own task, so it feeds WebRTC like a camera does; it reads frames only while a
+> sink is enabled. Select it with `CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE`
+> (`sdkconfig.ci.filecap`, `sdkconfig.ci.emu`). Several file sources may run at
+> once, for example `streaming_only`'s `media-selftest` during a viewer's session:
+> each source has its own read position, only one publishes to the registry, and
+> when that one stops another started source takes over publishing. Frames are
+> typed I or P from their content. Without the packs the file source sends nothing
+> and logs why once.
 
 ### Raw frames (`video_raw_sink.h`)
 

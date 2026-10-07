@@ -1,8 +1,8 @@
 # Sample media for file-based capture
 
-`CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y` feeds the encoder from these files
-instead of a camera and microphone. It is how the emulator, and any board whose
-camera does not come up, can still produce a stream.
+`CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y` sends these frames, already encoded,
+instead of the camera's and microphone's. It is how the emulator, and any board
+whose camera does not come up, can still produce a stream.
 
     video.pack   60 H.264 frames   2 s at 30 fps
     audio.pack  618 Opus frames    12.36 s, 48 kHz mono, 20 ms per frame
@@ -20,8 +20,8 @@ Measured on the P4-C5 core board:
 | 85  (video + audio)     |  4 fps |
 | 681 (video + audio)     | connection dropped |
 
-A pack is opened once. Reading a frame is a seek and a read. `media_stream.c`
-still falls back to per-frame files when a pack is absent.
+A pack is opened once. Reading a frame is a seek and a read. The packs are the
+only source: without them the file source sends nothing, and logs why once.
 
 ## Format
 
@@ -43,7 +43,7 @@ inputs alone. Delete the inputs afterwards: only the packs need to ship.
 
 ### Where the inputs come from
 
-Video: the 60 frames arrived with the initial port (`2f63ffe`). They are the same
+Video: the 60 frames arrived with the initial port. They are the same
 kind of content as the upstream set in
 `amazon-kinesis-video-streams-webrtc-sdk-c/samples/h264SampleFrames`, but a
 different encode -- not byte-identical to it. `video.pack` holds those exact
