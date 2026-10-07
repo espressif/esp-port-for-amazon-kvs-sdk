@@ -17,7 +17,7 @@
  * - Initializes slave light sleep component
  * - Registers WebRTC event handler for waking host on offer/streaming events
  *
- * Should be called after esp_hosted_coprocessor_init() and before app_webrtc_init()
+ * Should be called after eh_cp_init() and before app_webrtc_init()
  *
  * @return
  *     - ESP_OK: Success
@@ -26,12 +26,16 @@
 esp_err_t power_save_init(void);
 
 /**
- * @brief Register sleep-related CLI commands
+ * @brief Hook the WebRTC events that wake the host
  *
- * Registers the "wake-up" command to manually wake the host from deep sleep.
+ * Separate from power_save_init() because it needs app_webrtc, which comes up
+ * later. Call it after app_webrtc_init().
  *
- * @return 0 on success
+ * @return
+ *     - ESP_OK: Success
+ *     - ESP_FAIL: Callback registration failed
  */
-int power_save_register_cli(void);
+esp_err_t power_save_register_webrtc_events(void);
+
 
 #endif /* __POWER_SAVE_HANDLER_H__ */

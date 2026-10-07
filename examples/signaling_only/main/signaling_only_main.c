@@ -27,7 +27,7 @@
 #endif
 
 #if IS_VALID_SLAVE_CHIPSET
-#include "esp_hosted_coprocessor.h"
+#include "eh_cp.h"
 #endif
 
 #include "esp_webrtc_time.h"
@@ -89,43 +89,34 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
     }
 }
 
+/* The host boots, flashes this image and only then brings Wi-Fi up, so the
+ * co-processor waits far longer than a plain association would take. */
+#define CP_WAIT_FOR_IP_MS 120000
+
 #if IS_VALID_SLAVE_CHIPSET
 #include "esp_wifi.h"
 #include "esp_netif.h"
 
-#ifdef CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED
-static esp_netif_t *sta_netif = NULL;
+static EventGroupHandle_t s_ip_event_group;
+#define CP_GOT_IP_BIT BIT0
 
-static esp_netif_t *create_slave_sta_netif(void)
+static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    /* Create "almost" default station, but with un-flagged DHCP client */
-    /* Use static to ensure the config persists after function returns */
-    static esp_netif_inherent_config_t netif_cfg;
-    memcpy(&netif_cfg, ESP_NETIF_BASE_DEFAULT_WIFI_STA, sizeof(netif_cfg));
-
-    esp_netif_config_t cfg_sta = {
-        .base = &netif_cfg,
-        .stack = ESP_NETIF_NETSTACK_DEFAULT_WIFI_STA,
-    };
-    esp_netif_t *netif_sta = esp_netif_new(&cfg_sta);
-    ESP_LOGI(TAG, "Created netif_sta: %p (if_key: %s)", netif_sta, netif_cfg.if_key);
-    assert(netif_sta);
-
-    ESP_ERROR_CHECK(esp_netif_attach_wifi_station(netif_sta));
-    ESP_ERROR_CHECK(esp_wifi_set_default_wifi_sta_handlers());
-
-    return netif_sta;
+    xEventGroupSetBits(s_ip_event_group, CP_GOT_IP_BIT);
 }
-#endif
 
 static esp_err_t signaling_pre_wifi_init(void *ctx)
 {
-#ifdef CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED
-    /* Create and register the netif with "WIFI_STA_DEF" key */
-    sta_netif = create_slave_sta_netif();
-#endif
-    /* esp_netif_init and netif creation must be done before network_coprocessor_init */
-    esp_hosted_coprocessor_init();
+    /* esp_netif_init must be done before eh_cp_init() */
+    ESP_ERROR_CHECK(eh_cp_init());
+
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                              &on_got_ip, NULL));
+
+    /* Same order as esp_hosted's power-save example: the host_ps callbacks are
+     * registered right after eh_cp_init(), before anything can ask the
+     * co-processor to sleep. CP_FEAT_HOST_PS_AUTO_INIT is off for this reason. */
+    power_save_init();
     vTaskDelay(pdMS_TO_TICKS(5000));
     return ESP_OK;
 }
@@ -148,11 +139,26 @@ void app_main(void)
 
     esp_cli_start();
     wifi_register_cli(); // for wifi-set command
-    // power_save_register_cli();
     trigger_offer_command_register_cli();
     query_resolution_command_register_cli();
     query_snapshot_command_register_cli();
 
+#if CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT_READY
+    /* Under network split the host owns the Wi-Fi connection. It calls
+     * esp_wifi_init(), esp_wifi_start() and esp_wifi_connect() over RPC, the same
+     * division of work as esp_hosted's own network_split/station example, whose
+     * co-processor calls eh_cp_init() and nothing else. A second esp_wifi_init()
+     * here makes eh_cp_feat_rpc_ext_v2 compare the host's configuration with this
+     * one, find a difference and initialize the driver again, which drops the
+     * connection. The co-processor brings up its own IP stack and waits. */
+    s_ip_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(signaling_pre_wifi_init(NULL));
+
+    ESP_LOGI(TAG, "network split: waiting for the host to bring Wi-Fi up");
+    ret = (xEventGroupWaitBits(s_ip_event_group, CP_GOT_IP_BIT, pdFALSE, pdFALSE,
+                               pdMS_TO_TICKS(CP_WAIT_FOR_IP_MS)) & CP_GOT_IP_BIT)
+          ? ESP_OK : ESP_ERR_TIMEOUT;
+#else
     // Initialize WiFi (with BLE provisioning if enabled)
     app_wifi_prov_config_t net_cfg = APP_NETWORK_CONFIG_DEFAULT();
 #if IS_VALID_SLAVE_CHIPSET
@@ -160,6 +166,7 @@ void app_main(void)
     net_cfg.skip_default_sta_netif = true;
 #endif
     ret = app_wifi_prov_init(&net_cfg);
+#endif
     if (ret == ESP_ERR_TIMEOUT) {
         /* Wi-Fi not connected within wifi_connect_timeout_ms — common on the
          * P4 + C6 hosted path, where co-processor association takes longer than
@@ -216,9 +223,7 @@ void app_main(void)
 
     // Register WebRTC event callback
     app_webrtc_register_event_callback(app_webrtc_event_handler, NULL);
-
-    /* Initialize power save handler (must be after esp_hosted_coprocessor_init) */
-    power_save_init();
+    power_save_register_webrtc_events();
 
     // Configure WebRTC with our new simplified API - signaling-only mode
     app_webrtc_config_t app_webrtc_config = APP_WEBRTC_CONFIG_DEFAULT();

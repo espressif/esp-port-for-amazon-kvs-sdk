@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge use the registry component `espressif/esp_hosted` 3.x in place of the
   in-tree 2.x submodule. ESP-IDF 5.5 is the minimum. `webrtc_person_detect` stays on
   the in-tree 2.x.
+- **Split mode on esp_hosted 3.x:** `signaling_only` and `streaming_only` use esp_hosted
+  3.x and its network split.
 - `KVS_SDK_PATH` pointing at a directory that does not exist (or one with no
   `components/kvs_webrtc`) is now a configure-time `FATAL_ERROR` instead of a warning
   that scrolled past while every `kvs_*` component silently resolved elsewhere.

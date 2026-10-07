@@ -24,11 +24,19 @@
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
-#include "esp_hosted_misc.h"
+#include "eh_host_heartbeat.h"
+#include "eh_host_event.h"
 
 #include "hosted_recovery.h"
 
 #define TAG "hosted_recovery"
+
+/* The co-processor only emits ESP_HOSTED_EVENT_CP_HEARTBEAT when esp_hosted
+ * builds its heartbeat feature. Without it the monitor below would arm a timer
+ * that nothing ever restarts, and declare the link dead on the first timeout. */
+#if !CONFIG_ESP_HOSTED_HOST_FEAT_HEARTBEAT
+#error "hosted_recovery watches the co-processor heartbeat; enable CONFIG_ESP_HOSTED_HOST_FEAT_HEARTBEAT."
+#endif
 
 #define HEARTBEAT_INTERVAL_SEC   CONFIG_STREAMING_HEARTBEAT_INTERVAL_SEC
 #if CONFIG_STREAMING_ENABLE_HEARTBEAT_MONITOR
@@ -116,7 +124,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base, int32_t id, v
         request_reset();
         break;
     case ESP_HOSTED_EVENT_CP_HEARTBEAT: {
-        uint32_t hb = ((esp_hosted_event_heartbeat_t *) data)->heartbeat;
+        uint32_t hb = ((eh_host_event_heartbeat_t *) data)->heartbeat;
 #if CONFIG_STREAMING_ENABLE_HEARTBEAT_MONITOR
         hb_timer_arm();
 #endif
@@ -134,7 +142,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base, int32_t id, v
 
 static esp_err_t enable_heartbeat(void)
 {
-    esp_err_t err = esp_hosted_configure_heartbeat(true, HEARTBEAT_INTERVAL_SEC);
+    esp_err_t err = eh_host_heartbeat_configure(true, HEARTBEAT_INTERVAL_SEC);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to enable co-processor heartbeat: %s", esp_err_to_name(err));
     }

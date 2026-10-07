@@ -35,4 +35,7 @@ CONFIG_ESP32S3_DATA_CACHE_SIZE=0x10000
 CONFIG_ESP_GDBSTUB_ENABLED=y
 CONFIG_ESP_SYSTEM_PANIC_GDBSTUB=y
 
-CONFIG_ESP_HOSTED_ENABLED=n
+# 3.x makes both features opt-in. hosted_recovery needs the heartbeat and the
+# bridge carries signaling over peer data; both are compile-time checked.
+CONFIG_ESP_HOSTED_HOST_FEAT_HEARTBEAT=y
+CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA=y

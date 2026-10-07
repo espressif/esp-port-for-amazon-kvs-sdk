@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "sdkconfig.h"
 #include <stdio.h>
 #include <string.h>
 #include <esp_log.h>
@@ -278,6 +279,18 @@ int esp_cli_start()
 #endif
     esp_console_register_help_command();
     esp_cli_register_cmds();
+
+#if CONFIG_ESP_HOSTED_CP_FEAT_CLI
+    /* esp_hosted's co-processor CLI owns the console on a CP build. Starting a
+     * second REPL here installs the UART driver twice, which aborts. It is also
+     * the REPL the light-sleep integration stops and restarts when the UART
+     * powers down, so the app must not run one alongside it. Commands go into
+     * esp_console's global table, so the ones registered above are reachable
+     * from that REPL. */
+    cli_started = 1;
+    return 0;
+#else
+
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
     esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&hw_config, &repl_config, &repl));
@@ -296,4 +309,5 @@ int esp_cli_start()
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
     cli_started = 1;
     return 0;
+#endif /* CONFIG_ESP_HOSTED_CP_FEAT_CLI */
 }

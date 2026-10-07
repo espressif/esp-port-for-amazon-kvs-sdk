@@ -209,6 +209,15 @@ static void wifi_init_sta(void)
 
 #if HOST_USES_STATIC_NETIF
     sta_netif = create_slave_sta_netif_with_static_ip();
+#elif CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT_NETIF_INTERNAL_STATIC
+    /* nw_split already created WIFI_STA_DEF. Creating a second returns NULL,
+     * which asserts in wifi_default.c, so take hosted's handle. */
+    sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta_netif == NULL) {
+        ESP_LOGE(TAG, "network split did not create WIFI_STA_DEF");
+        return;
+    }
+    ESP_LOGI(TAG, "Using WiFi STA netif from network split: %p", sta_netif);
 #else
     sta_netif = esp_netif_create_default_wifi_sta();
     if (sta_netif == NULL) {

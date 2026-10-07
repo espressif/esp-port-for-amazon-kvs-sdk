@@ -6,25 +6,9 @@
 
 #pragma once
 
-/**
- * @file bridge_peer_data.h
- * @brief Role-neutral peer-data calls for the bridge.
- *
- * esp_hosted names the peer-data entry points differently per role, so the
- * bridge — which compiles for both — goes through these two wrappers. Argument
- * order, types and return values are identical on both sides; only the symbol
- * names differ.
- *
- * Semantics that hold for both roles:
- *  - send blocks until the peer answers, and returns the peer's status.
- *  - the receive callback borrows @c data. Copy anything you need to keep;
- *    do not free it.
- *  - msg_id 0xFFFFFFFF is reserved.
- *
- * Host receive runs on the default event loop task, so a callback must stay
- * short and must not call bridge_peer_data_send() — that would block the loop
- * until the peer replies. Hand work to a queue instead.
- */
+/* Role-neutral peer-data calls: esp_hosted names them differently per role.
+ * send blocks until the peer answers; the receive callback borrows data.
+ * Host receive runs on the event loop task, so it must not call send. */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -32,14 +16,18 @@
 #include "esp_err.h"
 #include "sdkconfig.h"
 
-/* BRIDGE_PEER_DATA_TEST_STUB lets the host test build exercise the chunking and
- * reassembly logic without a hosted role: the test supplies the two functions
- * below and captures what would have gone on the wire. Only test_app defines it. */
+/* TEST_STUB: test_app supplies both functions. The feature headers stay on the
+ * include path even when unbuilt, so check the symbol here, not at link time. */
 #if defined(BRIDGE_PEER_DATA_TEST_STUB)
-/* provided by the test */
 #elif CONFIG_ESP_HOSTED_CP
+#if !CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA
+#error "the bridge carries signaling over hosted peer data; enable CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA."
+#endif
 #include "eh_cp_feat_peer_data.h"
 #elif CONFIG_ESP_HOSTED_HOST
+#if !CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA
+#error "the bridge carries signaling over hosted peer data; enable CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA."
+#endif
 #include "eh_host_feat_peer_data.h"
 #else
 #error "ESP_WEBRTC_BRIDGE_HOSTED needs a hosted role: set CONFIG_ESP_HOSTED=y and pick CONFIG_ESP_HOSTED_HOST or CONFIG_ESP_HOSTED_CP, or select the MQTT bridge instead."
@@ -49,7 +37,6 @@
 extern "C" {
 #endif
 
-/** Receive callback. Same shape on both roles. */
 typedef void (*bridge_peer_data_cb_t)(uint32_t msg_id, const uint8_t *data,
                                       size_t len, void *ctx);
 

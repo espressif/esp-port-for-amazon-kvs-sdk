@@ -46,7 +46,7 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 # DMA pool is too small under streaming-grade RAM use. Gated by the
 # downstream patch in components/esp_hosted.
 #
-CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+CONFIG_EH_HOST_PORT_DMA_PREFER_SPIRAM=y
 
 #
 # Cache config
@@ -59,36 +59,41 @@ CONFIG_CACHE_L1_CACHE_LINE_SIZE=64
 
 ### sdkconfig for ESP32-P4 + C2 as co-processor
 # Wi-Fi Performance
-CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
-CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=32
-CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM=32
 CONFIG_WIFI_RMT_AMPDU_TX_ENABLED=y
-CONFIG_WIFI_RMT_TX_BA_WIN=6
 CONFIG_WIFI_RMT_AMPDU_RX_ENABLED=y
-CONFIG_WIFI_RMT_RX_BA_WIN=6
 CONFIG_WIFI_RMT_IRAM_OPT=n
 CONFIG_WIFI_RMT_RX_IRAM_OPT=n
 CONFIG_WIFI_RMT_EXTRA_IRAM_OPT=n
 CONFIG_WIFI_RMT_SLP_IRAM_OPT=n
 
 # TCP/IP Performance
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
-CONFIG_LWIP_TCP_WND_DEFAULT=32768
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=20
-CONFIG_LWIP_UDP_RECVMBOX_SIZE=20
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=20
 
 CONFIG_LWIP_TCP_SACK_OUT=y
 
 #
 # SDIO
 #
-CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_MAX_SIZE=y
+# 2.x set CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_MAX_SIZE here, a name with no
+# 3.x counterpart that never applied - so the host silently used esp_hosted's
+# default, streaming mode, which is what pairs with the co-processor's SW_AGGR
+# default. Translating it to the live symbol selected packet mode instead and
+# the pair aborts at bring-up:
+#   SDIO mode mismatch: slave is in streaming mode, but host is in packet mode
+# Left unset: esp_hosted's default is correct for this pair.
 #CONFIG_ESP_SDIO_CHECKSUM=y
-CONFIG_ESP_HOSTED_PKT_STATS=y
+# 2.x CONFIG_ESP_HOSTED_PKT_STATS had a host and a co-processor side. 3.x keeps
+# packet stats on the co-processor only (CONFIG_ESP_PKT_STATS, CP scope), so the
+# host has nothing to set here.
 
-CONFIG_SLAVE_LWIP_ENABLED=y
-CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED=y
+# hosted_recovery watches the co-processor heartbeat; 3.x makes it opt-in.
+CONFIG_ESP_HOSTED_HOST_FEAT_HEARTBEAT=y
+
+# webrtc_bridge carries signaling and commands over hosted peer data.
+CONFIG_ESP_HOSTED_HOST_FEAT_PEER_DATA=y
+
+# CONFIG_SLAVE_LWIP_ENABLED had no 3.x counterpart: under network
+# split the co-processor always runs its own lwIP.
+CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT=y
 CONFIG_HOST_USES_STATIC_NETIF=n
 #CONFIG_LWIP_TCP_LOCAL_PORT_RANGE_START=49152
 #CONFIG_LWIP_TCP_LOCAL_PORT_RANGE_END=61439
@@ -104,12 +109,12 @@ CONFIG_ESP_HOSTED_SLAVE_RESET_ONLY_IF_NECESSARY=n
 
 # For V1.0B board
 # CONFIG_BSP_BOARD_TYPE_SAMPLE_V10B=y
-# CONFIG_ESP_HOSTED_SDIO_PIN_D0=49
-# CONFIG_ESP_HOSTED_SDIO_PIN_D1=50
+# CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D0=49
+# CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D1=50
 
 # For V1.2 Board
-CONFIG_ESP_HOSTED_SDIO_PIN_D0=14
-CONFIG_ESP_HOSTED_SDIO_PIN_D1=15
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D0=14
+CONFIG_ESP_HOSTED_HOST_SDIO_PIN_D1=15
 #CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 #CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 #CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
@@ -134,9 +139,9 @@ CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
 #CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
 
 # Hosted - Host Power Save Config
-CONFIG_ESP_HOSTED_HOST_POWER_SAVE_ENABLED=y
-CONFIG_ESP_HOSTED_HOST_DEEP_SLEEP_ALLOWED=y
-CONFIG_ESP_HOSTED_HOST_WAKEUP_GPIO=6
+CONFIG_ESP_HOSTED_HOST_FEAT_POWER_SAVE=y
+CONFIG_ESP_HOSTED_HOST_FEAT_POWER_SAVE_DEEP_SLEEP_ALLOWED=y
+CONFIG_ESP_HOSTED_HOST_FEAT_POWER_SAVE_WAKEUP_GPIO=6
 
 # hosted_recovery handles transport failures (re-establish, not blind host restart)
 CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n
@@ -158,3 +163,49 @@ CONFIG_BSP_ERROR_CHECK=n
 #
 CONFIG_MBEDTLS_HARDWARE_ECDSA_SIGN=n
 CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=n
+
+# ─── Aligned with esp_hosted's power-save reference ────────────────────────────
+# examples/power_save/host+cp/network_split__host_deep_sleep_cp_light_sleep/esp_host.
+# Keep these equal to the example. Settings the example makes that are specific
+# to it are deliberately not copied: it disables the interrupt and task
+# watchdogs, uses a single large partition, and pulls in iperf and the
+# wifi-cmd component.
+
+# Network split: the host netif takes its address from the co-processor's
+# DhcpDnsStatus event rather than running DHCP itself.
+CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT_NETIF_INTERNAL_STATIC=y
+
+# The application owns association; hosted must not connect or reconnect.
+CONFIG_ESP_HOSTED_HOST_FEAT_WIFI_STA_AUTO_CONNECT_ON_START=n
+CONFIG_ESP_HOSTED_HOST_FEAT_WIFI_STA_AUTO_RECONNECT_ON_DISCONNECT=n
+
+# Remote Wi-Fi buffering and BA windows for split throughput.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=20
+CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=32
+# The example also sets CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM. It has no effect
+# unless the remote Wi-Fi TX buffers are dynamic, and this build uses static
+# ones (CONFIG_WIFI_RMT_STATIC_TX_BUFFER). Switching the buffer model is a
+# memory-layout change this migration does not make.
+CONFIG_WIFI_RMT_AMPDU_TX_ENABLED=y
+CONFIG_WIFI_RMT_TX_BA_WIN=16
+CONFIG_WIFI_RMT_AMPDU_RX_ENABLED=y
+CONFIG_WIFI_RMT_RX_BA_WIN=16
+
+# lwIP. The old CONFIG_TCP_* names below were 2.x-era and never applied, so the
+# stack had been running on IDF defaults.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=51200
+CONFIG_LWIP_TCP_WND_DEFAULT=65535
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=32
+CONFIG_LWIP_IP_REASS_MAX_PBUFS=15
+CONFIG_LWIP_TCP_SACK_OUT=y
+# The example also sets CONFIG_LWIP_IRAM_OPTIMIZATION and
+# CONFIG_LWIP_EXTRA_IRAM_OPTIMIZATION. They do not fit here: this application
+# links WebRTC, mbedTLS, libsrtp and the H.264 encoder, and moving lwIP into
+# IRAM on top of that overflows internal RAM at link time
+# ("--enable-non-contiguous-regions discards section").
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+CONFIG_LWIP_TCPIP_TASK_PRIO=23
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
