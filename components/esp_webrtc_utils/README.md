@@ -42,7 +42,8 @@ outgoing messages and by `kvs_media` for its video intake:
 
 - **Features**:
   - The queue takes ownership of each buffer on add and hands it back on get
-  - Per-owner depth and full policy: drop the oldest message, or refuse the new one
+  - Per-owner depth and full policy: drop the oldest message, or refuse the new one;
+    the owner can say which messages may be dropped first and how to free them
   - Safe from FreeRTOS tasks and from plain pthreads (the KVS SDK's threads on the
     linux target); not from ISRs
   - Timed get: in ticks on ESP targets like `xQueueReceive()`, on the monotonic clock
@@ -51,7 +52,8 @@ outgoing messages and by `kvs_media` for its video intake:
 - **Key Functions**:
   - `message_queue_init()`: 10 messages, the oldest dropped when full
   - `message_queue_init_with_config()`: own depth, full policy and heap caps
-  - `message_queue_add()`: never waits for room
+  - `message_queue_add()`: never waits for room; `message_queue_add_front()` puts a
+    message back at the head
   - `message_queue_get_next()` / `message_queue_get_next_wait()`: take the oldest message
   - `message_queue_cleanup()` / `message_queue_deinit()`: purge, or tear down
 

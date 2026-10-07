@@ -5,13 +5,17 @@
  */
 
 /* esp_webrtc_utils' message_queue, as its owners use it:
- * - AppRTC signaling: the default queue (depth 10, the oldest dropped when full);
+ * - AppRTC signaling: depth 32; items own a separate payload, like the webrtc_message_t
+ *   copies AppRTC queues. When full, the queue must shed a droppable item (an ICE
+ *   candidate), never the offer or answer, and free whatever it discards through the
+ *   owner's callback;
  * - kvs_media's video intake: depth 3, a full queue refuses the new frame, the sender
  *   waits about one frame period for the next one, teardown drains what is left.
  * The waits are checked from a plain pthread, as the SDK's sender thread on the host.
  *
- * Coverage by configuration: depth (validation, 1, 3, 10, 64), full policy (drop the
- * oldest, refuse the new), heap caps, the wait modes (none, timed, forever), lifecycle
+ * Coverage by configuration: depth (validation, 1, 2, 3, 10, 32, 64), full policy (drop
+ * the oldest, refuse the new) with and without a droppable callback, free_item custom
+ * and default, add_front, heap caps, the wait modes (none, timed, forever), lifecycle
  * (cleanup, deinit, repeat init) and several producers against one consumer.
  * deinit must not race a reader: callers stop their readers first (kvs_media joins
  * its sender thread before it tears the queue down). */
@@ -521,4 +525,257 @@ TEST_CASE("message_queue: concurrency: a small refusing queue loses nothing it a
     TEST_ASSERT_EQUAL(MQ_PRODUCERS * MQ_PER_PRODUCER, received + rejected);
     TEST_ASSERT_GREATER_THAN(0, received);
     TEST_ASSERT_TRUE(in_order);
+}
+
+/* ---- AppRTC's outgoing queue ---- */
+
+typedef struct {
+    int kind;          /* 0 = SDP, 1 = candidate, 2 = other */
+    int seq;
+    char *payload;
+} item_t;
+
+/* AppRTC's configuration (apprtc_signaling.c) */
+#define APPRTC_QUEUE_DEPTH 32
+
+static int s_freed;
+
+static bool is_candidate(const void *data, int len)
+{
+    return len == (int) sizeof(item_t) && ((const item_t *) data)->kind == 1;
+}
+
+static void free_item(void *data)
+{
+    item_t *it = (item_t *) data;
+    free(it->payload);
+    free(it);
+    s_freed++;
+}
+
+static void push(message_queue_t *q, int kind, int seq)
+{
+    item_t *it = calloc(1, sizeof(*it));
+    TEST_ASSERT_NOT_NULL(it);
+    it->kind = kind;
+    it->seq = seq;
+    it->payload = strdup("payload");
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_add(q, it, (int) sizeof(*it)));
+}
+
+static item_t *pop(message_queue_t *q)
+{
+    void *data = NULL;
+    int len = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_get_next(q, &data, &len));
+    return (item_t *) data;
+}
+
+static void setup(message_queue_t *q, bool with_predicate)
+{
+    const message_queue_config_t cfg = {
+        .depth = APPRTC_QUEUE_DEPTH,
+        .full_policy = MESSAGE_QUEUE_FULL_DROP_OLDEST,
+    };
+    memset(q, 0, sizeof(*q));
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_init_with_config(q, &cfg));
+    q->droppable = with_predicate ? is_candidate : NULL;
+    q->free_item = free_item;
+    s_freed = 0;
+}
+
+TEST_CASE("message_queue: AppRTC: a full queue drops the oldest candidate, not the answer", "[message_queue]")
+{
+    message_queue_t q;
+    setup(&q, true);
+
+    push(&q, 0, 0);                                    /* the answer */
+    for (int i = 1; i < APPRTC_QUEUE_DEPTH; i++) {
+        push(&q, 1, i);                                /* trickled candidates */
+    }
+    push(&q, 1, APPRTC_QUEUE_DEPTH);                  /* overflows */
+    TEST_ASSERT_EQUAL(APPRTC_QUEUE_DEPTH, message_queue_get_count(&q));
+    TEST_ASSERT_EQUAL(1, s_freed);                     /* the dropped one, payload included */
+
+    item_t *it = pop(&q);
+    TEST_ASSERT_EQUAL(0, it->kind);                    /* the answer survived, still first */
+    free_item(it);
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(2, it->seq);                     /* candidate 1 was the one dropped */
+    free_item(it);
+
+    s_freed = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+    TEST_ASSERT_EQUAL(APPRTC_QUEUE_DEPTH - 2, s_freed);   /* the rest freed through the callback */
+}
+
+TEST_CASE("message_queue: AppRTC: with nothing droppable, the oldest message is dropped", "[message_queue]")
+{
+    message_queue_t q;
+    setup(&q, false);
+
+    for (int i = 0; i < APPRTC_QUEUE_DEPTH + 1; i++) {
+        push(&q, 2, i);
+    }
+    TEST_ASSERT_EQUAL(1, s_freed);
+    item_t *it = pop(&q);
+    TEST_ASSERT_EQUAL(1, it->seq);
+    free_item(it);
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+}
+
+TEST_CASE("message_queue: AppRTC: a message put back goes out first", "[message_queue]")
+{
+    message_queue_t q;
+    setup(&q, true);
+
+    push(&q, 0, 0);
+    push(&q, 1, 1);
+    item_t *it = pop(&q);
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_add_front(&q, it, (int) sizeof(*it)));
+    TEST_ASSERT_EQUAL(2, message_queue_get_count(&q));
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(0, it->seq);                     /* still ahead of the candidate */
+    free_item(it);
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+}
+
+TEST_CASE("message_queue: a refused message is not freed, purged ones go through free_item", "[message_queue]")
+{
+    const message_queue_config_t cfg = {
+        .depth = 3,
+        .full_policy = MESSAGE_QUEUE_FULL_REJECT_NEW,
+    };
+    message_queue_t q;
+    memset(&q, 0, sizeof(q));
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_init_with_config(&q, &cfg));
+    q.free_item = free_item;
+    s_freed = 0;
+
+    for (int i = 0; i < 3; i++) {
+        push(&q, 2, i);
+    }
+    item_t *it = calloc(1, sizeof(*it));
+    TEST_ASSERT_NOT_NULL(it);
+    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, message_queue_add(&q, it, (int) sizeof(*it)));
+    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, message_queue_add_front(&q, it, (int) sizeof(*it)));
+    TEST_ASSERT_EQUAL(0, s_freed);                     /* the caller still owns it */
+    free(it);
+    TEST_ASSERT_EQUAL(3, message_queue_get_count(&q));
+
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+    TEST_ASSERT_EQUAL(3, s_freed);                     /* teardown frees what is left */
+}
+
+static bool never_droppable(const void *data, int len)
+{
+    (void) data;
+    (void) len;
+    return false;
+}
+
+TEST_CASE("message_queue: drop policy: nothing droppable falls back to the oldest", "[message_queue]")
+{
+    message_queue_t q;
+    setup(&q, false);
+    q.droppable = never_droppable;
+
+    for (int i = 0; i < APPRTC_QUEUE_DEPTH + 1; i++) {
+        push(&q, 0, i);
+    }
+    TEST_ASSERT_EQUAL(1, s_freed);
+    item_t *it = pop(&q);
+    TEST_ASSERT_EQUAL(1, it->seq);
+    free_item(it);
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+}
+
+TEST_CASE("message_queue: drop policy: each dropped item is freed exactly once", "[message_queue]")
+{
+    message_queue_t q;
+    setup(&q, true);
+
+    push(&q, 0, 0);                                    /* the answer, never droppable */
+    for (int i = 1; i < APPRTC_QUEUE_DEPTH + 5; i++) {
+        push(&q, 1, i);                                /* 5 more than fit */
+    }
+    TEST_ASSERT_EQUAL(5, s_freed);
+    TEST_ASSERT_EQUAL(APPRTC_QUEUE_DEPTH, message_queue_get_count(&q));
+    item_t *it = pop(&q);
+    TEST_ASSERT_EQUAL(0, it->seq);
+    free_item(it);
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(6, it->seq);                     /* candidates 1-5 were the ones dropped */
+    free_item(it);
+
+    s_freed = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_cleanup(&q));
+    TEST_ASSERT_EQUAL(APPRTC_QUEUE_DEPTH - 2, s_freed); /* the rest, through the callback */
+    push(&q, 1, 100);                                  /* reusable after cleanup */
+    TEST_ASSERT_EQUAL(1, message_queue_get_count(&q));
+    s_freed = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+    TEST_ASSERT_EQUAL(1, s_freed);
+}
+
+TEST_CASE("message_queue: drop policy: the default free handles dropped and purged items", "[message_queue]")
+{
+    /* No free_item: the queue free()s; items here own no separate payload */
+    message_queue_t q;
+    memset(&q, 0, sizeof(q));
+    const message_queue_config_t cfg = { .depth = 2, .full_policy = MESSAGE_QUEUE_FULL_DROP_OLDEST };
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_init_with_config(&q, &cfg));
+    for (int i = 0; i < 5; i++) {
+        add_seq(&q, i);                                /* 3 dropped and freed */
+    }
+    TEST_ASSERT_EQUAL(3, pop_seq(&q));
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q)); /* 4 freed here */
+}
+
+TEST_CASE("message_queue: add_front on a full queue follows the full policy", "[message_queue]")
+{
+    /* Drop-oldest: room is made the same way as for an add (the oldest droppable one
+     * goes), then the message goes to the head, as AppRTC's drain puts one back */
+    message_queue_t q;
+    setup(&q, true);
+    push(&q, 0, 0);                                    /* answer */
+    for (int i = 1; i < APPRTC_QUEUE_DEPTH; i++) {
+        push(&q, 1, i);
+    }
+    item_t *back = calloc(1, sizeof(*back));
+    TEST_ASSERT_NOT_NULL(back);
+    back->kind = 0;
+    back->seq = 99;
+    back->payload = strdup("payload");
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_add_front(&q, back, (int) sizeof(*back)));
+    TEST_ASSERT_EQUAL(1, s_freed);                     /* candidate 1 */
+    TEST_ASSERT_EQUAL(APPRTC_QUEUE_DEPTH, message_queue_get_count(&q));
+    item_t *it = pop(&q);
+    TEST_ASSERT_EQUAL(99, it->seq);
+    free_item(it);
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(0, it->seq);
+    free_item(it);
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(2, it->seq);
+    free_item(it);
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
+
+    /* Without a droppable callback the oldest goes */
+    setup(&q, false);
+    for (int i = 0; i < APPRTC_QUEUE_DEPTH; i++) {
+        push(&q, 2, i);
+    }
+    back = calloc(1, sizeof(*back));
+    TEST_ASSERT_NOT_NULL(back);
+    back->seq = 99;
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_add_front(&q, back, (int) sizeof(*back)));
+    TEST_ASSERT_EQUAL(1, s_freed);
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(99, it->seq);
+    free_item(it);
+    it = pop(&q);
+    TEST_ASSERT_EQUAL(1, it->seq);                     /* 0 was dropped */
+    free_item(it);
+    TEST_ASSERT_EQUAL(ESP_OK, message_queue_deinit(&q));
 }

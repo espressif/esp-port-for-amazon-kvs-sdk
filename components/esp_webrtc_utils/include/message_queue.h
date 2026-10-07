@@ -64,6 +64,11 @@ typedef struct {
     uint32_t caps;
     /* Lock and wake-up; NULL until initialised, so an owner can test it */
     struct message_queue_sync *mutex;
+    /* Optional, set by the owner after init. droppable: which item may be shed when
+     * the queue is full (the oldest such one goes; the oldest item when none is).
+     * free_item: how to free an item the queue discards (default: free()). */
+    bool (*droppable)(const void *data, int len);
+    void (*free_item)(void *data);
 } message_queue_t;
 
 /**
@@ -118,8 +123,8 @@ esp_err_t message_queue_deinit(message_queue_t *queue);
  * @brief Add a message to the queue
  *
  * Never waits for room. When the queue is full, MESSAGE_QUEUE_FULL_DROP_OLDEST frees the
- * oldest message and adds this one; MESSAGE_QUEUE_FULL_REJECT_NEW returns ESP_ERR_NO_MEM
- * and the caller keeps @p data.
+ * oldest droppable message (the oldest one when none is) and adds this one;
+ * MESSAGE_QUEUE_FULL_REJECT_NEW returns ESP_ERR_NO_MEM and the caller keeps @p data.
  *
  * @param queue Pointer to the message queue
  * @param data Pointer to the message data (the queue takes ownership on ESP_OK)
@@ -127,6 +132,19 @@ esp_err_t message_queue_deinit(message_queue_t *queue);
  * @return esp_err_t ESP_OK on success, ESP_ERR_NO_MEM when full and rejected, error code otherwise
  */
 esp_err_t message_queue_add(message_queue_t *queue, const void *data, int len);
+
+/**
+ * @brief Put a message back at the head of the queue
+ *
+ * For a message taken with message_queue_get_next() that could not be sent: it goes
+ * out first next time. Makes room the same way as message_queue_add().
+ *
+ * @param queue Pointer to the message queue
+ * @param data Pointer to the message data (the queue takes ownership on ESP_OK)
+ * @param len Length of the message data
+ * @return esp_err_t ESP_OK on success, ESP_ERR_NO_MEM when full and rejected, error code otherwise
+ */
+esp_err_t message_queue_add_front(message_queue_t *queue, const void *data, int len);
 
 /**
  * @brief Get the next message from the queue without waiting

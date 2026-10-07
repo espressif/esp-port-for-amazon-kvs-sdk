@@ -48,6 +48,7 @@
 
 typedef struct {
     bool     terminate_flag;    /* already flagged for teardown (being reclaimed) */
+    bool     awaiting_answer;   /* offerer whose offer has no answer yet (no peer has joined) */
     bool     ever_connected;    /* latched: reached CONNECTED at least once */
     bool     ever_sent;         /* send counter advanced at least once while connected */
     bool     ever_recvd;        /* receive counter advanced at least once while connected */
@@ -57,6 +58,7 @@ typedef struct {
 } kvs_liveness_health_t;
 
 typedef struct {
+    uint64_t answer_deadline;  /* an offerer's offer may wait this long for its answer */
     uint64_t connect_deadline; /* must reach CONNECTED within this of offer_time */
     uint64_t stall_deadline;   /* once connected, evict if send bytes flat this long */
 } kvs_liveness_cfg_t;
@@ -72,8 +74,11 @@ extern "C" {
  *    stall_deadline, or
  *  - was CONNECTED, has never sent, but has received at least once, and
  *    bytesReceived has been flat past stall_deadline.
- * A session already flagged for teardown returns false (it is being reclaimed),
- * as does a connected session that has never moved traffic (nothing to judge).
+ * An offerer still waiting for its answer is judged on answer_deadline from
+ * offer_time instead (in a room nobody has joined yet the offer is pending, not
+ * dead); once answered, offer_time is the answer time and the connect deadline
+ * applies. False for a session already flagged for teardown (it is being
+ * reclaimed) and for a connected session that has never moved traffic.
  * Timestamps ahead of `now` (a backward wall-clock step) also return false
  * rather than underflowing into an immediate eviction.
  */

@@ -66,6 +66,12 @@ static void apprtc_message_handler(const char *message, size_t message_len, void
         return;
     }
 
+    /* Outgoing messages are tagged with this client's id, and the room has one remote
+     * peer: tag every incoming one the same way (a browser sends no id, another ESP
+     * peer sends its own), so both directions address the same session. */
+    strncpy(webrtc_msg.peer_client_id, apprtc_signaling_get_peer_key(), APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN);
+    webrtc_msg.peer_client_id[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN] = '\0';
+
     // Call the registered callback
     gAppRtcClientData.on_msg_received(gAppRtcClientData.customData, &webrtc_msg);
 

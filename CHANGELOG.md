@@ -93,6 +93,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **AppRTC:** a WebSocket frame larger than one read (typically an SDP offer or
+  answer) arrives as several events; each was parsed on its own and failed, so the
+  call never connected. Chunks are now reassembled before the frame is handled,
+  for frames up to 128 KB.
+
+- An offer waiting for its answer was evicted by the liveness watchdog after 30 s,
+  so a device-created AppRTC room had to be joined within ~40 s. The new
+  `kvs_peer_connection_set_answer_timeout()` lets an offer wait longer, with the
+  30 s connect deadline running from the answer; esp_camera sets 10 minutes. Other
+  offerers keep the 30 s.
+- AppRTC: a full outgoing queue (the websocket still connecting) dropped its oldest
+  message, which could be the answer. It now drops the oldest ICE candidate and never
+  an offer or answer, and holds 32 messages instead of 10. Dropped and purged
+  messages also leaked their payload. Messages sent while others still wait now
+  queue behind them, so candidates no longer overtake the answer, and a drain that
+  loses the websocket stops instead of spinning. An offer or answer whose send fails
+  while connected gets one more try.
+- AppRTC: events still queued from a replaced websocket (a rejoin, or a connect to
+  another room) are dropped instead of tearing down or feeding the new connection,
+  and the reconnect timer no longer races a disconnect or connect over the client.
+  On an automatic rejoin the server's initiator role now applies instead of the
+  previous one.
+- AppRTC: when the device created the room and sent the offer, the browser's
+  answer was dropped for lack of a matching session, so no media flowed.
 - `app_webrtc_terminate()` called from an app task raced the WebRTC task's own
   teardown, and a terminate with a live session never finished.
 - `signalingMessageReceived()` read uninitialised locals on its NULL-argument

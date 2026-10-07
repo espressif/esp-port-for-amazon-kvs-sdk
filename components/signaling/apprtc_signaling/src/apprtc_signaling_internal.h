@@ -56,6 +56,8 @@ bool is_apprtc_signaling_connected(void);
  */
 char* apprtc_room_id_get(void);
 
+const char *apprtc_signaling_get_peer_key(void);
+
 #ifdef __cplusplus
 }
 #endif

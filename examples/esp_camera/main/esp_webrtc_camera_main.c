@@ -202,6 +202,8 @@ void app_main(void)
 
     // Peer connection interface
     app_webrtc_config.peer_connection_if = kvs_peer_connection_if_get();
+    /* In a room the device creates, its offer waits for someone to join */
+    kvs_peer_connection_set_answer_timeout(10 * 60);
     app_webrtc_config.implementation_config = NULL;
 
     // Media interfaces for bi-directional streaming

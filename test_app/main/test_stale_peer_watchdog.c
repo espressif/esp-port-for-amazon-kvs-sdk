@@ -20,7 +20,8 @@
 
 /* Arbitrary consistent time unit for the tests (firmware uses SDK 100ns ticks). */
 #define TU 1000ULL
-static const kvs_liveness_cfg_t CFG = { .connect_deadline = 20 * TU, .stall_deadline = 10 * TU };
+static const kvs_liveness_cfg_t CFG = { .answer_deadline = 200 * TU, .connect_deadline = 20 * TU,
+                                        .stall_deadline = 10 * TU };
 
 TEST_CASE("liveness: session that never connects is evicted past the connect deadline", "[watchdog]")
 {
@@ -65,6 +66,20 @@ TEST_CASE("liveness: ever_connected is what gates the connect deadline", "[watch
     kvs_liveness_health_t h = { .terminate_flag = false, .ever_connected = true,
                                 .offer_time = 0 };
     TEST_ASSERT_FALSE(kvs_liveness_should_evict(&h, &CFG, 21 * TU));
+}
+
+TEST_CASE("liveness: an offer waiting for its answer gets the answer deadline", "[watchdog]")
+{
+    /* Offerer in a room nobody has joined yet: well past the connect deadline, within the answer one */
+    kvs_liveness_health_t h = { .terminate_flag = false, .awaiting_answer = true,
+                                .ever_connected = false, .offer_time = 0 };
+    TEST_ASSERT_FALSE(kvs_liveness_should_evict(&h, &CFG, 150 * TU));
+    TEST_ASSERT_TRUE(kvs_liveness_should_evict(&h, &CFG, 201 * TU));   /* the answer never came */
+    /* Once answered, the connect deadline runs from the answer */
+    h.awaiting_answer = false;
+    h.offer_time = 1000 * TU;
+    TEST_ASSERT_FALSE(kvs_liveness_should_evict(&h, &CFG, 1000 * TU + 19 * TU));
+    TEST_ASSERT_TRUE(kvs_liveness_should_evict(&h, &CFG, 1000 * TU + 21 * TU));
 }
 
 TEST_CASE("liveness: an already-terminating session is not re-evicted", "[watchdog]")

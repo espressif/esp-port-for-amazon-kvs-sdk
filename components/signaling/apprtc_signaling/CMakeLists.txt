@@ -3,6 +3,7 @@ idf_component_register(
         "src/apprtc_signaling.c"
         "src/apprtc_signaling_internal.h"
         "src/apprtc_signaling_interface.c"
+        "src/apprtc_send_order.c"
         "src/signaling_conversion.c"
     INCLUDE_DIRS "include"
     REQUIRES esp_http_client

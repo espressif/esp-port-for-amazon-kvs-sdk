@@ -157,6 +157,32 @@ static void sync_wait_for_message(message_queue_t *queue, uint32_t wait_ms)
 #endif
 }
 
+/* Index of the message to drop when full: the oldest droppable one (for AppRTC an ICE
+ * candidate, never an offer or answer), else the oldest */
+static int drop_index(const message_queue_t *queue)
+{
+    if (queue->droppable != NULL) {
+        for (int i = 0; i < queue->count; i++) {
+            if (queue->droppable(queue->messages[i].data, queue->messages[i].len)) {
+                return i;
+            }
+        }
+    }
+    return 0;
+}
+
+static void free_item(const message_queue_t *queue, void *data)
+{
+    if (data == NULL) {
+        return;
+    }
+    if (queue->free_item != NULL) {
+        queue->free_item(data);
+    } else {
+        free(data);
+    }
+}
+
 esp_err_t message_queue_init(message_queue_t *queue)
 {
     const message_queue_config_t config = {
@@ -226,10 +252,8 @@ esp_err_t message_queue_cleanup(message_queue_t *queue)
 
     sync_lock(queue);
     for (int i = 0; i < queue->count; i++) {
-        if (queue->messages[i].data != NULL) {
-            free(queue->messages[i].data);
-            queue->messages[i].data = NULL;
-        }
+        free_item(queue, queue->messages[i].data);
+        queue->messages[i].data = NULL;
     }
     queue->count = 0;
     sync_unlock(queue);
@@ -254,6 +278,53 @@ esp_err_t message_queue_deinit(message_queue_t *queue)
     return ESP_OK;
 }
 
+/* Make room for one more message: called with the lock held. False when the queue is
+ * full and refuses new messages. */
+static bool make_room(message_queue_t *queue)
+{
+    if (queue->count < queue->depth) {
+        return true;
+    }
+    if (queue->full_policy == MESSAGE_QUEUE_FULL_REJECT_NEW) {
+        /* The caller keeps the message and decides what to do; no log here, the
+         * media paths count and rate-limit their own */
+        return false;
+    }
+    int victim = drop_index(queue);
+    ESP_LOGE(TAG, "Queue is full, dropping queued message %d", victim);
+
+    free_item(queue, queue->messages[victim].data);
+
+    // Shift the later messages down
+    for (int i = victim; i < queue->depth - 1; i++) {
+        queue->messages[i] = queue->messages[i + 1];
+    }
+    queue->count--;
+    return true;
+}
+
+esp_err_t message_queue_add_front(message_queue_t *queue, const void *data, int len)
+{
+    if (queue == NULL || data == NULL || len <= 0 || queue->mutex == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    sync_lock(queue);
+    if (!make_room(queue)) {
+        sync_unlock(queue);
+        return ESP_ERR_NO_MEM;
+    }
+    for (int i = queue->count; i > 0; i--) {
+        queue->messages[i] = queue->messages[i - 1];
+    }
+    queue->messages[0].data = (void *)data;
+    queue->messages[0].len = len;
+    queue->count++;
+    sync_signal(queue);
+    sync_unlock(queue);
+    return ESP_OK;
+}
+
 esp_err_t message_queue_add(message_queue_t *queue, const void *data, int len)
 {
     esp_err_t ret = ESP_OK;
@@ -271,29 +342,9 @@ esp_err_t message_queue_add(message_queue_t *queue, const void *data, int len)
 
     sync_lock(queue);
 
-    // Check if queue is full
-    if (queue->count >= queue->depth) {
-        if (queue->full_policy == MESSAGE_QUEUE_FULL_REJECT_NEW) {
-            /* The caller keeps the message and decides what to do; no log here, the
-             * media paths count and rate-limit their own */
-            sync_unlock(queue);
-            return ESP_ERR_NO_MEM;
-        }
-
-        ESP_LOGE(TAG, "Queue is full, dropping oldest message");
-
-        // Free the oldest message
-        if (queue->messages[0].data != NULL) {
-            free(queue->messages[0].data);
-        }
-
-        // Shift all messages down
-        for (int i = 0; i < queue->depth - 1; i++) {
-            queue->messages[i] = queue->messages[i + 1];
-        }
-
-        // Decrement count to make room for new message
-        queue->count--;
+    if (!make_room(queue)) {
+        sync_unlock(queue);
+        return ESP_ERR_NO_MEM;
     }
 
     // Add to queue. The queue takes ownership of `data` and free()s it on
