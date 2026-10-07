@@ -191,7 +191,7 @@ def run_pair(host_wait_for: str, emu_seconds: int = 900,
              wifi_ssid: str = "myssid", wifi_password: str = "mypassword",
              cp_wait_for: str = None, cp_settle_seconds: int = 240,
              while_running=None, wake_port: int = 0,
-             host_spec: tuple = None) -> Run:
+             host_spec: tuple = None, cp_spec: tuple = None) -> Run:
     """Start a fresh CP, then a fresh host, and wait until `host_wait_for`
     appears in the host log or the wall clock runs out.
 
@@ -211,7 +211,7 @@ def run_pair(host_wait_for: str, emu_seconds: int = 900,
     """
     assert EMU.is_file(), \
         "esp-emu not found: set ESP_EMU to the binary or put esp-emu on PATH"
-    cp_img, cp_elf = build(CP)
+    cp_img, cp_elf = build(cp_spec or CP)
     host_img, host_elf = build(host_spec or HOST)
 
     # Kept, not temp: the two logs are the only record of why an assertion failed.

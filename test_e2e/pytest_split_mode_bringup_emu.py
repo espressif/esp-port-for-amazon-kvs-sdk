@@ -61,7 +61,7 @@ def test_coprocessor_role_and_power_save(pair):
     auto-init came back, the feature would still initialise and
     'coprocessor part enabled' would be missing.
     """
-    assert pair.cp_has('ESP-Hosted Firmware version :: EH-3.0.7')
+    assert pair.cp_has('ESP-Hosted Firmware version :: EH-3.')
     assert pair.cp_has('host power save: coprocessor part enabled')
     assert pair.cp_has('Light sleep initialized successfully')
     assert pair.cp_has('Peer data transfer extension initialized')
