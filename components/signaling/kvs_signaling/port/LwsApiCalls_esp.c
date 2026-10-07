@@ -58,7 +58,7 @@
 #define HTTP_RESPONSE_MAX_BUFFER_SIZE (4 * 1024) // Buffer to hold complete response
 #define HTTP_RESPONSE_BUFFER_SIZE (1 * 1024) // Internal response buffer for http client
 #define HTTP_REQUEST_BUFFER_SIZE (4 * 1024) // Request buffer for http client
-#define HTTP_REQUEST_TIMEOUT_MS   5000 // 5 seconds
+#define HTTP_REQUEST_TIMEOUT_MS   15000 // 15 seconds
 
 /* WebSocket connect timeout. On an ESP32-C6 the TLS handshake plus the upgrade
  * takes about 9 s, so 10 s gave up on connects that were about to complete.

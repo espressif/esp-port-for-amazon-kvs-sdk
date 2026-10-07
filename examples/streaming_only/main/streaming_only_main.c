@@ -157,9 +157,21 @@ static void on_data_channel_message(uint64_t custom_data, void *p_data_channel, 
 #define GOT_IP_BIT BIT0
 
 // WiFi event handler
+#define WIFI_RECONNECT_DELAY_MS 2000
+
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
 {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        /* The host drives the connection, so nothing retries unless it does. */
+        const wifi_event_sta_disconnected_t *d = event_data;
+        ESP_LOGW(TAG, "WiFi disconnected (reason %u), reconnecting", d->reason);
+        xEventGroupClearBits(s_wifi_event_group, GOT_IP_BIT);
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_DELAY_MS));
+        esp_wifi_connect();
+        return;
+    }
+
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         memset(wifi_ip, 0, sizeof(wifi_ip)/sizeof(wifi_ip[0]));
@@ -231,6 +243,7 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL));
 
     ESP_ERROR_CHECK(esp_wifi_start());
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -241,7 +254,7 @@ static void wifi_init_sta(void)
             GOT_IP_BIT,
             pdFALSE,
             pdFALSE,
-            pdMS_TO_TICKS(20000));
+            pdMS_TO_TICKS(60000));
 
     if (bits & GOT_IP_BIT) {
         ESP_LOGI(TAG, "Connected to WiFi");

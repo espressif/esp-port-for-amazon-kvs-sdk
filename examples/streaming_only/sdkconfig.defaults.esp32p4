@@ -180,16 +180,6 @@ CONFIG_ESP_HOSTED_HOST_FEAT_WIFI_STA_AUTO_CONNECT_ON_START=n
 CONFIG_ESP_HOSTED_HOST_FEAT_WIFI_STA_AUTO_RECONNECT_ON_DISCONNECT=n
 
 # Remote Wi-Fi buffering and BA windows for split throughput.
-CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=20
-CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=32
-# The example also sets CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM. It has no effect
-# unless the remote Wi-Fi TX buffers are dynamic, and this build uses static
-# ones (CONFIG_WIFI_RMT_STATIC_TX_BUFFER). Switching the buffer model is a
-# memory-layout change this migration does not make.
-CONFIG_WIFI_RMT_AMPDU_TX_ENABLED=y
-CONFIG_WIFI_RMT_TX_BA_WIN=16
-CONFIG_WIFI_RMT_AMPDU_RX_ENABLED=y
-CONFIG_WIFI_RMT_RX_BA_WIN=16
 
 # lwIP. The old CONFIG_TCP_* names below were 2.x-era and never applied, so the
 # stack had been running on IDF defaults.

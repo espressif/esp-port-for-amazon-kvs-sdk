@@ -1,0 +1,43 @@
+# ESP32-P4 + ESP32-C5 core board — co-processor (C5) side.
+#
+# Pairs with examples/streaming_only/sdkconfig.defaults.p4_c5_core_board.esp32p4.
+# Both halves select the same board symbol; esp_hosted resolves it to each
+# side's own GPIO map, so the SDIO lines and the host-wake GPIO cannot drift
+# apart. Mirrors esp_hosted's
+# examples/power_save/host+cp/network_split__host_deep_sleep_cp_light_sleep/cp
+# overlay of the same name.
+CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
+
+#
+# No PSRAM on this board's C5. sdkconfig.defaults.esp32c5 turns SPIRAM on for
+# every C5, which is a board fact stated in a per-target default; here it aborts
+# the co-processor at boot before the SDIO link can come up:
+#
+#   E quad_psram: PSRAM chip is not connected, or wrong PSRAM line mode
+#   abort() was called at PC 0x42000901
+#
+# and the host then reports "sdmmc_card_init failed", which points at the bus
+# rather than at the real cause.
+#
+# CONFIG_SPIRAM is not set
+
+# Without PSRAM the C5 has about 235 KB of internal RAM for the Wi-Fi driver,
+# lwIP, ESP-Hosted, TLS and KVS signaling together. A TLS session holds a 16 KB
+# input buffer for its whole life, which left SigV4 signing short of memory:
+#
+#   signAwsRequestInfo(): operation returned status code: 0x00000004
+#
+# The dynamic buffer frees that memory between records. sdkconfig.defaults asks
+# for it already, but MBEDTLS_DYNAMIC_BUFFER depends on !MBEDTLS_SSL_PROTO_DTLS
+# and the same file enables DTLS, so the request was dropped without a warning.
+# This co-processor runs signaling over TLS only; DTLS-SRTP belongs to the host,
+# which holds the peer connection. Turn DTLS off here so the request takes.
+CONFIG_MBEDTLS_SSL_PROTO_DTLS=n
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+
+# This co-processor carries signaling only: small HTTPS requests and a WebSocket,
+# never bulk transfer. The stock 11520-byte send buffer and receive window cost
+# peak memory that the TLS handshake needs more.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5760
+CONFIG_LWIP_TCP_WND_DEFAULT=5760

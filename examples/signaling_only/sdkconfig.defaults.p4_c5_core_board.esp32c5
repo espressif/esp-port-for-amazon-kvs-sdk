@@ -9,14 +9,4 @@
 CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
 
 #
-# No PSRAM on this board's C5. sdkconfig.defaults.esp32c5 turns SPIRAM on for
-# every C5, which is a board fact stated in a per-target default; here it aborts
-# the co-processor at boot before the SDIO link can come up:
-#
-#   E quad_psram: PSRAM chip is not connected, or wrong PSRAM line mode
-#   abort() was called at PC 0x42000901
-#
-# and the host then reports "sdmmc_card_init failed", which points at the bus
-# rather than at the real cause.
-#
-# CONFIG_SPIRAM is not set
+# This board's C5 carries PSRAM, so sdkconfig.defaults.esp32c5 keeps SPIRAM on.

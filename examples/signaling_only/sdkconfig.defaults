@@ -120,6 +120,14 @@ CONFIG_ENABLE_DATA_CHANNEL=n
 #
 # CONFIG_SLAVE_LWIP_ENABLED=y   # no Kconfig defines this in 2.x or 3.x
 CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT=y
+# Packets that match no rule go to the host. esp_hosted defaults them to the
+# co-processor. Here the co-processor runs only signaling, whose sockets sit in
+# its own port range and still match. The host runs WebRTC: inbound DNS and
+# STUN/TURN replies and media go to its ephemeral ports, which match no rule.
+# With the co-processor default, the host saw 6 packets instead of 248, DNS
+# never resolved and createIceAgent() failed with
+# STATUS_RESOLVE_HOSTNAME_FAILED.
+CONFIG_ESP_HOSTED_DEFAULT_NETWORK_STACK_HOST=y
 CONFIG_ESP_HOSTED_CP_FEAT_WIFI=y
 CONFIG_ESP_HOSTED_CP_FEAT_BT=n
 

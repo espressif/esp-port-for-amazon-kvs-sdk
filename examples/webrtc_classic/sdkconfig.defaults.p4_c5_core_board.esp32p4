@@ -1,15 +1,13 @@
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
 #
-# Chip revision: rev >= 3 silicon (the P4X-C5 core board carries the latest P4).
-# Not optional -- esp_audio_codec v2.6+ refuses to build for P4 < 3.0
-# ("requires ESP32-P4 chip version >= 3.0"), so a rev < 3 image does not
-# compile at all. Revisions >= 3.0 and < 3.0 are also mutually exclusive: the
-# wrong one dies in the second-stage bootloader with no message. For genuinely
-# older silicon, pin esp_audio_codec < 2.6 as well as flipping these back.
+# Chip revision: this board carries a P4 below rev 3. The P4X-C5 core board
+# carries rev >= 3.1 and needs CONFIG_ESP32P4_REV_MIN_301=y with
+# SELECTS_REV_LESS_V3 off. The two are mutually exclusive: an image built for
+# the wrong one dies in the second-stage bootloader with no message.
 #
-# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
-CONFIG_ESP32P4_REV_MIN_301=y
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_0=y
 
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
