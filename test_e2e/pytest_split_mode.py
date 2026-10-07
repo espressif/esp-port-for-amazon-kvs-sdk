@@ -48,19 +48,6 @@ PEER_STATE_CONNECTED = 3
 SLAVE_BOOT_TIMEOUT = 180
 
 
-def _slave(pattern):
-    """Match a C6 line, re-printed by the P4 on the C6's behalf.
-
-    Both chips' output lands on one console, tagged by the slave_flasher monitor:
-    the C6's lines carry "[SLAVE]" and the P4's own carry "[HOST]", each wrapped in
-    ANSI colour. Anchoring on the tag is what stops a C6 assertion being satisfied
-    by a P4 line that logs the same text, and vice versa.
-    """
-    if isinstance(pattern, str):
-        pattern = re.escape(pattern.encode())
-    return re.compile(rb'\[SLAVE\].*?' + pattern)
-
-
 # Whether the P4 tags its own lines with [HOST]. Only the custom_vprintf that
 # streaming_only installs under CONFIG_SLAVE_FLASHER_ENABLE adds the tag, because
 # only then does the C6's log share the P4's console. Set per test from the build.
@@ -81,7 +68,8 @@ def _host(pattern):
     With the slave flasher the C6's log is re-printed on the P4's console, and
     anchoring on the [HOST] tag is what stops a P4 assertion being satisfied by a
     C6 line that logs the same text. Without it (the v12/v16 EV-board overlays)
-    the P4 prints no tag and its console carries only its own log.
+    the P4 prints no tag and its console carries only its own log; the C6 side is
+    then read from --cp-port by the cp_console fixture.
     """
     if isinstance(pattern, str):
         pattern = re.escape(pattern.encode())
@@ -119,84 +107,76 @@ def _write_slave(dut, command, attempts=4):
 @pytest.mark.parametrize('app_path', [APP_PATH], indirect=True)
 @idf_parametrize('target', ['esp32p4'], indirect=['target'])
 def test_split_mode_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fragment,
-                              kvs_channel, kvs_region, channel_matches_firmware) -> None:
+                              kvs_channel, kvs_region, channel_matches_firmware,
+                              aws_creds_usable, cp_console) -> None:
     ssid, password = wifi_creds
     allow_relay = request.config.getoption('--allow-relay')
     media_timeout = request.config.getoption('--media-timeout')
     connect_timeout = request.config.getoption('--connect-timeout')
     logger.info('device credential fragment (built into the C6): %s', creds_fragment)
 
-    # -- Phase 1: P4 boots and the C6 comes up behind it -----------------------
+    # Phase 1: P4 boots, C6 comes up behind it.
     _expect(dut, _host('ESP32 WebRTC Streaming Example'), BOOT_TIMEOUT, 'P4 boot')
-    # Any [SLAVE] line proves both that the C6 is running and that the forwarding
-    # path works. Without it the C6-side assertions would all fail identically,
-    # which tells you nothing about which half broke.
-    _expect(dut, re.compile(rb'\[SLAVE\]'), SLAVE_BOOT_TIMEOUT,
-            'C6 log forwarding (is CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR=y?)')
-    # -- Phase 2: the C6 reaches AWS ------------------------------------------
-    # Wait on the *last* C6 milestone and check the earlier ones by scanning the log
-    # afterwards. Consuming expect() calls in a fixed order cannot work here: the P4's
-    # bridge lines land ~13 s into boot while the C6's Wi-Fi timing depends on whether
-    # it booted already-provisioned, so either ordering skips past the other chip's
-    # line and fails on something that did happen.
+    # Any C6 line proves the C6 runs and that we can see it. Which stream that is
+    # depends on the host build: see the cp_console fixture.
+    _expect(cp_console.dut, cp_console.anchor(rb'I \(\d+\)'), SLAVE_BOOT_TIMEOUT,
+            f'C6 log via {cp_console.source}')
+    # Phase 2: the C6 reaches AWS.
+    # Wait on the last C6 milestone, then scan back. Ordered expect() cannot
+    # work: the two chips interleave differently each boot.
     #
-    # Do not provision unconditionally. wifi-set restarts the station, and on a C6 that
-    # was already connected that tears down a working signaling session -- the observed
-    # recovery was 66 s of TLS retries, longer than the budget this test allows. So
-    # provision only when the C6 does not get there by itself.
-    if not _seen(dut, _slave('Signaling connected successfully'), SLAVE_BOOT_TIMEOUT):
-        logger.info('C6 did not reach signaling on its own; provisioning over write_slave')
-        _write_slave(dut, f'wifi-set {ssid} {password}')
-        _expect(dut, _slave('Signaling connected successfully'), connect_timeout * 2,
-                'C6 signaling connected after wifi-set')
+    # Provision only if the C6 does not get there alone: wifi-set restarts the
+    # station, costing a connected C6 66 s of TLS retries.
+    if not _seen(cp_console.dut, cp_console.anchor('Signaling connected successfully'),
+                 SLAVE_BOOT_TIMEOUT):
+        logger.info('C6 did not reach signaling on its own; provisioning it')
+        if cp_console.uses_write_slave:
+            _write_slave(dut, f'wifi-set {ssid} {password}')
+        else:
+            cp_console.write(f'wifi-set {ssid} {password}')
+        _expect(cp_console.dut, cp_console.anchor('Signaling connected successfully'),
+                connect_timeout * 2, 'C6 signaling connected after wifi-set')
 
-    # -- Phase 3: everything that had to happen to get here --------------------
-    ip = _in_log(dut, _slave(rb'(?:Got IP|sta ip): (\d+\.\d+\.\d+\.\d+)'))
-    assert ip, 'the C6 reached signaling but never logged an IP -- log forwarding broke?'
+    # Phase 3: everything that had to happen to get here.
+    ip = _in_log(cp_console.dut, cp_console.anchor(rb'(?:Got IP|sta ip): (\d+\.\d+\.\d+\.\d+)'))
+    assert ip, 'the C6 reached signaling but never logged an IP -- did we lose its console?'
     logger.info('C6 IP: %s', ip.group(1).decode())
     assert _in_log(dut, _host('Bridge signaling client connected')), \
         'the P4 never joined the bridge, so an offer could not reach it'
     assert _in_log(dut, _host('READY signal sent successfully')), \
         'the P4 never told the C6 it can accept offers'
 
-    assert_signaling_walk(dut, SIGNALING_STATE_WALK, 'C6 signaling state walk',
-                          slave=True)
+    # slave= anchors on the [SLAVE] tag, which exists only when the P4 forwards.
+    assert_signaling_walk(cp_console.dut, SIGNALING_STATE_WALK, 'C6 signaling state walk',
+                          slave=cp_console.uses_write_slave)
 
-    # -- Phase 4: viewer -------------------------------------------------------
+    # Phase 4: viewer.
     viewer = KvsViewer(kvs_channel, kvs_region, credentials=aws_creds,
                        duration_s=media_timeout, connect_timeout_s=connect_timeout)
     result = run_viewer(viewer)
     logger.info('viewer result: %s', result.summary())
 
     if not result.answer_received:
-        # Distinguish "the P4 ignored a delivered offer" from "the offer never got
-        # there". The C6's KVS WebSocket does drop (esp_transport_read ... errno=113),
-        # and when it does the offer is lost in transit -- a different fault from the
-        # peer connection failing, and misreporting it sends you debugging the P4.
-        dropped = _in_log(dut, _slave(rb'esp_transport_read\(\) failed'))
+        # Separates "the P4 ignored the offer" from "the offer never arrived".
+        # The C6's KVS WebSocket does drop (esp_transport_read ... errno=113).
+        dropped = _in_log(cp_console.dut, cp_console.anchor(rb'esp_transport_read\(\) failed'))
         hint = (' -- the C6 lost its KVS WebSocket, so the offer never reached the '
                 'device; this is a signaling drop, not a peer connection failure'
                 if dropped else '')
         raise AssertionError(f'no answer came back{hint}: {result.summary()}')
     assert result.video_packets > 0, f'no video RTP reached the viewer: {result.summary()}'
-    # Not every P4 board has an audio codec -- the P4+C5 core board has none, and the
-    # firmware says so and streams video only. Asserting audio there fails a device
-    # that is behaving correctly, so take the device's own word for what it can do.
+    # Not every P4 board has an audio codec. Take the device's own word for it.
     if _in_log(dut, _host('Audio capture not available')):
         logger.warning('board has no audio capture; audio RTP not asserted')
     else:
         assert result.audio_packets > 0, \
             f'no audio RTP reached the viewer: {result.summary()}'
 
-    # -- Phase 5: the offer crossed the bridge and the P4 served it ------------
-    # This is the split-mode-specific part: the offer arrived on the C6, was queued
-    # and flushed over the bridge, and the P4 answered it.
-    #
-    # Order matters and is not the obvious one -- taken from a real session:
+    # Phase 5: the offer crossed the bridge and the P4 served it.
+    # Order is not the obvious one, taken from a real session:
     #   Sent Answer -> Selected pair -> state=3 -> Media started -> Peer Connected
-    # Of the event cases streaming_only has, only "Sent Answer" and "Peer Connected"
-    # are ever raised; RECEIVED_OFFER and STREAMING_STARTED are dead on this path,
-    # so media start comes from kvs_webrtc's own wording.
+    # RECEIVED_OFFER and STREAMING_STARTED are dead on this path, so media start
+    # comes from kvs_webrtc's own wording.
     cid = result.client_id
     _expect(dut, _host(rb'\[KVS Event\] Sent Answer\.'), 15,
             'P4 answered over the bridge')
@@ -218,10 +198,12 @@ def test_split_mode_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fr
     _expect(dut, _host(f'Media started for peer={cid}'), 15, 'P4 media started')
     _expect(dut, _host(f'Peer Connected: {cid}'), 15, 'P4 peer connected')
 
-    # Steady-state send rate (CONFIG_KVS_WEBRTC_MEDIA_DIAG_LOG=y in sdkconfig.ci.e2e):
-    # the P4 is pushing frames, not just holding a session.
-    diag = _expect(dut, _host(rb'DIAG frame_cb: send_v_fps=(\d+)'), 10, 'P4 send rate')
-    fps = int(diag.group(1))
+    # Steady-state send rate: the P4 pushes frames, not just holds a session.
+    # The first sample lands before any frame is sent, so it always reads zero.
+    fps, deadline = 0, time.time() + 30
+    while fps == 0 and time.time() < deadline:
+        diag = _expect(dut, _host(rb'DIAG frame_cb: send_v_fps=(\d+)'), 10, 'P4 send rate')
+        fps = int(diag.group(1))
     assert fps > 0, 'P4 reported send_v_fps=0 while the viewer was receiving video'
     logger.info('P4 send_v_fps=%d', fps)
 
@@ -235,10 +217,10 @@ def test_split_mode_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fr
         f'video packet loss {loss:.0%} exceeds --max-video-loss={max_loss:.0%}: '
         f'{result.summary()}')
 
-    # -- Phase 6: nothing was silently dropped ---------------------------------
-    # The adapter frees flushed messages with no retry, so a full queue loses a
-    # viewer's offer outright. It must never happen.
-    assert not _seen(dut, 'Queue full, dropping newest message', 2), \
+    # Phase 6: nothing was silently dropped. The adapter frees flushed messages
+    # with no retry, so a full queue loses an offer outright. It runs on the C6,
+    # so this must watch the C6's stream to mean anything.
+    assert not _seen(cp_console.dut, cp_console.anchor('Queue full, dropping newest message'), 2), \
         'the bridge adapter dropped a signaling message -- an offer can be lost this way'
     # Reported, not asserted -- see the same check in pytest_webrtc_classic.py.
     if _seen(dut, re.compile(rb'\[KVS Event\] Error Event'), 2):

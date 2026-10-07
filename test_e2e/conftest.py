@@ -9,6 +9,8 @@ test_host CI job) stays untouched.
 
 import logging
 import os
+import re
+import time
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,8 @@ def pytest_addoption(parser):
     group = parser.getgroup('kvs-e2e')
     group.addoption('--e2e', action='store_true', default=False,
                     help='run the end-to-end streaming tests (needs hardware, Wi-Fi, AWS)')
+    group.addoption('--emu', action='store_true', default=False,
+                    help='run the emulator tests (needs esp-emu; no hardware, no AWS)')
     group.addoption('--kvs-channel', default=os.getenv('AWS_KVS_CHANNEL_NAME', 'ESP32Channel'),
                     help='KVS signaling channel name the device is configured with')
     group.addoption('--kvs-region', default=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'))
@@ -31,6 +35,14 @@ def pytest_addoption(parser):
                     help='seconds to keep pulling frames once connected')
     group.addoption('--connect-timeout', type=float, default=90.0,
                     help='seconds to wait for signaling + ICE + DTLS')
+    group.addoption('--manual', action='store_true', default=False,
+                    help='run tests marked @pytest.mark.manual. They need a person or an '
+                         'instrument (power meter, rewiring, a phone app), so automation '
+                         'must never pass this.')
+    group.addoption('--cp-port', default=None,
+                    help='Serial port of the co-processor console. Required when the '
+                         'host firmware is built without CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR, '
+                         'i.e. when it does not re-print the CP log with a [SLAVE] prefix.')
     group.addoption('--max-video-loss', type=float, default=1.0,
                     help='fail if inbound video packet loss exceeds this fraction. '
                          'Defaults to 1.0 (report only) because the current baseline '
@@ -40,15 +52,46 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line('markers', 'e2e: end-to-end streaming test, needs real hardware')
+    config.addinivalue_line('markers', 'emu: split-pair test under ESP-EMU, no hardware or AWS')
+    config.addinivalue_line(
+        'markers',
+        'manual: needs a person or an instrument CI does not have (a meter, a '
+        'rewire, a phone app). Never runs in automation, even with --e2e.')
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption('--e2e'):
-        return
-    skip = pytest.mark.skip(reason='needs --e2e (hardware + Wi-Fi + AWS credentials)')
+    # --e2e needs a bench and AWS, --emu needs only esp-emu. Neither by default.
+    skip_manual = pytest.mark.skip(reason='needs --manual (a person or an instrument)')
+    want_manual = config.getoption('--manual')
+    skip_e2e = pytest.mark.skip(reason='needs --e2e (hardware + Wi-Fi + AWS credentials)')
+    skip_emu = pytest.mark.skip(reason='needs --emu (esp-emu; no hardware required)')
+    want_e2e = config.getoption('--e2e')
+    want_emu = config.getoption('--emu')
     for item in items:
-        if 'e2e' in item.keywords:
-            item.add_marker(skip)
+        # manual wins: no flag combination makes these run unattended.
+        if 'manual' in item.keywords and not want_manual:
+            item.add_marker(skip_manual)
+            continue
+        if 'emu' in item.keywords:
+            if not want_emu:
+                item.add_marker(skip_emu)
+        elif 'e2e' in item.keywords and not want_e2e:
+            item.add_marker(skip_e2e)
+
+
+
+def _creds_from_fragment():
+    """The AWS keys in sdkconfig.creds, as boto3 session kwargs. {} if absent."""
+    if not CREDS_FRAGMENT.exists():
+        return {}
+    found = dict(re.findall(r'^CONFIG_(AWS_\w+)="(.*)"$', CREDS_FRAGMENT.read_text(), re.M))
+    key, secret = found.get('AWS_ACCESS_KEY_ID'), found.get('AWS_SECRET_ACCESS_KEY')
+    if not (key and secret):
+        return {}
+    creds = {'aws_access_key_id': key, 'aws_secret_access_key': secret}
+    if found.get('AWS_SESSION_TOKEN'):
+        creds['aws_session_token'] = found['AWS_SESSION_TOKEN']
+    return creds
 
 
 @pytest.fixture(scope='session')
@@ -56,8 +99,11 @@ def aws_creds():
     """Explicit env credentials, or {} to let boto3 resolve its ambient chain."""
     key, secret = os.getenv('AWS_ACCESS_KEY_ID'), os.getenv('AWS_SECRET_ACCESS_KEY')
     if not (key and secret):
-        # A shared profile / SSO / instance role is fine for the viewer side; the
-        # device still needs real keys, which is what creds_fragment checks.
+        # Reuse the device's own keys rather than failing on an empty environment.
+        fragment = _creds_from_fragment()
+        if fragment:
+            return fragment
+        # A profile / SSO / instance role is fine for the viewer side.
         return {}
     creds = {'aws_access_key_id': key, 'aws_secret_access_key': secret}
     if os.getenv('AWS_SESSION_TOKEN'):
@@ -233,3 +279,164 @@ def report_capture_source(request):
     capture = 'file (SPIFFS sample frames)' if from_file else 'camera'
     log.info('capture source: %s  [%s]', capture, _describe_build(source))
     return capture
+
+
+@pytest.fixture(scope='session')
+def aws_creds_usable(aws_creds, kvs_region):
+    """Fail on expired or unusable credentials before anything is flashed.
+
+    STS session keys are compiled into the firmware, so they expire mid-campaign and
+    the device-side symptom is a signaling stall that reads like a network fault.
+    One GetCallerIdentity turns that into a line naming the real problem -- and says
+    that refreshing them means rebuild + reflash, not just a re-run.
+    """
+    boto3 = pytest.importorskip('boto3', reason='pip install -r test_e2e/requirements.txt')
+    from botocore.exceptions import BotoCoreError, ClientError
+    import contextlib as _ctx
+
+    session = boto3.Session(region_name=kvs_region, **(aws_creds or {}))
+    try:
+        with _ctx.closing(session.client('sts')) as sts:
+            return sts.get_caller_identity().get('Arn', 'unknown')
+    except (BotoCoreError, ClientError) as exc:
+        pytest.fail(f'AWS credentials are not usable: {exc}. If these are STS session '
+                    f'keys they are baked into the firmware at build time, so refreshing '
+                    f'them means rebuild + reflash, not just a re-run.')
+
+
+# Where the co-processor's log comes from. With
+# CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR the host re-prints it behind a [SLAVE]
+# prefix, the only option on a one-port board. Without it the CP has its own UART.
+# Reading the config rather than the bench keeps one test working on both, and lets
+# the forwarding -- which otherwise puts a second writer on the host console.
+# ---------------------------------------------------------------------------
+
+def _as_pattern(pattern):
+    if isinstance(pattern, str):
+        return re.escape(pattern.encode())
+    if isinstance(pattern, bytes):
+        return pattern
+    return pattern.pattern
+
+
+class _ForwardedCp:
+    """CP lines arrive inline on the host console, tagged by slave_flasher."""
+
+    source = 'host console ([SLAVE] prefix)'
+    uses_write_slave = True
+
+    def __init__(self, dut):
+        self.dut = dut
+
+    def anchor(self, pattern):
+        return re.compile(rb'\[SLAVE\].*?' + _as_pattern(pattern))
+
+    def write(self, command):
+        # Routed through the host's write_slave command; the caller owns retries.
+        return None
+
+
+class _DirectCp:
+    """CP read straight from its own UART.
+
+    Presents the small surface the helpers need -- expect() and logdir -- so the same
+    assertions work against either source.
+    """
+
+    source = 'co-processor UART'
+    uses_write_slave = False
+
+    def __init__(self, port, logdir, baud=115200):
+        import serial, threading
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.logdir = str(logdir)
+        self._logfile = Path(logdir) / 'dut.log'
+        self._logfile.write_bytes(b'')
+        ser = serial.Serial()
+        ser.port, ser.baudrate, ser.timeout = port, baud, 0.2
+        # Deassert both straps BEFORE opening: on an esp-prog, DTR/RTS drive IO0/EN,
+        # and opening with them asserted drops the chip into DOWNLOAD mode.
+        # Deliberately no EN pulse here -- the co-processor is already running and
+        # mid-session by the time this fixture is built, so resetting it would
+        # destroy the very state the test is about to assert on.
+        ser.dtr = False
+        ser.rts = False
+        ser.open()
+        self._ser = ser
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self):
+        while not self._stop.is_set():
+            try:
+                chunk = self._ser.read(4096)
+            except Exception:
+                return
+            if chunk:
+                with self._lock:
+                    self._buf.extend(chunk)
+                with open(self._logfile, 'ab') as fh:
+                    fh.write(chunk)
+
+    def expect(self, pattern, timeout=30):
+        if not hasattr(pattern, 'search'):
+            pattern = re.compile(_as_pattern(pattern))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                m = pattern.search(bytes(self._buf))
+            if m:
+                return m
+            time.sleep(0.05)
+        raise TimeoutError(f'{pattern!r} not seen in {timeout}s on the co-processor console')
+
+    def write(self, command):
+        self._ser.write((command + '\r\n').encode())
+        self._ser.flush()
+
+    def close(self):
+        self._stop.set()
+        try:
+            self._ser.close()
+        except Exception:
+            pass
+
+    def anchor(self, pattern):
+        # Nothing else shares this stream, so no prefix is needed to disambiguate.
+        return re.compile(_as_pattern(pattern))
+
+    @property
+    def dut(self):
+        # This object *is* the log source; _expect/_seen/_in_log take it directly.
+        return self
+
+
+@pytest.fixture
+def cp_console(request, dut, tmp_path):
+    """The co-processor's log, from whichever source the firmware implies."""
+    _, cfg = _built_config(request)
+    # Absent from sdkconfig.json when SLAVE_FLASHER_ENABLE is off (the symbol depends on
+    # it): nothing re-prints the C6 log then, so ask for --cp-port rather than wait.
+    forwarded = cfg.get('SLAVE_FLASHER_POST_FLASH_MONITOR', False)
+    cp_port = request.config.getoption('--cp-port')
+
+    if forwarded and not cp_port:
+        src = _ForwardedCp(dut)
+        logging.getLogger('conftest').info('co-processor log source: %s', src.source)
+        yield src
+        return
+
+    if not cp_port:
+        pytest.fail(
+            'The host firmware is built without CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR, '
+            'so it does not re-print the co-processor log. Pass --cp-port <port> so the '
+            'test can read the co-processor directly.')
+
+    src = _DirectCp(cp_port, tmp_path)
+    logging.getLogger('conftest').info('co-processor log source: %s (%s)', src.source, cp_port)
+    try:
+        yield src
+    finally:
+        src.close()

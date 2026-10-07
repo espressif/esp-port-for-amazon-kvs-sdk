@@ -1,0 +1,17 @@
+# C6-side overlay for running the split pair under ESP-EMU (no hardware).
+# Layer after sdkconfig.ci.e2e. Companion: examples/streaming_only/sdkconfig.ci.emu.
+#
+# Plain esp32c6 chain, no board overlay: the emulated co-processor is not wired to
+# any particular kit.
+#
+# The emulated C6 raises a SoftAP with these credentials (esp-emu --wifi-ssid /
+# --wifi-password). app_wifi_prov falls back to them because ci.e2e turns BLE
+# provisioning off, so the pair associates unattended.
+CONFIG_ESP_WIFI_SSID="myssid"
+CONFIG_ESP_WIFI_PASSWORD="mypassword"
+
+# The emulated co-processor reaches the internet through esp-emu's user-mode NAT
+# (--net user): SNTP sets the clock and SigV4-signed requests reach AWS, so the
+# full signaling walk runs as on hardware (test_e2e/pytest_e2e_emu.py asserts each
+# stage). That needs real keys: test_e2e/emu_pair.py appends
+# test_e2e/sdkconfig.creds to this chain when it exists.

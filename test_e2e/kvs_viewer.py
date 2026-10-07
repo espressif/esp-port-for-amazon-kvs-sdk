@@ -98,8 +98,7 @@ class KvsViewer:
         self.client_id = client_id or f'pytest-viewer-{uuid.uuid4().hex[:8]}'
         self.duration_s = duration_s
         self.connect_timeout_s = connect_timeout_s
-        # Set once the peer connection comes up, so duration_s really is the media
-        # window rather than whatever is left of connect_timeout_s + duration_s.
+        # Set when the peer connection comes up, so duration_s is the media window.
         self._media_deadline = None
         self._started = time.monotonic()
         self.want_audio = want_audio
@@ -113,7 +112,6 @@ class KvsViewer:
         # drops candidates added without a remote description, so hold them.
         self._early_candidates = []
 
-    # ---------------------------------------------------------------- control plane
 
     def _describe(self):
         """Resolve channel ARN, the VIEWER WSS/HTTPS endpoints, and ICE servers."""
@@ -134,8 +132,7 @@ class KvsViewer:
             'kinesis-video-signaling', endpoint_url=by_proto['HTTPS'],
         ).get_ice_server_config(ChannelARN=arn)['IceServerList']
 
-        # KVS's own STUN server is not in IceServerList; add it explicitly, the same
-        # way the SDK does.
+        # KVS's own STUN server is not in IceServerList; add it as the SDK does.
         servers = [RTCIceServer(urls=f'stun:stun.kinesisvideo.{self.region}.amazonaws.com:443')]
         for s in ice:
             servers.append(RTCIceServer(urls=s['Uris'], username=s['Username'],
@@ -155,15 +152,13 @@ class KvsViewer:
                        expires=_PRESIGN_EXPIRY_S).add_auth(request)
         return request.url
 
-    # ---------------------------------------------------------------- signaling wire
 
     async def _send(self, action, payload, recipient=None):
         msg = {
             'action': action,
             'messagePayload': base64.b64encode(json.dumps(payload).encode()).decode(),
         }
-        # A viewer's messages implicitly route to the master, so recipientClientId is
-        # only set when we are answering a specific peer.
+        # A viewer's messages route to the master implicitly.
         if recipient:
             msg['recipientClientId'] = recipient
         await self._ws.send(json.dumps(msg))
@@ -218,7 +213,6 @@ class KvsViewer:
         cand.sdpMLineIndex = int(idx) if idx is not None else None
         return cand
 
-    # ---------------------------------------------------------------- media
 
     def _wire_pc(self, servers):
         pc = RTCPeerConnection(RTCConfiguration(iceServers=servers))
@@ -293,10 +287,8 @@ class KvsViewer:
                 logger.info('%s track ended: %s', track.kind, type(exc).__name__)
                 break
             counts[track.kind] += 1
-            # Media is demonstrably flowing, so start the window here too. Relying on
-            # connectionstatechange alone is fragile: a run that streamed fine but never
-            # latched 'connected' fell back to connect_timeout_s and ran ~90 s instead
-            # of the requested 20 s.
+            # Media is flowing, so start the window here too: a run that streamed
+            # fine but never latched 'connected' ran ~90 s instead of 20 s.
             if self._media_deadline is None:
                 self._media_deadline = time.monotonic() + self.duration_s
             if counts[track.kind] == 1:
@@ -435,7 +427,6 @@ class KvsViewer:
             out[stat.kind] = (got + stat.packetsReceived, lost + max(0, stat.packetsLost), 0)
         return out
 
-    # ---------------------------------------------------------------- session
 
     async def _bounded(self, what, awaitable, timeout=_TEARDOWN_TIMEOUT_S):
         """Await one teardown step for at most `timeout` seconds.

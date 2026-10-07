@@ -24,11 +24,8 @@ logger = logging.getLogger(__name__)
 
 APP_PATH = str(REPO_ROOT / 'examples' / 'webrtc_classic')
 
-# kvs_signaling.c:530 logs the upstream SIGNALING_CLIENT_STATE enum (Include.h:1092),
-# which is the actual signaling state machine walk and is visible at INFO. Asserting
-# these in sequence is the state-transition check.
-#
-# CREATE (4) is skipped for a channel that already exists, so it is not asserted.
+# The upstream SIGNALING_CLIENT_STATE enum (Include.h:1092) as logged by
+# kvs_signaling.c:530. CREATE (4) is skipped for a channel that already exists.
 SIGNALING_STATE_WALK = (
     (1, 'NEW'),
     (2, 'GET_CREDENTIALS'),
@@ -175,22 +172,20 @@ def assert_signaling_walk(dut, expected, label, slave=False):
 
 @pytest.mark.e2e
 @pytest.mark.parametrize('app_path', [APP_PATH], indirect=True)
-# esp32s3 is a supported target for this example but is not covered here -- it
-# has different media capabilities and has not been validated against this
-# oracle. Add it once someone runs it on that board.
+# esp32s3 builds this example but has different media capabilities and has not
+# been validated against this oracle.
 @idf_parametrize('target', ['esp32p4'], indirect=['target'])
 def test_e2e_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fragment,
-                       kvs_channel, kvs_region, channel_matches_firmware) -> None:
+                       kvs_channel, kvs_region, channel_matches_firmware,
+                       aws_creds_usable) -> None:
     ssid, password = wifi_creds
     allow_relay = request.config.getoption('--allow-relay')
     media_timeout = request.config.getoption('--media-timeout')
     connect_timeout = request.config.getoption('--connect-timeout')
     logger.info('device credential fragment: %s', creds_fragment)
 
-    # -- Phase 1: boot and join Wi-Fi ------------------------------------------
-    # wifi-set means the test does not depend on the SSID the firmware was built with,
-    # nor on BLE provisioning completing. It is harmless if the board was already
-    # provisioned -- it just restarts the station against the same AP.
+    # Phase 1: boot and join Wi-Fi. wifi-set frees the test from the SSID the
+    # firmware was built with, and from BLE provisioning completing.
     _expect(dut, 'ESP32 WebRTC Example', BOOT_TIMEOUT, 'boot')
     dut.write(f'wifi-set {ssid} {password}')
     # app_wifi_prov.c logs 'Got IP: <addr>'; esp_netif also emits 'sta ip: <addr>'.
@@ -198,18 +193,16 @@ def test_e2e_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fragment,
                  WIFI_TIMEOUT, 'wifi connect')
     logger.info('device IP: %s', ip.group(1).decode())
 
-    # -- Phase 2: signaling state walk ----------------------------------------
-    # Wait for the end of the walk with a forward expect (so the test blocks until
-    # signaling is actually up), then check the whole ordered sequence in the log.
+    # Phase 2: signaling state walk. Block on the last state, then check the
+    # whole ordered sequence in the log.
     _expect(dut, re.compile(rb'\[KVS Event\] Signaling Connected\.'),
             connect_timeout, 'signaling connected event')
 
     assert_signaling_walk(dut, SIGNALING_STATE_WALK, 'signaling state walk')
-    # The timing summary follows the walk; its presence confirms every control-plane
-    # call reported a duration rather than being skipped.
+    # The timing summary confirms every control-plane call ran, none skipped.
     assert_ordered_in_log(dut, list(SIGNALING_TIMING_SUMMARY), 'signaling timings')
 
-    # -- Phase 3: viewer -------------------------------------------------------
+    # Phase 3: viewer.
     viewer = KvsViewer(kvs_channel, kvs_region, credentials=aws_creds,
                        duration_s=media_timeout, connect_timeout_s=connect_timeout)
     result = run_viewer(viewer)
@@ -239,21 +232,18 @@ def test_e2e_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fragment,
         f'video packet loss {loss:.0%} exceeds --max-video-loss={max_loss:.0%}: '
         f'{result.summary()}')
 
-    # -- Phase 4: device-side session assertions -------------------------------
-    # dut.expect reads a persistent buffer, so these lines were emitted while the
-    # viewer above was running and are still waiting to be matched.
-    #
-    # The order below is taken from real sessions, not from reading the code, and is
-    # not the intuitive one: "Streaming Started" fires right after the answer, well
-    # before the connection is actually up, while "Peer Connected" comes last.
+    # Phase 4: device-side session assertions. dut.expect reads a persistent
+    # buffer, so these lines were emitted while the viewer ran. The order is from
+    # real sessions and is not the intuitive one: "Streaming Started" fires right
+    # after the answer, "Peer Connected" comes last.
     #   Sent Answer -> Streaming Started -> Selected pair -> state=3
     #     -> Media started -> Peer Connected
     cid = result.client_id
     _expect(dut, re.compile(rb'\[KVS Event\] Sent Answer\.'), 15, 'device sent answer')
     _expect(dut, f'Streaming Started for Peer: {cid}', 15, 'device streaming started')
 
-    # The P2P oracle. This line is DLOGP, which kvs_utils/logger.c:94 maps to
-    # ESP_LOG_ERROR, so it survives the KVS logger's default WARN gate unconfigured.
+    # The P2P oracle. DLOGP maps to ESP_LOG_ERROR (kvs_utils/logger.c:94), so it
+    # survives the KVS logger's default WARN gate.
     pair = _expect(dut, re.compile(
         rb'Selected pair \S+, local candidate type: (\w+)\. '
         rb'remote candidate type: (\w+)\.'), 15, 'selected candidate pair')
@@ -285,17 +275,14 @@ def test_e2e_streaming(dut: Dut, request, aws_creds, wifi_creds, creds_fragment,
     except Exception:
         logger.warning('no DIAG frame_cb line -- is CONFIG_KVS_WEBRTC_MEDIA_DIAG_LOG=y?')
 
-    # -- Phase 5: nothing went irrecoverably wrong ------------------------------
-    # A KVS error event is reported, not asserted. Signaling recovers from transient
-    # TLS/socket failures by reconnecting, and one during teardown says nothing about
-    # the session that just succeeded -- every property we care about (P2P pair, RTP
-    # in both directions, peer connected) has already been asserted above. Failing on
-    # any error event made this flaky on a lossy AP.
+    # Phase 5: nothing went irrecoverably wrong. A KVS error event is reported,
+    # not asserted: signaling reconnects after transient TLS failures, and one
+    # during teardown says nothing about the session that just succeeded.
     if _seen(dut, re.compile(rb'\[KVS Event\] Error Event'), 2):
         logger.warning('device raised a KVS error event (signaling usually recovers '
                        'by reconnecting); check the log if other assertions failed')
 
-    # The watchdog is different: it means the peer was written off as dead, which
+    # The watchdog is different: the peer was written off as dead, which
     # contradicts the session having worked.
     assert not _seen(dut, 'Liveness watchdog', 2), \
         'device liveness watchdog tripped -- the peer was declared dead'
