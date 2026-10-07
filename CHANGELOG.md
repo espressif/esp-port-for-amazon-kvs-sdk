@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `app_webrtc_set_log_level(3)`. The SDK PROFILE timings print at DEBUG under the
   `kvs_profile` tag (`KVS_PROFILE_LOG_TAG`). `app_webrtc_set_log_level(8)` turns
   them on. Log lines no longer show the TURN username.
+- **esp_hosted 3.x:** `network_adapter`, `webrtc_classic`, `esp_camera` and the WebRTC
+  bridge use the registry component `espressif/esp_hosted` 3.x in place of the
+  in-tree 2.x submodule. ESP-IDF 5.5 is the minimum. `webrtc_person_detect` stays on
+  the in-tree 2.x.
 - `KVS_SDK_PATH` pointing at a directory that does not exist (or one with no
   `components/kvs_webrtc`) is now a configure-time `FATAL_ERROR` instead of a warning
   that scrolled past while every `kvs_*` component silently resolved elsewhere.

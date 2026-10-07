@@ -121,7 +121,7 @@ You can validate either mode against the [AWS WebRTC test viewer](https://awslab
 ## Building & Flashing
 
 [**docs/building.md**](docs/building.md) is the full guide — clone & submodules, SDK patch
-auto-apply, ESP-IDF v5.4/v5.5 setup, picking an example + target, board overlays (the
+auto-apply, ESP-IDF v5.5+ setup, picking an example + target, board overlays (the
 `SDKCONFIG_DEFAULTS` chain), ws-on vs ws-off, console output, the ESP32-P4 + ESP32-C6 dual-chip
 setup, AWS credentials, and troubleshooting. (The Quick Start above has the short recipe.)
 

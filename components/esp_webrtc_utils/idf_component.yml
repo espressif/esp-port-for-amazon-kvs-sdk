@@ -3,8 +3,8 @@ version: "0.8.0"
 
 dependencies:
   espressif/esp_hosted:
-    override_path: ../esp_hosted
-    version: "*"
+    # Any 3.1.x from 3.1.0. The examples pin the exact version.
+    version: "~3.1.0"
     rules:
       - if: "target in [esp32p4]"
   webrtc_bridge:

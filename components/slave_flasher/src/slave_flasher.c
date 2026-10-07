@@ -441,8 +441,13 @@ esp_err_t flash_slave()
         return ret;
     }
 
-#if CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
-    #define CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
+/* esp_hosted 3.x names the co-processor reset pin ESP_HOSTED_HOST_RESET_GPIO.
+ * webrtc_person_detect still builds against the in-tree esp_hosted 2.x, which
+ * names it ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE. */
+#if defined(CONFIG_ESP_HOSTED_HOST_RESET_GPIO)
+#define SLAVE_RESET_GPIO CONFIG_ESP_HOSTED_HOST_RESET_GPIO
+#else
+#define SLAVE_RESET_GPIO CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
 #endif
 
     const loader_esp32_config_t config = {
@@ -450,7 +455,7 @@ esp_err_t flash_slave()
         .uart_port = UART_NUM_1,
         .uart_rx_pin = CONFIG_SLAVE_UART_RX_PIN,
         .uart_tx_pin = CONFIG_SLAVE_UART_TX_PIN,
-        .reset_trigger_pin = CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE,
+        .reset_trigger_pin = SLAVE_RESET_GPIO,
         .gpio0_trigger_pin = CONFIG_SLAVE_GPIO0_TRIGGER_PIN,
     };
 

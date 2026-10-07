@@ -135,15 +135,7 @@ build_linux_examples:
 
 # One job per target: the combined v5.5 job hit the 60-minute runner cap.
 # TARGETS stays list-valued, so .build_examples and its skip rules are unchanged.
-build_idf_v5.4:
-  extends: .build_template
-  image: espressif/idf:release-v5.4
-  parallel:
-    matrix:
-      - TARGETS: [esp32, esp32s3, esp32c6, esp32p4]
-  variables:
-    EXAMPLES: webrtc_classic esp_camera signaling_only streaming_only network_adapter simple_video_server webrtc_person_detect
-
+# esp_hosted 3.x requires IDF >= 5.5, so 5.5 is the floor for the whole matrix.
 build_idf_v5.5:
   extends: .build_template
   image: espressif/idf:release-v5.5

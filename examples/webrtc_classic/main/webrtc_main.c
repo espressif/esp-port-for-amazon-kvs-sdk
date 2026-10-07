@@ -56,26 +56,32 @@ static esp_err_t create_static_netif_cb(void *ctx)
 }
 #endif
 
-#if CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE
-#include "esp_check.h"
-#include "esp_hosted_misc.h"
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
 #include "slave_flasher.h"
+#if !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
+#include "esp_hosted.h"
 #endif
+#endif
+
+#if CONFIG_ESP_HOSTED_HOST_FEAT_BT
+#include "esp_check.h"
+#include "esp_hosted.h"
+#include "esp_hosted_bt_host_stack.h"
 
 static esp_err_t hosted_bt_prov_start(void *ctx)
 {
     ESP_LOGI(TAG, "Initializing BT controller on coprocessor for provisioning");
-    ESP_RETURN_ON_ERROR(esp_hosted_bt_controller_init(), TAG, "BT controller init failed");
-    ESP_RETURN_ON_ERROR(esp_hosted_bt_controller_enable(), TAG, "BT controller enable failed");
+    /* Runs after esp_hosted_connect_to_slave() and before the stack's own
+     * init, which app_wifi_prov_init() drives. */
+    esp_hosted_bt_host_stack_cfg_t cfg = ESP_HOSTED_BT_HOST_STACK_CONFIG_DEFAULT();
+    ESP_RETURN_ON_ERROR(esp_hosted_bt_host_stack_setup(&cfg), TAG, "BT host stack setup failed");
     return ESP_OK;
 }
 
 static void hosted_bt_prov_end(void *ctx)
 {
     ESP_LOGI(TAG, "Deinitializing BT controller on coprocessor");
-    esp_hosted_bt_controller_disable();
-    esp_hosted_bt_controller_deinit(true);
+    esp_hosted_bt_host_stack_teardown();
 }
 #endif
 
@@ -253,6 +259,14 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to flash slave co-processor: %s", esp_err_to_name(ret));
         return;
     }
+
+#if !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
+    /* hosted's auto-init is a constructor, so it would enumerate the CP while
+     * flash_slave() still holds it in ROM download mode, and give up after four
+     * tries. Boards that flash their own CP bring hosted up here instead. */
+    ESP_ERROR_CHECK(esp_hosted_init());
+    ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
+#endif
 #endif
 
     ESP_LOGI(TAG, "ESP32 WebRTC Example");
@@ -267,7 +281,7 @@ void app_main(void)
     net_cfg.pre_wifi_init_cb = create_static_netif_cb;
     net_cfg.skip_default_sta_netif = true;
 #endif
-#if CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE
+#if CONFIG_ESP_HOSTED_HOST_FEAT_BT
     net_cfg.prov_start_cb = hosted_bt_prov_start;
     net_cfg.prov_end_cb = hosted_bt_prov_end;
 #endif

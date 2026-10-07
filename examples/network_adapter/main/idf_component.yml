@@ -1,8 +1,10 @@
 ## IDF Component Manager Manifest File
 dependencies:
-  # local components
-  network_coprocessor:
-    version: "*"
-    path: ${KVS_SDK_PATH}/components/network_coprocessor
+  idf:
+    version: ">=5.5"
+
+  espressif/esp_hosted:
+    version: "3.1.0"
+
   espressif/rmaker_common:
     version: "*"

@@ -46,3 +46,12 @@ CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"
+
+#
+# This board flashes its own co-processor. esp_hosted's auto-init is a C
+# constructor that runs before app_main, so it would reset the co-processor and
+# start SDIO enumeration while slave_flasher still holds it in ROM download
+# mode. Bring-up then times out. The application brings hosted up itself once
+# flashing is done.
+#
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n

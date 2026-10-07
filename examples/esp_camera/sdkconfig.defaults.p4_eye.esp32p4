@@ -23,7 +23,6 @@ CONFIG_ESP32P4_EYE_C6_BOARD=y
 # Allocate the esp_hosted SDIO buffer mempool from PSRAM (P4 GDMA reaches PSRAM
 # through cache). Without this it tries internal DMA RAM, which is too scarce
 # here -> sdio_mempool_create asserts (buf_mp_g NULL) at boot.
-CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
 
 #
 # Flash - P4-EYE v1.2 ships with 16 MB flash; needed to fit the app
@@ -91,4 +90,13 @@ CONFIG_SLAVE_APPLICATION_ADDRESS=0x10000
 CONFIG_SLAVE_UART_RX_PIN=36
 CONFIG_SLAVE_UART_TX_PIN=35
 CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
+
+#
+# This board flashes its own co-processor. esp_hosted's auto-init is a C
+# constructor that runs before app_main, so it would reset the co-processor and
+# start SDIO enumeration while slave_flasher still holds it in ROM download
+# mode. Bring-up then times out. The application brings hosted up itself once
+# flashing is done.
+#
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
 

@@ -1,4 +1,5 @@
-set(PROTOBUF_C_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../components/esp_hosted/common/protobuf-c")
+# Re-register IDF's bundled protobuf-c so the linux host-test build gets it too.
+set(PROTOBUF_C_DIR "$ENV{IDF_PATH}/components/protobuf-c/protobuf-c")
 
 idf_component_register(
     SRCS "${PROTOBUF_C_DIR}/protobuf-c/protobuf-c.c"

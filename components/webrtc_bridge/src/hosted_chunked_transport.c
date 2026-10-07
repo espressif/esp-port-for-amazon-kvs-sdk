@@ -16,13 +16,7 @@
 #include "hosted_chunked_transport.h"
 
 #if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
-/* Coprocessor (slave) uses peer_data API; host uses esp_hosted */
-#if CONFIG_ESP_HOSTED_COPROCESSOR
-#include "esp_hosted_peer_data.h"
-#elif CONFIG_ESP_HOSTED_ENABLED
-#include "esp_hosted.h"
-#include "esp_hosted_misc.h"
-#endif
+#include "bridge_peer_data.h"
 #endif
 
 static const char *TAG = "hosted_chunked";
@@ -306,7 +300,7 @@ esp_err_t hosted_chunked_send(uint32_t msg_id,
     if (wire_format == HOSTED_CHUNK_WIRE_NEW) {
         /* New format: send raw if fits, else chunk with magic header */
         if (len <= HOSTED_CHUNK_MAX_DATA) {
-            ret = esp_hosted_send_custom_data(msg_id, data, len);
+            ret = bridge_peer_data_send(msg_id, data, len);
         } else {
             size_t offset = 0;
             size_t frame_buf_size = sizeof(hosted_chunk_new_hdr_t) + HOSTED_CHUNK_MAX_DATA;
@@ -328,7 +322,7 @@ esp_err_t hosted_chunked_send(uint32_t msg_id,
                     hdr->chunk_len = (uint32_t)chunk_data_len;
                     memcpy(frame + sizeof(hosted_chunk_new_hdr_t), data + offset, chunk_data_len);
 
-                    ret = esp_hosted_send_custom_data(msg_id, frame,
+                    ret = bridge_peer_data_send(msg_id, frame,
                                                       sizeof(hosted_chunk_new_hdr_t) + chunk_data_len);
                     offset += chunk_data_len;
                 }
@@ -358,7 +352,7 @@ esp_err_t hosted_chunked_send(uint32_t msg_id,
                 memcpy(chunk_buf + sizeof(hosted_chunk_legacy_hdr_t), data + offset, chunk_data_len);
 
                 size_t total_size = sizeof(hosted_chunk_legacy_hdr_t) + chunk_data_len;
-                ret = esp_hosted_send_custom_data(msg_id, chunk_buf, total_size);
+                ret = bridge_peer_data_send(msg_id, chunk_buf, total_size);
 
                 offset += chunk_data_len;
                 seq_num++;

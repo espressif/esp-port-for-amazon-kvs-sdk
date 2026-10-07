@@ -9,6 +9,7 @@ set(srcs
     "test_pending_ice.c"
     "test_stale_peer_watchdog.c"
     "test_bridge_ready_query.c"
+    "test_hosted_chunked.c"
     "test_message_queue.c"
     "test_apprtc_send_order.c"
     # esp_webrtc_utils' message queue: FreeRTOS, pthread + libc only, linked standalone.
@@ -29,7 +30,12 @@ set(srcs
     # KVS signaling client.
     "../../components/signaling/kvs_signaling/port/kvs_pending_ice.c"
     # Liveness watchdog: dependency-free (stdint only), linked standalone for host test.
-    "../../components/kvs_webrtc/src/kvs_liveness.c")
+    "../../components/kvs_webrtc/src/kvs_liveness.c"
+    # Chunking/reassembly compiled standalone: the test defines
+    # BRIDGE_PEER_DATA_TEST_STUB and supplies peer-data send/register, so the
+    # linux build needs no hosted role. message_utils backs the reassembly.
+    "../../components/webrtc_bridge/src/hosted_chunked_transport.c"
+    "../../components/esp_webrtc_utils/src/message_utils.c")
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "."
@@ -40,6 +46,7 @@ idf_component_register(SRCS ${srcs}
                            "../../components/kvs_webrtc/src"
                            "../../components/signaling/bridge_signaling/include"
                            "../../components/signaling/bridge_signaling/src"
+                           "../../components/webrtc_bridge/src"
                            "../../components/app_webrtc/include"
                            "../../components/webrtc_bridge/include"
                            "../../components/esp_webrtc_utils/include"
@@ -50,3 +57,10 @@ idf_component_register(SRCS ${srcs}
                            "$ENV{IDF_PATH}/components/esp_event/include"
                        PRIV_REQUIRES "unity" "kvs_utils" "mbedtls" "signaling_serializer"
                        WHOLE_ARCHIVE)
+
+# hosted_chunked_transport.c only compiles its real body under the hosted bridge.
+# The stub define swaps esp_hosted's peer-data calls for the ones the test provides,
+# so the logic is exercised on the linux target without a hosted role.
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    CONFIG_ESP_WEBRTC_BRIDGE_HOSTED=1
+    BRIDGE_PEER_DATA_TEST_STUB=1)

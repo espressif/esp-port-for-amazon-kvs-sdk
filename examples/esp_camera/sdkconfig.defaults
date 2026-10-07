@@ -194,3 +194,8 @@ CONFIG_MBEDTLS_X509_CREATE_C=y
 # NETWORK_PROV_SECURITY_1 enum behind this (default off).
 #
 CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y
+
+# ESP-Hosted: off by default. Targets with a native radio build single-chip;
+# the P4 overlays turn it on because the P4 has no radio of its own.
+#
+CONFIG_ESP_HOSTED=n

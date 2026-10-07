@@ -7,13 +7,14 @@ set(srcs
 )
 
 if (LINUX_BUILD)
-    # Use local protobuf-c sources from ESP components
+    # The linux build has no IDF component graph, so compile protobuf-c straight
+    # from IDF's bundled copy rather than depending on the component.
     set(PROTOBUF_C_SRCS
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../components/esp_hosted/common/protobuf-c/protobuf-c/protobuf-c.c"
+        "$ENV{IDF_PATH}/components/protobuf-c/protobuf-c/protobuf-c/protobuf-c.c"
     )
 
     set(PROTOBUF_C_INCLUDE_DIRS
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../components/esp_hosted/common/protobuf-c"
+        "$ENV{IDF_PATH}/components/protobuf-c/protobuf-c"
     )
 
     add_library(signaling_serializer STATIC ${srcs} ${PROTOBUF_C_SRCS})
