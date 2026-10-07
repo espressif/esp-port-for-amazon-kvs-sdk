@@ -18,6 +18,9 @@
 #if CONFIG_APP_NETWORK_PROV_BLE
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_ble.h"
+#if CONFIG_APP_BLE_RELEASE_AFTER_PROV
+#include "esp_bt.h"
+#endif
 #endif
 
 static const char *TAG = "app_wifi_prov";
@@ -88,6 +91,10 @@ static esp_err_t start_provisioning(const app_wifi_prov_config_t *cfg)
     if (provisioned) {
         ESP_LOGI(TAG, "Device already provisioned, skipping BLE provisioning");
         network_prov_mgr_deinit();
+#if CONFIG_APP_BLE_RELEASE_AFTER_PROV
+        /* Provisioning is skipped, so release Bluetooth memory here. */
+        esp_bt_mem_release(ESP_BT_MODE_BTDM);
+#endif
         return ESP_OK;
     }
 

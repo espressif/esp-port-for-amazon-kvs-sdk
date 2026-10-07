@@ -134,6 +134,9 @@ CONFIG_ESP_HOSTED_CP_FEAT_BT=n
 #
 # BLE Provisioning
 #
+# BT is handled entirely by the co-processor
+# Hosted doesn't handle BT (CONFIG_ESP_HOSTED_CP_FEAT_BT=n above)
+CONFIG_APP_BLE_ON_COPROCESSOR=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_APP_NETWORK_PROV_BLE=y

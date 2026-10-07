@@ -160,6 +160,9 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 #
 # BLE Provisioning
 #
+# Standalone placement: the co-processor passes HCI up and this host runs the
+# BLE host stack.
+CONFIG_APP_BLE_VIA_HOSTED_ON_HOST=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_APP_NETWORK_PROV_BLE=y
