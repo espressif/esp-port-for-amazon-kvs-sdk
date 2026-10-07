@@ -146,8 +146,14 @@ CONFIG_ESP_HOSTED_HOST_FEAT_POWER_SAVE_WAKEUP_GPIO=6
 # hosted_recovery handles transport failures (re-establish, not blind host restart)
 CONFIG_ESP_HOSTED_TRANSPORT_RESTART_ON_FAILURE=n
 
+# Keep the ALWAYS strategy. A cold host boot must reset the co-processor, because
+# its state is unknown. ONLY_IF_NECESSARY probes the SDIO card on a cold boot as
+# well, where the probe runs before the PSRAM DMA pool exists, and the host then
+# aborts with ESP_ERR_NO_MEM. On a deep-sleep wake, esp_hosted itself skips the
+# reset and only re-inits the SDIO card.
+CONFIG_ESP_HOSTED_HOST_CP_RESET_STRATEGY_ALWAYS=y
+
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
-CONFIG_ESP_HOSTED_P4_DEV_BOARD_FUNC_BOARD=y
 
 # Make BSP errors non-fatal — by default bsp_display_indev_init() ESP_ERROR_CHECKs
 # on bsp_touch_new() failure, which aborts the whole app when the GT911 touch

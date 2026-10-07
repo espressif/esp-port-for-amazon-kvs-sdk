@@ -109,9 +109,7 @@ CONFIG_IPERF_REPORT_TASK_PRIORITY=18
 
 # 13. Mem optimizations
 #---------------------
-# Light sleep powers the flash and cache down. Code fetched from flash at
-# that moment faults, so these stay in IRAM while CP light sleep is on.
-CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=n
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
 
 # 14. SPIRAM config
 CONFIG_SPIRAM=y
@@ -173,9 +171,8 @@ CONFIG_PM_SLP_IRAM_OPT=y
 CONFIG_PM_SLEEP_FUNC_IN_IRAM=y
 CONFIG_PM_RTOS_IDLE_OPT=y
 CONFIG_PM_SLP_DEFAULT_PARAMS_OPT=y
-CONFIG_FREERTOS_PLACE_SNAPSHOT_FUNS_INTO_FLASH=n
-CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=n
-CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=n
+# FreeRTOS and the ringbuf stay in flash. Pulling them into IRAM costs about
+# 30 KiB of internal RAM, and softAP then fails to allocate its beacon buffer.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 
 # The board is selected by sdkconfig.defaults.p4_c5_core_board.esp32c5, not

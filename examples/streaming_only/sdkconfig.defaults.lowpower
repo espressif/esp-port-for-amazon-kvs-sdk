@@ -1,0 +1,9 @@
+# Host side of signaling_only/sdkconfig.defaults.lowpower. Apply both or neither.
+#
+# The host sends its Wi-Fi init config to the co-processor on every boot and
+# deep-sleep wake, and the co-processor re-initialises Wi-Fi when it differs from
+# its own. That drops the link. These match the co-processor profile.
+# Apply LAST in SDKCONFIG_DEFAULTS.
+CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=8
+CONFIG_WIFI_RMT_MGMT_SBUF_NUM=8
+CONFIG_WIFI_RMT_STATIC_TX_BUFFER_NUM=4

@@ -270,7 +270,9 @@ menu "Example: CP Light Sleep on Host Deep Sleep"
 		default n
 		help
 			Bring-up aid. At boot the C5 logs its eFuse fields: MAC, wafer
-			and block versions, flash and PSRAM capability. They print as
+			and block versions, flash and PSRAM capability. With light sleep
+			on, the co-processor also logs whether it lost power, its reset
+			and wakeup reasons and its PM configuration. They print as
 			warnings on every boot, so this stays off by default.
 
 
