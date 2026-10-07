@@ -17,15 +17,9 @@
 #include <sys/time.h>
 #include "sdkconfig.h"
 
-/* Waking the host is a co-processor feature, not a chip property: the gate is
- * whether esp_hosted built eh_cp_feat_host_ps, which is what provides
- * eh_cp_feat_host_ps_wakeup_host(). A co-processor build without that feature
- * would drop the wake on an incoming OFFER and leave the host asleep, so say so
- * at compile time instead of shipping a bridge that cannot reach its peer. */
-#if CONFIG_ESP_HOSTED_CP && !CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS
-#error "signaling_bridge_adapter wakes the host on an incoming OFFER; enable CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS."
-#endif
-
+/* Waking the host on an incoming OFFER needs eh_cp_feat_host_ps, which not every
+ * co-processor target builds. Without it the bridge still works; it just cannot
+ * wake a sleeping host. */
 #if CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS
 #define HOST_WAKEUP_ENABLED 1
 #include "eh_cp_feat_host_ps_apis.h"

@@ -11,7 +11,11 @@
 #include "app_webrtc.h"
 
 #define SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP (1)
+#ifdef CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_ENABLE
 #define SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP (1)
+#else
+#define SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP (0)
+#endif
 
 #define SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING (0)
 
@@ -249,10 +253,6 @@ static void resume_application_tasks(void)
 
 
 
-
-#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP && !defined(CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_ENABLE)
-#error "This file drives the co-processor into light sleep when the host sleeps; pick a mode under 'CP Light Sleep' (CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_POWER_MIN or _MAX)."
-#endif
 
 /* The host-sleep integration is a co-processor feature, not a chip property:
  * eh_cp_feat_host_ps is what provides the callbacks and the wake path. */

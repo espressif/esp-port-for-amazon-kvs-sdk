@@ -5,12 +5,15 @@
  */
 
 #include "host_ps_integration.h"
+#include "sdkconfig.h"
+
+#if CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS
+
 #include "cp_light_sleep_controller.h"
 #include "eh_cp_feat_host_ps.h"
 #include "eh_cp_feat_host_ps_apis.h"
 #include "eh_cp_cli.h"
 #include "esp_log.h"
-#include "sdkconfig.h"
 
 #if CONFIG_HEAP_TRACING
 #define MEMORY_LEAK_CHECKING 1
@@ -172,3 +175,11 @@ esp_err_t host_ps_integration_init(void)
 	ESP_LOGI(TAG, "Integration ready: host sleep ⇄ CP light sleep");
 	return ESP_OK;
 }
+
+#else
+
+/* esp_hosted did not build eh_cp_feat_host_ps for this target, so there is no
+ * host power save to hook into. */
+esp_err_t host_ps_integration_init(void) { return ESP_ERR_NOT_SUPPORTED; }
+
+#endif /* CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS */

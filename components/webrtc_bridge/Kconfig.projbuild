@@ -10,6 +10,7 @@ menu "WebRTC Bridge Config"
 
         config ESP_WEBRTC_BRIDGE_HOSTED
             bool "Use hosted bridge"
+            depends on ESP_HOSTED_HOST || ESP_HOSTED_CP
             help
                 Relay messages using existing esp_hosted communication line
                 Direct dependancy on `ESP_HOSTED_ENABLED`
