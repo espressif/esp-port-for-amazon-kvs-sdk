@@ -444,6 +444,19 @@ class KvsViewer:
             self.result.errors.append(f'{what} failed: {type(exc).__name__}')
         return None
 
+    def _ws_headers(self):
+        """Extra headers for the signaling WebSocket handshake (none for KVS)."""
+        return None
+
+    async def _negotiate(self, pc):
+        """Open the session: the viewer offers, as a KVS viewer does.
+
+        aiortc has no trickle-out: setLocalDescription blocks until gathering
+        finishes, so the offer we send already carries every local candidate."""
+        await pc.setLocalDescription(await pc.createOffer())
+        await self._send('SDP_OFFER',
+                         {'type': 'offer', 'sdp': self._offer_sdp(pc)})
+
     async def run(self):
         arn, wss, servers = self._describe()
         url = self._presign_wss(wss, arn)
@@ -457,15 +470,12 @@ class KvsViewer:
         self._started = time.monotonic()
         sampler = asyncio.ensure_future(self._sample_stats())
         try:
-            async with websockets.connect(url, max_size=None, close_timeout=5) as ws:
+            async with websockets.connect(url, max_size=None, close_timeout=5,
+                                          additional_headers=self._ws_headers()) as ws:
                 self._ws = ws
                 logger.info('signaling connected as viewer %s', self.client_id)
 
-                # aiortc has no trickle-out: setLocalDescription blocks until gathering
-                # finishes, so the offer we send already carries every local candidate.
-                await pc.setLocalDescription(await pc.createOffer())
-                await self._send('SDP_OFFER',
-                                 {'type': 'offer', 'sdp': self._offer_sdp(pc)})
+                await self._negotiate(pc)
 
                 while True:
                     left = self._deadline() - time.monotonic()

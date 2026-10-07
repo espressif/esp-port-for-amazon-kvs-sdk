@@ -1,0 +1,32 @@
+menu "AppRTC signaling"
+
+    config APPRTC_SERVER_URL
+        string "AppRTC server URL"
+        default "https://webrtc.espressif.com"
+        help
+            Room server that answers POST /join/<room>. Point this at a local
+            AppRTC deployment to sign a device in without any internet service.
+
+    config APPRTC_ICE_SERVER_URL
+        string "AppRTC ICE server config URL"
+        default "https://webrtc.espressif.com/iceconfig"
+        help
+            Endpoint that returns the STUN and TURN servers to offer to ICE.
+            Point this at a local coturn deployment together with
+            APPRTC_SERVER_URL to keep a session entirely on the local network.
+
+    config APPRTC_USE_FIXED_ROOM
+        bool "Use a fixed room ID"
+        default n
+        help
+            Join the same room on every boot instead of generating one. A test
+            needs this: the viewer has to know which room to join.
+
+    config APPRTC_ROOM_ID
+        string "Fixed AppRTC room ID"
+        default "esp32test"
+        depends on APPRTC_USE_FIXED_ROOM
+        help
+            Room to join when APPRTC_USE_FIXED_ROOM is set.
+
+endmenu

@@ -6,5 +6,6 @@ pytest-embedded-serial-esp>=1.10
 pytest-embedded-idf>=1.10
 aiortc>=1.9
 av>=11.0
-websockets>=12.0
+websockets>=14.0
 boto3>=1.34
+requests>=2.28
