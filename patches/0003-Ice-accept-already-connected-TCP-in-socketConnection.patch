@@ -17,7 +17,7 @@ after the existing EISCONN check (POSIX unaffected).
  1 file changed, 10 insertions(+)
 
 diff --git a/src/source/Ice/SocketConnection.c b/src/source/Ice/SocketConnection.c
-index a8b59390..7818baeb 100644
+index a8b5939040..7818baeb5b 100644
 --- a/src/source/Ice/SocketConnection.c
 +++ b/src/source/Ice/SocketConnection.c
 @@ -494,6 +494,16 @@ BOOL socketConnectionIsConnected(PSocketConnection pSocketConnection)

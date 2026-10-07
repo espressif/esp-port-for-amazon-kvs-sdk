@@ -8,6 +8,14 @@ variables:
   MAKEFLAGS: "-j8 --no-keep-going"
   GIT_SUBMODULE_STRATEGY: recursive
 
+# The runner's own submodule checkout can fail part way (its mirror fetch is
+# refused) and its retry does not recurse, which leaves nested submodules such as
+# esp_hosted's protobuf-c empty. Make every job start from a complete checkout.
+default:
+  before_script:
+    - git submodule sync --recursive
+    - git submodule update --init --recursive
+
 .apply_sdk_patches: &apply_sdk_patches
   - echo "Applying SDK patches to WebRTC SDK submodule..."
   - cd $CI_PROJECT_DIR/amazon-kinesis-video-streams-webrtc-sdk-c
@@ -156,6 +164,8 @@ build_feature_combos:
 build_docs:
   stage: docs
   image: python:3.11
+  # The docs build needs no submodules; skip the default recursive checkout.
+  before_script: []
   tags:
     - build
   artifacts:

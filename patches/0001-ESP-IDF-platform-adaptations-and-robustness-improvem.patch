@@ -24,7 +24,7 @@ Subject: [PATCH 1/3] ESP-IDF platform adaptations and robustness improvements
  10 files changed, 457 insertions(+), 80 deletions(-)
 
 diff --git a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
-index 3beda9d3..872e366b 100644
+index 883b65bd40..18e0651f7d 100644
 --- a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
 +++ b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
 @@ -843,12 +843,12 @@ extern "C" {
@@ -42,7 +42,7 @@ index 3beda9d3..872e366b 100644
  
  /**
   * Env to set minimum number of threads in the threadpool for the KVS SDK
-@@ -1531,6 +1531,21 @@ typedef struct {
+@@ -1536,6 +1536,21 @@ typedef struct {
                                                                //!<
  } RtcIceCandidateInit, *PRtcIceCandidateInit;
  
@@ -64,7 +64,7 @@ index 3beda9d3..872e366b 100644
  /**
   * @brief Structure defining the basic signaling message
   */
-@@ -1545,7 +1560,11 @@ typedef struct {
+@@ -1550,7 +1565,11 @@ typedef struct {
  
      UINT32 payloadLen; //!< Optional payload length. If 0, the length will be calculated
  
@@ -76,7 +76,7 @@ index 3beda9d3..872e366b 100644
  } SignalingMessage, *PSignalingMessage;
  
  /**
-@@ -2392,6 +2411,16 @@ PUBLIC_API STATUS freeSignalingClient(PSIGNALING_CLIENT_HANDLE);
+@@ -2397,6 +2416,16 @@ PUBLIC_API STATUS freeSignalingClient(PSIGNALING_CLIENT_HANDLE);
   */
  PUBLIC_API STATUS signalingClientSendMessageSync(SIGNALING_CLIENT_HANDLE, PSignalingMessage);
  
@@ -94,10 +94,10 @@ index 3beda9d3..872e366b 100644
   * @brief Gets the retrieved ICE configuration information object count
   *
 diff --git a/src/source/Crypto/Dtls_mbedtls.c b/src/source/Crypto/Dtls_mbedtls.c
-index 7d0d02f8..d48fb7fd 100644
+index bdc8951ee4..ee06f549a3 100644
 --- a/src/source/Crypto/Dtls_mbedtls.c
 +++ b/src/source/Crypto/Dtls_mbedtls.c
-@@ -485,7 +485,7 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
+@@ -491,7 +491,7 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
  
      CHK(mbedtls_ssl_setup(&pDtlsSession->sslCtx, &pDtlsSession->sslCtxConfig) == 0, STATUS_SSL_CTX_CREATION_FAILED);
      mbedtls_ssl_set_mtu(&pDtlsSession->sslCtx, DEFAULT_MTU_SIZE_BYTES);
@@ -106,7 +106,7 @@ index 7d0d02f8..d48fb7fd 100644
      CHK_STATUS(dtlsSessionConfigureExpectedServerHostname(pDtlsSession, isServer));
  
  #if !MBEDTLS_BEFORE_V3
-@@ -500,7 +500,7 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
+@@ -506,7 +506,7 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
       * that by capturing the material during the handshake. */
      mbedtls_ssl_set_export_keys_cb(&pDtlsSession->sslCtx, dtlsSessionKeyDerivationCallback, pDtlsSession);
  #endif
@@ -116,7 +116,7 @@ index 7d0d02f8..d48fb7fd 100644
      // Start non-blocking handshaking
      pDtlsSession->dtlsSessionStartTime = GETTIME();
 diff --git a/src/source/Ice/ConnectionListener.c b/src/source/Ice/ConnectionListener.c
-index cc1d64d4..a06834e5 100644
+index cc1d64d45c..a06834e573 100644
 --- a/src/source/Ice/ConnectionListener.c
 +++ b/src/source/Ice/ConnectionListener.c
 @@ -52,7 +52,9 @@ STATUS freeConnectionListener(PConnectionListener* ppConnectionListener)
@@ -145,10 +145,10 @@ index cc1d64d4..a06834e5 100644
  CleanUp:
  
 diff --git a/src/source/Ice/IceAgent.c b/src/source/Ice/IceAgent.c
-index c81630f6..189a10c5 100644
+index 615a455aaa..3890e83bad 100644
 --- a/src/source/Ice/IceAgent.c
 +++ b/src/source/Ice/IceAgent.c
-@@ -2684,12 +2684,19 @@ STATUS incomingRelayedDataHandler(UINT64 customData, PSocketConnection pSocketCo
+@@ -2686,12 +2686,19 @@ STATUS incomingRelayedDataHandler(UINT64 customData, PSocketConnection pSocketCo
  {
      STATUS retStatus = STATUS_SUCCESS;
      PIceCandidate pRelayedCandidate = (PIceCandidate) customData;
@@ -171,7 +171,7 @@ index c81630f6..189a10c5 100644
      CHK_STATUS(turnConnectionIncomingDataHandler(pRelayedCandidate->pTurnConnection, pBuffer, bufferLen, pSrc, pDest, turnChannelData,
                                                   &turnChannelDataCount));
      for (i = 0; i < turnChannelDataCount; ++i) {
-@@ -2698,6 +2705,7 @@ STATUS incomingRelayedDataHandler(UINT64 customData, PSocketConnection pSocketCo
+@@ -2700,6 +2707,7 @@ STATUS incomingRelayedDataHandler(UINT64 customData, PSocketConnection pSocketCo
      }
  
  CleanUp:
@@ -180,7 +180,7 @@ index c81630f6..189a10c5 100644
  
      return retStatus;
 diff --git a/src/source/Ice/SocketConnection.c b/src/source/Ice/SocketConnection.c
-index 797a4a43..a8b59390 100644
+index 797a4a430e..a8b5939040 100644
 --- a/src/source/Ice/SocketConnection.c
 +++ b/src/source/Ice/SocketConnection.c
 @@ -552,8 +552,9 @@ STATUS socketSendDataWithRetry(PSocketConnection pSocketConnection, PBYTE buf, U
@@ -195,7 +195,7 @@ index 797a4a43..a8b59390 100644
                  /* fatal error from send() */
                  DLOGE("sendto() socket %d failed with errno %s(%d)", pSocketConnection->localSocket, getErrorString(errorNum), errorNum);
 diff --git a/src/source/Ice/SocketConnection.h b/src/source/Ice/SocketConnection.h
-index 3f7f4333..404ae0fd 100644
+index 3f7f433332..404ae0fd59 100644
 --- a/src/source/Ice/SocketConnection.h
 +++ b/src/source/Ice/SocketConnection.h
 @@ -11,10 +11,10 @@ extern "C" {
@@ -212,7 +212,7 @@ index 3f7f4333..404ae0fd 100644
          ATOMIC_STORE_BOOL(&(ps)->connectionClosed, TRUE);                                                                                            \
      }
 diff --git a/src/source/Sctp/Sctp.c b/src/source/Sctp/Sctp.c
-index 3c78ab46..da89f5d1 100644
+index 3c78ab4630..da89f5d11b 100644
 --- a/src/source/Sctp/Sctp.c
 +++ b/src/source/Sctp/Sctp.c
 @@ -146,7 +146,7 @@ STATUS initSctpSession()
@@ -247,7 +247,7 @@ index 3c78ab46..da89f5d1 100644
          putUnalignedInt32BigEndian(pSctpSession->packet + SIZEOF(UINT32), pRtcDataChannelInit->maxPacketLifeTime.value);
      }
 diff --git a/src/source/Signaling/LwsApiCalls.c b/src/source/Signaling/LwsApiCalls.c
-index 687dc034..aa5de8a0 100644
+index 687dc034c2..aa5de8a0c3 100644
 --- a/src/source/Signaling/LwsApiCalls.c
 +++ b/src/source/Signaling/LwsApiCalls.c
 @@ -252,7 +252,9 @@ INT32 lwsHttpCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
@@ -1127,7 +1127,7 @@ index 687dc034..aa5de8a0 100644
  
      return (PVOID) (ULONG_PTR) retStatus;
 diff --git a/src/source/Signaling/LwsApiCalls.h b/src/source/Signaling/LwsApiCalls.h
-index 0f0a88cc..85fba6b3 100644
+index 0f0a88cc09..85fba6b3de 100644
 --- a/src/source/Signaling/LwsApiCalls.h
 +++ b/src/source/Signaling/LwsApiCalls.h
 @@ -11,13 +11,13 @@ extern "C" {
@@ -1160,7 +1160,7 @@ index 0f0a88cc..85fba6b3 100644
      UINT32 protocolIndex;
  
 diff --git a/src/source/Srtp/SrtpSession.c b/src/source/Srtp/SrtpSession.c
-index 5c41b05a..5b32fffc 100644
+index 5c41b05a9d..5b32fffc70 100644
 --- a/src/source/Srtp/SrtpSession.c
 +++ b/src/source/Srtp/SrtpSession.c
 @@ -300,9 +300,11 @@ STATUS decryptSrtpPacket(PSrtpSession pSrtpSession, PVOID encryptedMessage, PINT

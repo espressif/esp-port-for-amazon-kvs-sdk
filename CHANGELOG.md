@@ -13,13 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
   repository. The upstream SDK is now a git submodule with platform patches
   applied via `git am patches/*.patch`.
-- Bumped the webrtc-c submodule to **1.20.0** (`4dd058d5`) and dropped the two
-  SDP-renegotiation patches — that flow is now upstream (awslabs#2214). 1.20.0
-  also brings opt-in mbedTLS 4 support (awslabs#2325), unused on IDF 5.5. The
-  current patch set is listed in `patches/README.md`.
-- Moved the usrsctp submodule to tag `0.9.5.0-247-esp.2` on the fork, which adds
-  the Linux/macOS host build fix. The previous pin is tagged `0.9.5.0-247-esp.1`,
-  so both stay fetchable whatever happens to the fork's branches.
+- Moved the webrtc-c submodule to `develop` at `efdec3bf`: release **1.20.0** plus
+  the relay candidate filter (awslabs#2388), the TURN rejected-peer timeout fix
+  (#2387), the rtpmap payload-type fix for 32-bit platforms (#2405), no cipher list
+  on any mbedTLS build (#2409), srflx candidates from a pre-resolved STUN address
+  (#2410), the DTLS fingerprint through `mbedtls_md()` (#2392), the RNG from PSA
+  on mbedTLS 4 (#2385) and the `pSeenTransceivers` initialisation (#2415). 1.20.0
+  brought the SDP-renegotiation flow upstream (awslabs#2214), so the two local
+  patches for it are dropped, and opt-in mbedTLS 4 support (awslabs#2325); #2392,
+  #2385 and #2415 replace local patches 0005, 0004 and 0006. The previous pin
+  `4dd058d5` was the head of the `release-v1.20.0` branch (awslabs#2383); a commit
+  on `develop` stays fetchable when release branches are deleted. The current patch set is listed in `patches/README.md`.
 
 ### Added
 
@@ -45,10 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
   alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
   stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from
-  esp-protocols#1114), and `KVS_USE_MBEDTLS4` is defined for IDF >= 6 so signaling
-  stops sending an OpenSSL-style cipher list. No `USE_LIBSRTP3` is required; two
-  webrtc-c patches are: `patches/0004` (entropy-less RNG from PSA, upstream
-  awslabs#2385) and `patches/0005` (fingerprint via `mbedtls_md()`).
+  esp-protocols#1114). No `USE_LIBSRTP3` is required, and no webrtc-c patch: the
+  entropy-less RNG from PSA (awslabs#2385), the fingerprint through `mbedtls_md()`
+  (awslabs#2392) and signaling sending no OpenSSL-style cipher list on mbedTLS builds
+  (awslabs#2409) are upstream.
 
 - **SDP re-negotiation** — re-offer from the same peer re-uses an active
   session or replaces a terminated one.
@@ -90,8 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `signalingMessageReceived()` read uninitialised locals on its NULL-argument
-  error path; patch 0006 fixes the same pattern in the SDK's
-  `findTransceiversByRemoteDescription()`.
+  error path; the same pattern in the SDK's
+  `findTransceiversByRemoteDescription()` is fixed upstream (awslabs#2415).
 - Jitter buffer dropping multiple valid packets (increased buffer size and
   queue depth).
 - OV2710 black frames (sensor detection, flip-control skip, ioctl access).

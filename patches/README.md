@@ -26,19 +26,21 @@ cd ..
 
 ## Patch ledger
 
-Base: upstream `develop` at **`4dd058d5`** (the 1.20.0 version-bump commit,
-awslabs#2382; no release tag yet). All six patches apply cleanly against this
-base (`git am`, no fuzz). The SDP-renegotiation patches were dropped here — that
-flow is now upstream (awslabs#2214, in 1.20.0).
+Base: upstream `develop` at **`efdec3bf`** (1.20.0 plus ten upstream commits, ending with
+awslabs#2415). All three patches apply cleanly against this base (`git am`, no
+fuzz). The SDP-renegotiation patches were dropped earlier (that flow is upstream
+as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392, 0004 as
+awslabs#2385 and 0006 as awslabs#2415, so all three are dropped; the numbers of
+the remaining patches are unchanged.
 
 | # | Patch | Category | Upstream PR / status |
 |---|-------|----------|----------------------|
 | 0001 | ESP-IDF platform adaptations + robustness — including the `PREFER_DYNAMIC_ALLOCS` / dynamic-signaling-payload work (heap-allocate the payload in `parseSignalingMessage`) and the IceAgent `turnChannelData` heap-allocation | mixed | partial: [awslabs#2146](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2146) for the dynamic-allocs portion |
 | 0002 | PeerConnection: cap peer Opus encoder at 16kHz mono via `DEFAULT_OPUS_FMTP` | ESP-specific | n/a — narrow-Opus negotiation keeps decode under the 20 ms frame budget on P4 |
 | 0003 | Ice: accept already-connected TCP in `socketConnectionIsConnected` (lwIP reports `EALREADY`, not `EISCONN`; use `getpeername`) | ESP-IDF/lwIP-specific | candidate — low-priority portability PR to upstream; drop if it lands |
-| 0004 | Crypto: take the RNG from PSA when mbedTLS has no entropy module (`MBEDTLS_HAS_ENTROPY` gate; ESP-IDF 6 / TF-PSA-Crypto builds) | aligned | [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385) (approved, awaiting merge) |
-| 0005 | Crypto: hash the DTLS certificate through `mbedtls_md()` instead of `mbedtls_sha256()` in `dtlsCertificateFingerprint` | portability | candidate — not yet submitted; needed by any mbedTLS 4 build with a platform PSA hash driver |
-| 0006 | SessionDescription: initialise `pSeenTransceivers` before the first `CHK` in `findTransceiversByRemoteDescription` (early-exit paths reach `hashTableFree()` on an indeterminate pointer) | aligned | candidate — not yet submitted; upstream bug in the awslabs#2214 re-negotiation cleanup |
+| ~~0004~~ | Crypto: take the RNG from PSA when mbedTLS has no entropy module (ESP-IDF 6 / TF-PSA-Crypto builds) | aligned | **upstream** as [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385); dropped |
+| ~~0005~~ | Crypto: hash the DTLS certificate through `mbedtls_md()` | portability | **upstream** as [awslabs#2392](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2392); dropped |
+| ~~0006~~ | SessionDescription: initialise `pSeenTransceivers` before the first `CHK` in `findTransceiversByRemoteDescription` (early-exit paths reach `hashTableFree()` on an indeterminate pointer) | aligned | **upstream** as [awslabs#2415](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2415); dropped |
 
 > **Not carried as patches:** the upstream `Network.c` uses POSIX `getifaddrs()`,
 > which ESP-IDF does not ship, so the ESP-IDF adaptation lives as a full port file
@@ -89,20 +91,16 @@ UDP-blocked networks (TLS TURN only), ICE never gets a relay candidate. Fix
 confirms with `getpeername()` after the existing `EISCONN` fast path (POSIX
 builds unaffected). Worth upstreaming as portability hardening.
 
-**0004 — Take the RNG from PSA when mbedTLS has no entropy module.** ESP-IDF 6
-sets `MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`, so mbedTLS compiles its entropy module
-out and `mbedtls_entropy_*` / `mbedtls_ctr_drbg_*` do not link. The patch keys
-every entropy user on a single `MBEDTLS_HAS_ENTROPY` switch (defined in
-`Include_i.h`): entropy builds keep the CTR-DRBG exactly as before; entropy-less
-builds take the RNG from PSA (`mbedtls_psa_get_random`), with an idempotent
-`psa_crypto_init()` in `createCertificateAndKey()` since `createRtcCertificate()`
-is public API and can run before `initKvsWebRtc()`. A guard at the top of
-`Dtls.h` makes the layout switch tamper-proof: including it without
-`Include_i.h` is a compile error rather than a silently smaller
-`struct __DtlsSession`. Submitted upstream as
-[awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385).
+**0004 — Take the RNG from PSA when mbedTLS has no entropy module** (upstream
+as awslabs#2385; kept here for the history). ESP-IDF 6 sets
+`MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG`, so mbedTLS compiles its entropy module out
+and `mbedtls_entropy_*` / `mbedtls_ctr_drbg_*` do not link. As merged, the DTLS
+and TLS sessions keep their entropy context and CTR-DRBG only before mbedTLS 4;
+on mbedTLS 4 the SDK takes all its randomness from PSA.
 
-**0005 — Fingerprint through the message-digest layer.** mbedTLS 4
+**0005 — Fingerprint through the message-digest layer** (upstream as
+awslabs#2392, which also moves the TURN MD5 through `mbedtls_md()`; kept here for
+the history). mbedTLS 4
 (TF-PSA-Crypto) moved `mbedtls_sha256()` into the private header
 `mbedtls/private/sha256.h`, and the builtin SHA-256 driver is only compiled when
 no platform PSA accelerator is registered. On ESP-IDF v6 with
@@ -121,7 +119,7 @@ matching PRs land:
 | Local patch | Removed when |
 |-------------|--------------|
 | 0001 (aligned / dynamic-allocs half) | `awslabs#2146` merges |
-| 0004 | [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385) merges |
-| 0005 | upstream stops calling `mbedtls_sha256()` directly (or mbedTLS re-exports it) |
+| ~~0004~~ | dropped: upstream as awslabs#2385 |
+| ~~0005~~ | dropped: upstream as awslabs#2392 |
 
 Keep this file up-to-date as patches are added, removed, or split.
