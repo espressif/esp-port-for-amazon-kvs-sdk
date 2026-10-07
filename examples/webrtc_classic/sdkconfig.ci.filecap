@@ -9,5 +9,6 @@
 # then not exercised at all -- keep the camera path for the runs where that
 # matters. sdkconfig.ci.emu sets this directly, since ESP-EMU models no camera.
 #
-# Video only: audio stays on the real microphone path.
+# The image ships video.pack (60 H.264 frames) and audio.pack (618 Opus frames), but
+# webrtc_classic swaps only video: audio stays on the real microphone path.
 CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y

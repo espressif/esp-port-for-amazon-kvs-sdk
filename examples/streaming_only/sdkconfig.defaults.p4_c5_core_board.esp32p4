@@ -25,3 +25,6 @@ CONFIG_SLAVE_GPIO0_TRIGGER_PIN=47
 #
 CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
 CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
+
+# This board has no audio codec; the capture path is a capability, not a board name.
+CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n

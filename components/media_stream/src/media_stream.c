@@ -27,7 +27,7 @@ static const char *TAG = "media_stream";
 
 #define NUMBER_OF_H264_FRAME_FILES               60 //1500
 #define NUMBER_OF_H265_FRAME_FILES               1500
-#define NUMBER_OF_OPUS_FRAME_FILES               618
+#define NUMBER_OF_OPUS_FRAME_FILES               25
 
 #define DEFAULT_FPS_VALUE                        25
 #define DEFAULT_VIDEO_HEIGHT_PIXELS              720
@@ -63,6 +63,112 @@ static char s_audio_file_prefix[64] = "samples/sample";
 static char s_video_file_extension[16] = ".h264";
 static char s_audio_file_extension[16] = ".opus";
 
+/* One file per medium plus an index, opened once. Per-frame files cost two
+ * fopen() per frame, which SPIFFS makes worse as the file count grows. */
+#define SAMPLE_PACK_MAGIC 0x31464B50u   /* "PKF1" */
+
+typedef struct {
+    FILE     *fp;
+    uint32_t  count;
+    uint32_t *offset;
+    uint32_t *length;
+    bool      tried;
+} sample_pack_t;
+
+static sample_pack_t s_video_pack;
+static sample_pack_t s_audio_pack;
+
+static void pack_path(char *out, size_t out_len, const char *prefix, const char *name)
+{
+    const char *slash = strrchr(prefix, '/');
+    int dir_len = slash ? (int)(slash - prefix) : 0;
+    if (dir_len > 0) {
+        snprintf(out, out_len, "%s/%.*s/%s", s_mount_point, dir_len, prefix, name);
+    } else {
+        snprintf(out, out_len, "%s/%s", s_mount_point, name);
+    }
+}
+
+/* A missing pack is not an error; the caller falls back to per-frame files. */
+static esp_err_t pack_open(sample_pack_t *p, const char *prefix, const char *name)
+{
+    if (p->fp) {
+        return ESP_OK;
+    }
+    if (p->tried) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    p->tried = true;
+
+    char path[160];
+    pack_path(path, sizeof(path), prefix, name);
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        ESP_LOGI(TAG, "No %s; using per-frame sample files", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint32_t hdr[2];
+    if (fread(hdr, sizeof(hdr), 1, fp) != 1 || hdr[0] != SAMPLE_PACK_MAGIC || hdr[1] == 0) {
+        ESP_LOGE(TAG, "%s is not a sample pack", path);
+        fclose(fp);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint32_t n = hdr[1];
+    uint32_t *off = calloc(n, sizeof(uint32_t));
+    uint32_t *len = calloc(n, sizeof(uint32_t));
+    if (!off || !len) {
+        free(off);
+        free(len);
+        fclose(fp);
+        return ESP_ERR_NO_MEM;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t entry[2];
+        if (fread(entry, sizeof(entry), 1, fp) != 1) {
+            free(off);
+            free(len);
+            fclose(fp);
+            return ESP_FAIL;
+        }
+        off[i] = entry[0];
+        len[i] = entry[1];
+    }
+
+    p->fp = fp;
+    p->count = n;
+    p->offset = off;
+    p->length = len;
+    ESP_LOGI(TAG, "Opened %s: %" PRIu32 " frames", path, n);
+    return ESP_OK;
+}
+
+static esp_err_t pack_read(sample_pack_t *p, uint32_t idx, uint8_t *buf, uint32_t *size)
+{
+    if (!p->fp || idx >= p->count || size == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint32_t len = p->length[idx];
+    if (buf == NULL) {
+        *size = len;
+        return ESP_OK;
+    }
+    if (*size < len) {
+        *size = len;
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (fseek(p->fp, (long)p->offset[idx], SEEK_SET) != 0) {
+        return ESP_FAIL;
+    }
+    if (fread(buf, 1, len, p->fp) != len) {
+        return ESP_FAIL;
+    }
+    *size = len;
+    return ESP_OK;
+}
+
 // File-based capture state structures
 typedef struct {
     bool started;
@@ -71,6 +177,8 @@ typedef struct {
     uint32_t frame_buffer_size;
     uint32_t current_bitrate_kbps;
     uint64_t start_time;
+    uint32_t period_us;
+    int64_t next_due_us;
 } file_video_capture_state_t;
 
 typedef struct {
@@ -79,6 +187,8 @@ typedef struct {
     uint8_t *frame_buffer;
     uint32_t frame_buffer_size;
     uint64_t start_time;
+    uint32_t period_us;
+    int64_t next_due_us;
 } file_audio_capture_state_t;
 
 // Default audio capture implementation
@@ -247,6 +357,20 @@ static media_stream_video_player_t s_video_player_if = {
 // File-based Video Capture Interface Implementation
 // =============================================================================
 
+/* Sample files carry no clock. Unpaced, the faster medium starves the other on
+ * the shared transport. Release each frame on its own period. */
+static void file_capture_pace(int64_t *next_due_us, uint32_t period_us)
+{
+    int64_t now = esp_timer_get_time();
+    int64_t wait_us = *next_due_us - now;
+    if (wait_us > 0) {
+        vTaskDelay(pdMS_TO_TICKS((wait_us + 999) / 1000));
+    }
+    /* A late reader restarts from now, so one slow frame does not bunch the rest. */
+    *next_due_us = (wait_us > -(int64_t)period_us) ? *next_due_us + period_us
+                                                   : esp_timer_get_time() + period_us;
+}
+
 static esp_err_t file_video_capture_init_impl(video_capture_config_t *config, video_capture_handle_t *handle)
 {
     file_video_capture_state_t *state = NULL;
@@ -265,6 +389,7 @@ static esp_err_t file_video_capture_init_impl(video_capture_config_t *config, vi
     state->frame_buffer = NULL;
     state->frame_buffer_size = 0;
     state->start_time = 0;
+    state->period_us = 1000000u / (config->resolution.fps ? config->resolution.fps : DEFAULT_FPS_VALUE);
 
     *handle = (video_capture_handle_t)state;
     ESP_LOGI(TAG, "File-based video capture initialized");
@@ -283,6 +408,7 @@ static esp_err_t file_video_capture_start_impl(video_capture_handle_t handle)
     state->start_time = esp_timer_get_time() * 10; // Convert to 100ns units
     s_video_ref_time = state->start_time;
     s_video_file_index = 0;
+    state->next_due_us = esp_timer_get_time();
     ESP_LOGI(TAG, "File-based video capture started");
     return ESP_OK;
 }
@@ -327,7 +453,8 @@ static esp_err_t file_video_capture_get_frame_impl(video_capture_handle_t handle
         }
     }
 
-    // Get frame from file
+    file_capture_pace(&state->next_due_us, state->period_us);
+
     ret = media_stream_get_sample_video_frame(state->frame_buffer, state->frame_buffer_size,
                                               &actual_size, &timestamp);
     if (ret != ESP_OK) {
@@ -443,6 +570,7 @@ static esp_err_t file_audio_capture_init_impl(audio_capture_config_t *config, au
     state->frame_buffer = NULL;
     state->frame_buffer_size = 0;
     state->start_time = 0;
+    state->period_us = 1000u * (config->frame_duration_ms ? config->frame_duration_ms : 20);
 
     *handle = (audio_capture_handle_t)state;
     ESP_LOGI(TAG, "File-based audio capture initialized");
@@ -461,6 +589,7 @@ static esp_err_t file_audio_capture_start_impl(audio_capture_handle_t handle)
     state->start_time = esp_timer_get_time() * 10; // Convert to 100ns units
     s_audio_ref_time = state->start_time;
     s_audio_file_index = 0;
+    state->next_due_us = esp_timer_get_time();
     ESP_LOGI(TAG, "File-based audio capture started");
     return ESP_OK;
 }
@@ -505,7 +634,8 @@ static esp_err_t file_audio_capture_get_frame_impl(audio_capture_handle_t handle
         }
     }
 
-    // Get frame from file
+    file_capture_pace(&state->next_due_us, state->period_us);
+
     ret = media_stream_get_sample_audio_frame(state->frame_buffer, state->frame_buffer_size,
                                               &actual_size, &timestamp);
     if (ret != ESP_OK) {
@@ -1042,9 +1172,21 @@ esp_err_t media_stream_get_sample_video_frame(uint8_t *frame_data, size_t max_si
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Update file index and get next frame
-    s_video_file_index = s_video_file_index % NUMBER_OF_H264_FRAME_FILES + 1;
+    // One packed file per medium when it is present; per-frame files otherwise.
+    bool use_pack = (pack_open(&s_video_pack, s_video_file_prefix, "video.pack") == ESP_OK);
+    uint32_t total = use_pack ? s_video_pack.count : NUMBER_OF_H264_FRAME_FILES;
+
+    s_video_file_index = s_video_file_index % total + 1;
     ESP_LOGD(TAG, "Getting H264 Sample: %" PRIu32, s_video_file_index);
+
+    if (use_pack) {
+        uint32_t packSize = max_size;
+        esp_err_t pret = pack_read(&s_video_pack, s_video_file_index - 1, frame_data, &packSize);
+        if (pret != ESP_OK) {
+            return pret;
+        }
+        *actual_size = packSize;
+    } else {
 
     char filePath[256];
     int needed_size = snprintf(filePath, sizeof(filePath), "%s/%s-%04" PRIu32 "%s",
@@ -1076,6 +1218,7 @@ esp_err_t media_stream_get_sample_video_frame(uint8_t *frame_data, size_t max_si
     }
 
     *actual_size = frameSize;
+    }
     // TODO: is this good way for reference time?
     *timestamp = esp_timer_get_time() * 10 - s_video_ref_time; // Convert to 100ns units
 
@@ -1101,9 +1244,22 @@ esp_err_t media_stream_get_sample_audio_frame(uint8_t *frame_data, size_t max_si
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Update file index and get next frame
-    s_audio_file_index = s_audio_file_index % NUMBER_OF_OPUS_FRAME_FILES + 1;
+    // One packed file per medium when it is present; per-frame files otherwise.
+    bool use_pack = (pack_open(&s_audio_pack, s_audio_file_prefix, "audio.pack") == ESP_OK);
+    uint32_t total = use_pack ? s_audio_pack.count : NUMBER_OF_OPUS_FRAME_FILES;
+
+    s_audio_file_index = s_audio_file_index % total + 1;
     ESP_LOGD(TAG, "Getting Opus Sample: %" PRIu32, s_audio_file_index);
+
+    if (use_pack) {
+        uint32_t packSize = max_size;
+        esp_err_t pret = pack_read(&s_audio_pack, s_audio_file_index - 1, frame_data, &packSize);
+        if (pret != ESP_OK) {
+            *actual_size = packSize;
+            return pret;
+        }
+        *actual_size = packSize;
+    } else {
 
     char filePath[256];
     int needed_size = snprintf(filePath, sizeof(filePath), "%s/%s-%04" PRIu32 "%s",
@@ -1135,6 +1291,7 @@ esp_err_t media_stream_get_sample_audio_frame(uint8_t *frame_data, size_t max_si
     }
 
     *actual_size = frameSize;
+    }
     // TODO: is this good way for reference time?
     *timestamp = esp_timer_get_time() * 10 - s_audio_ref_time; // Convert to 100ns units
 
