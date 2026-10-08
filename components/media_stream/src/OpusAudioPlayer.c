@@ -5,6 +5,7 @@
  */
 
 #include <stdio.h>
+#include <pthread.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -458,7 +459,7 @@ static void opus_player_task(void *arg)
 }
 #endif
 
-esp_err_t OpusAudioPlayerInit()
+static esp_err_t opus_audio_player_init_locked(void)
 {
     static bool initialized = false; // allow only one initialization
     if (initialized) {
@@ -605,6 +606,19 @@ esp_err_t OpusAudioPlayerInit()
 
     initialized = true;
     return ESP_OK;
+}
+
+/* Two callers can set up the player at once (one per session, or the offer and the
+ * CONNECTED paths of one). Without this both pass the checks above, which run
+ * unguarded, and both run bsp_audio_codec_speaker_init(), which asserts. */
+static pthread_mutex_t s_init_lock = PTHREAD_MUTEX_INITIALIZER;
+
+esp_err_t OpusAudioPlayerInit()
+{
+    pthread_mutex_lock(&s_init_lock);
+    esp_err_t ret = opus_audio_player_init_locked();
+    pthread_mutex_unlock(&s_init_lock);
+    return ret;
 }
 
 esp_err_t OpusAudioPlayerDeinit()

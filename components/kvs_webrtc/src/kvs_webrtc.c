@@ -498,6 +498,8 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
     CHK(session != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     session->client = client_data;
+    session->media_lock = MUTEX_CREATE(FALSE);
+    CHK(IS_VALID_MUTEX_VALUE(session->media_lock), STATUS_NOT_ENOUGH_MEMORY);
     STRNCPY(session->peer_id, peer_id, SIZEOF(session->peer_id) - 1);
     session->peer_id[SIZEOF(session->peer_id) - 1] = '\0';
     session->is_initiator = is_initiator;
@@ -656,6 +658,9 @@ CleanUp:
         // Cleanup on failure
         if (session->peer_connection != NULL) {
             freePeerConnection(&session->peer_connection);
+        }
+        if (IS_VALID_MUTEX_VALUE(session->media_lock)) {
+            MUTEX_FREE(session->media_lock);
         }
         SAFE_MEMFREE(session);
     }
@@ -876,6 +881,9 @@ SkipCleanup:
         ESP_LOGI(TAG, "Peer connection already cleaned up for peer: %s", session->peer_id);
     }
 
+    if (IS_VALID_MUTEX_VALUE(session->media_lock)) {
+        MUTEX_FREE(session->media_lock);
+    }
     SAFE_MEMFREE(session);
 
 CleanUp:

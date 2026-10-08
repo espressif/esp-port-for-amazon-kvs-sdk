@@ -20,6 +20,7 @@
  */
 
 #include <inttypes.h>
+#include <pthread.h>
 #include "sdkconfig.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -36,10 +37,25 @@
 
 static const char *TAG = "kvs_media";
 
+/* Called by the player, possibly under session->media_lock, so it only marks the
+ * request. kvs_media_send_pending_pli() sends it once the lock is released. */
 static void kvs_media_request_keyframe(void *ctx)
 {
     kvs_pc_session_t *session = (kvs_pc_session_t *)ctx;
-    if (session == NULL || session->video_transceiver == NULL) {
+    /* Not once teardown has begun; see request_keyframe() in the video player. */
+    if (session == NULL || session->terminated) {
+        return;
+    }
+    ATOMIC_STORE_BOOL(&session->pli_pending, TRUE);
+}
+
+/* Call without session->media_lock held. */
+static void kvs_media_send_pending_pli(kvs_pc_session_t *session)
+{
+    if (!ATOMIC_EXCHANGE_BOOL(&session->pli_pending, FALSE)) {
+        return;
+    }
+    if (session->terminated || session->video_transceiver == NULL) {
         return;
     }
     STATUS status = transceiverSendPictureLoss(session->video_transceiver);
@@ -1252,6 +1268,14 @@ CleanUp:
     return retStatus;
 }
 
+/* Player setup runs from two threads for one session: the offer path once the answer is
+ * out, and the CONNECTED state callback. The players behind it are device-wide (one
+ * speaker codec, one I2S port), so a second setup that starts while the first is still
+ * inside a slow codec init would find the I2S channels made but the codec interface not
+ * yet, and the BSP asserts. One setup at a time, across sessions too, and no teardown
+ * in the middle of one. */
+static pthread_mutex_t s_player_setup_lock = PTHREAD_MUTEX_INITIALIZER;
+
 STATUS kvs_media_stop_session(kvs_pc_session_t* session)
 {
     STATUS retStatus = STATUS_SUCCESS;
@@ -1261,11 +1285,20 @@ STATUS kvs_media_stop_session(kvs_pc_session_t* session)
     // Mark session as terminated (global media threads handle transmission termination separately)
     session->terminated = TRUE;
 
+    /* Not while a setup is still creating the players, and not under a frame being handed over. */
+    pthread_mutex_lock(&s_player_setup_lock);
+    if (IS_VALID_MUTEX_VALUE(session->media_lock)) {
+        MUTEX_LOCK(session->media_lock);
+    }
+
     // Cleanup media players (session-specific)
     if (session->client->config.video_player != NULL && session->video_player_handle != NULL) {
         media_stream_video_player_t *video_player = (media_stream_video_player_t*)session->client->config.video_player;
-        video_player->stop(session->video_player_handle);
-        video_player->deinit(session->video_player_handle);
+        /* A stop that timed out left the decode task running: deinit() would free its
+         * state under it, so the player is leaked instead. */
+        if (video_player->stop(session->video_player_handle) != ESP_ERR_TIMEOUT) {
+            video_player->deinit(session->video_player_handle);
+        }
         session->video_player_handle = NULL;
     }
 
@@ -1275,6 +1308,11 @@ STATUS kvs_media_stop_session(kvs_pc_session_t* session)
         audio_player->deinit(session->audio_player_handle);
         session->audio_player_handle = NULL;
     }
+
+    if (IS_VALID_MUTEX_VALUE(session->media_lock)) {
+        MUTEX_UNLOCK(session->media_lock);
+    }
+    pthread_mutex_unlock(&s_player_setup_lock);
 
     // Session-specific frame buffers are now handled by global threads
     // No per-session cleanup needed
@@ -1286,8 +1324,12 @@ CleanUp:
 STATUS kvs_media_setup_players(kvs_pc_session_t* session, kvs_media_config_t* config)
 {
     STATUS retStatus = STATUS_SUCCESS;
+    BOOL locked = FALSE;
 
     CHK(session != NULL && config != NULL, STATUS_NULL_ARG);
+
+    pthread_mutex_lock(&s_player_setup_lock);
+    locked = TRUE;
 
     // Initialize media players if not already done
     if (!session->media_players_initialized) {
@@ -1358,6 +1400,9 @@ STATUS kvs_media_setup_players(kvs_pc_session_t* session, kvs_media_config_t* co
     }
 
 CleanUp:
+    if (locked) {
+        pthread_mutex_unlock(&s_player_setup_lock);
+    }
     return retStatus;
 }
 
@@ -1430,10 +1475,24 @@ VOID kvs_media_video_frame_handler(UINT64 customData, PFrame pFrame)
         .type = (pFrame->flags & FRAME_FLAG_KEY_FRAME) ? VIDEO_FRAME_TYPE_I : VIDEO_FRAME_TYPE_P
     };
 
-    // Send frame to player
-    esp_err_t err = video_player->play_frame(session->video_player_handle,
-                                             video_frame.buffer, video_frame.len,
-                                             video_frame.type == VIDEO_FRAME_TYPE_I);
+    // Send frame to player. Under the session's media lock, so a teardown can't free the
+    // player while the frame is being handed over.
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (IS_VALID_MUTEX_VALUE(session->media_lock)) {
+        MUTEX_LOCK(session->media_lock);
+    }
+    if (session->video_player_handle != NULL) {
+        err = video_player->play_frame(session->video_player_handle,
+                                       video_frame.buffer, video_frame.len,
+                                       video_frame.type == VIDEO_FRAME_TYPE_I);
+    }
+    if (IS_VALID_MUTEX_VALUE(session->media_lock)) {
+        MUTEX_UNLOCK(session->media_lock);
+    }
+
+    /* A key-frame request made while the frame was handed over, or by the decode
+     * task since the last frame, goes out now that media_lock is free. */
+    kvs_media_send_pending_pli(session);
 
     if (err != ESP_OK && rx_frame_count <= 10) {
         ESP_LOGW(TAG, "Failed to play video frame: %s", esp_err_to_name(err));
