@@ -272,6 +272,9 @@ int esp_cli_start()
 
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    /* The 256-byte default cuts long arguments without an error. Credentials
+     * entered at the prompt (a Cognito refresh token is about 1.7 kB) need more. */
+    repl_config.max_cmdline_length = 2048;
 #ifdef ENABLE_SIGNALLING_ONLY
     repl_config.prompt = "signalling> ";
 #elif ENABLE_STREAMING_ONLY
