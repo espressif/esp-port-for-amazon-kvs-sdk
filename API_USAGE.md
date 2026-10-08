@@ -537,10 +537,15 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
 | `APP_WEBRTC_EVENT_STREAMING_STARTED` | Media streaming has started |
 | `APP_WEBRTC_EVENT_STREAMING_STOPPED` | Media streaming has stopped |
 | `APP_WEBRTC_EVENT_RECEIVED_OFFER` | Received SDP offer from peer |
-| `APP_WEBRTC_EVENT_SENT_ANSWER` | Sent SDP answer to peer |
+| `APP_WEBRTC_EVENT_SENT_ANSWER` | Signaling accepted the SDP answer: sent, or buffered to re-send after a signaling reconnect |
 | `APP_WEBRTC_EVENT_ERROR` | General error occurred |
-| `APP_WEBRTC_EVENT_SIGNALING_ERROR` | Error in signaling |
+| `APP_WEBRTC_EVENT_SIGNALING_ERROR` | Error in signaling (`peer_id` is set when the answer to that peer could not be sent) |
 | `APP_WEBRTC_EVENT_PEER_CONNECTION_FAILED` | Peer connection failed |
+
+> **A buffered answer that never goes out** raises no further event. That happens
+> when it is 30 s old, when more than four answers are waiting, or when its peer
+> leaves. The liveness watchdog then disconnects the session at the same 30 s
+> connect deadline.
 
 ## Example Usage
 

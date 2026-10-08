@@ -101,7 +101,11 @@ typedef enum {
     APP_WEBRTC_EVENT_STREAMING_STARTED,             //!< Media streaming threads started for a peer
     APP_WEBRTC_EVENT_STREAMING_STOPPED,             //!< Media streaming threads stopped for a peer
     APP_WEBRTC_EVENT_RECEIVED_OFFER,                //!< Received WebRTC offer from peer
-    APP_WEBRTC_EVENT_SENT_ANSWER,                   //!< Sent WebRTC answer to peer
+    APP_WEBRTC_EVENT_SENT_ANSWER,                   //!< Signaling accepted the answer: sent, or buffered to re-send on reconnect.
+                                                    //!< A failed answer raises APP_WEBRTC_EVENT_SIGNALING_ERROR with peer_id set.
+                                                    //!< A buffered answer that never goes out (30 s old, displaced when more
+                                                    //!< than four are waiting, or its peer left) is only logged; the liveness
+                                                    //!< watchdog disconnects its session at the same 30 s connect deadline.
     APP_WEBRTC_EVENT_SENT_OFFER,                    //!< Sent WebRTC offer to peer
     APP_WEBRTC_EVENT_RECEIVED_ICE_CANDIDATE,        //!< Received ICE candidate from peer
     APP_WEBRTC_EVENT_SENT_ICE_CANDIDATE,            //!< Sent ICE candidate to peer
@@ -113,7 +117,7 @@ typedef enum {
 
     // Error Events
     APP_WEBRTC_EVENT_ERROR,                         //!< General WebRTC error occurred
-    APP_WEBRTC_EVENT_SIGNALING_ERROR,               //!< Signaling-specific error occurred
+    APP_WEBRTC_EVENT_SIGNALING_ERROR,               //!< Signaling-specific error occurred (peer_id set when an answer to that peer could not be sent)
 } app_webrtc_event_t;
 
 /**

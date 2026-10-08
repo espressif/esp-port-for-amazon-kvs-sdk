@@ -408,25 +408,43 @@ static WEBRTC_STATUS peerOutboundMessageWrapper(uint64_t customData, webrtc_mess
              (unsigned) pWebRtcMessage->payload_len,
              pWebRtcMessage->peer_client_id);
 
+    BOOL isAnswer = (pWebRtcMessage->message_type == WEBRTC_MESSAGE_TYPE_ANSWER);
+
     // DEBUG: Log SDP answer content for comparison with legacy
-    if (pWebRtcMessage->message_type == WEBRTC_MESSAGE_TYPE_ANSWER) {
+    if (isAnswer) {
         ESP_LOGD(TAG, "INTERFACE_SDP_ANSWER: len=%" PRIu32 ", corr_id=%s",
                  pWebRtcMessage->payload_len, pWebRtcMessage->correlation_id);
         ESP_LOGD(TAG, "INTERFACE_SDP_ANSWER_CONTENT: %.500s", pWebRtcMessage->payload);
-
-        raiseEvent(APP_WEBRTC_EVENT_SENT_ANSWER, 0, pWebRtcMessage->peer_client_id, "Sent answer to peer");
     }
 
     // Otherwise, send directly via signaling interface (if available)
+    WEBRTC_STATUS sendStatus = WEBRTC_STATUS_INVALID_OPERATION;
     if (gWebRtcAppConfig.signaling_client_if != NULL && gSignalingClientData != NULL &&
         gWebRtcAppConfig.signaling_client_if->send_message != NULL) {
         ESP_LOGD(TAG, "peerOutboundMessageWrapper: forwarding to signaling (type=%d, len=%u)",
                  (int) pWebRtcMessage->message_type, (unsigned) pWebRtcMessage->payload_len);
         retStatus = gWebRtcAppConfig.signaling_client_if->send_message(gSignalingClientData, pWebRtcMessage);
-        return STATUS_FAILED(retStatus) ? WEBRTC_STATUS_INTERNAL_ERROR : WEBRTC_STATUS_SUCCESS;
+        sendStatus = STATUS_FAILED(retStatus) ? WEBRTC_STATUS_INTERNAL_ERROR : WEBRTC_STATUS_SUCCESS;
     }
 
-    return WEBRTC_STATUS_INVALID_OPERATION;
+    // Report the answer only once the signaling client has taken it. Success
+    // includes an answer buffered because the link was down: the client re-sends
+    // it on reconnect (KVS: kvs_signaling's re-send buffer). Raised before the
+    // send, SENT_ANSWER said "Sent answer to peer" for an answer that was lost.
+    if (isAnswer) {
+        if (WEBRTC_STATUS_SUCCEEDED(sendStatus)) {
+            raiseEvent(APP_WEBRTC_EVENT_SENT_ANSWER, 0, pWebRtcMessage->peer_client_id, "Sent answer to peer");
+        } else {
+            // The signaling client's own status when it was called, else why not
+            UINT32 errorCode = STATUS_FAILED(retStatus) ? (UINT32) retStatus : (UINT32) sendStatus;
+            ESP_LOGE(TAG, "Failed to send answer to peer %s: 0x%08" PRIx32,
+                     pWebRtcMessage->peer_client_id, errorCode);
+            raiseEvent(APP_WEBRTC_EVENT_SIGNALING_ERROR, errorCode, pWebRtcMessage->peer_client_id,
+                       "Failed to send answer to peer");
+        }
+    }
+
+    return sendStatus;
 }
 
 /**
