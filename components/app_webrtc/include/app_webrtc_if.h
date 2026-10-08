@@ -259,8 +259,9 @@ typedef struct {
     // Get current signaling connection state
     WEBRTC_STATUS (*get_state)(void *pSignalingClient, webrtc_signaling_state_t *pState);
 
-    // Drop candidates buffered for a departed peer (optional; may be NULL) so the
-    // re-trickle buffer frees its slots at teardown, not at the retry cap.
+    // Drop the answer and candidates buffered for a departed peer (optional; may be
+    // NULL) so the re-send buffer frees its slots at teardown, not at the retry cap
+    // or age bound.
     WEBRTC_STATUS (*purge_peer_candidates)(void *pSignalingClient, const char *peer_id);
 } webrtc_signaling_client_if_t;
 
