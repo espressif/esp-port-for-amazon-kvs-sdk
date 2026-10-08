@@ -8,8 +8,8 @@ core board. Follow it in order. Each step says what to expect.
 | Item | Value |
 | --- | --- |
 | Board | ESP32-P4 + ESP32-C5 core board |
-| ESP-IDF | master, `v6.2-dev-2630-gbdc0746c657` or newer |
-| esp_hosted | 3.0.10, pulled by the component manager |
+| ESP-IDF | master, `v6.2-dev-2630` or newer |
+| esp_hosted | 3.1.0, pulled by the component manager |
 | Host application | `examples/streaming_only`, runs on the P4 |
 | Co-processor application | `examples/signaling_only`, runs on the C5 |
 | AWS | a Kinesis Video Streams signaling channel and temporary credentials |
@@ -81,9 +81,13 @@ SDKCONFIG_DEFAULTS="$SD_CP" idf.py -B cp -DSDKCONFIG=cp/sdkconfig build
 export SD_CP="$SD_CP;sdkconfig.defaults.lowpower"
 ```
 
-That file pins the Wi-Fi buffer counts, the softAP switch and the MSPI pad state
+That file pins the Wi-Fi buffer counts, the softAP security options and the MSPI pad state
 to the values from the build that measured lowest. Without it the numbers are
 not comparable.
+
+The host needs its own `sdkconfig.defaults.lowpower` then (step 5). It carries
+the same Wi-Fi buffer counts. Without it the host's Wi-Fi init config differs,
+and the co-processor re-initialises Wi-Fi on every host wake.
 
 ## 5. Build the host, on the P4
 
@@ -98,6 +102,13 @@ sdkconfig.defaults.powersave"
 SDKCONFIG_DEFAULTS="$SD_HOST" idf.py -B host -DSDKCONFIG=host/sdkconfig set-target esp32p4
 cd ../.. && ./patches/esp_hosted/apply.sh && cd examples/streaming_only
 SDKCONFIG_DEFAULTS="$SD_HOST" idf.py -B host -DSDKCONFIG=host/sdkconfig build
+```
+
+If the co-processor has the low-power overlay, add the host one before
+`set-target`:
+
+```
+export SD_HOST="$SD_HOST;sdkconfig.defaults.lowpower"
 ```
 
 ## 6. Check the configuration before you flash
