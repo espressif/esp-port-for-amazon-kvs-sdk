@@ -107,8 +107,13 @@ static volatile bool s_task_parked = true;
 static bool s_drain_clean = true;
 #endif
 
+/* A UVC camera's YUY2 is repacked for the hardware encoder; the software encoder reads it as
+ * it arrives. */
+#define UVC_REPACK_FOR_HW_ENC  (MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && \
+                                !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264 && \
+                                !MEDIA_STREAM_HAS_SW_H264_ENC)
 
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+#if UVC_REPACK_FOR_HW_ENC
 /* YUY2 -> O_UYY_E_VYY, the only raw layout the P4 hardware encoder accepts.
  *
  * Both formats carry one chroma pair per two pixels, so this is a repack rather than a
@@ -137,7 +142,7 @@ static void yuy2_to_o_uyy_e_vyy(const uint8_t *src, uint8_t *dst, uint32_t width
 }
 #endif
 
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+#if UVC_REPACK_FOR_HW_ENC
 static uint8_t *s_conv_buf;
 static size_t s_conv_buf_len;
 #endif
@@ -239,7 +244,7 @@ static void h264_scan_au(const uint8_t *buf, uint32_t len, h264_au_info_t *info)
 }
 
 #if H264_ENCODE
-#include "esp_h264_hw_enc.h"
+#include "h264_enc.h"
 #if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_alloc.h"
 #include "esp_cache.h"
@@ -678,7 +683,7 @@ static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
      * own hardware, and nothing about it needs to happen before the next DQBUF. */
     const uint32_t new_bitrate = video_rate_ctrl_pull_bitrate_bps();
     if (new_bitrate) {
-        esp_h264_hw_enc_set_bitrate(new_bitrate);
+        h264_enc_set_bitrate(new_bitrate);
     }
 
     const uint8_t *src     = raw->buffer;
@@ -688,7 +693,7 @@ static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
      * it, so the CSI path passes straight through; a UVC camera hands over YUY2, which is
      * repacked here rather than in the pump - the pump publishes what the camera actually
      * produced, and a format only this consumer needs is this consumer's problem. */
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+#if UVC_REPACK_FOR_HW_ENC
     if (raw->fourcc == VIDEO_FOURCC_YUYV) {
         const size_t need = (size_t)raw->width * raw->height * 3 / 2;
         if (s_conv_buf_len < need) {
@@ -707,16 +712,18 @@ static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
     }
 #endif
 
-    /* Whatever reaches the hardware encoder has to be the ISP layout by now - natively, or via
-     * the repack above, which is the only thing that moves src off the camera buffer. Anything
-     * else would be read as w*h*3/2 bytes of semi-packed YUV420 regardless of what it really is,
-     * giving plausible-looking corrupt video instead of an error. */
-    if (src == raw->buffer && raw->fourcc != VIDEO_FOURCC_O_UYY_E_VYY) {
+    /* Whatever reaches the encoder has to be its input layout by now - natively, or via the
+     * repack above, which is the only thing that moves src off the camera buffer. Anything
+     * else would be read as if it were, giving plausible-looking corrupt video instead of an
+     * error. */
+    if (src == raw->buffer && raw->fourcc != h264_enc_input_fourcc()) {
         static uint32_t bad_fmt_count;
         bad_fmt_count++;
         if (bad_fmt_count == 1 || (bad_fmt_count & 0x1F) == 0) {
-            ESP_LOGE(TAG, "encoder sink was handed '%.4s'; it takes O_UYY_E_VYY only "
-                          "(count=%" PRIu32 ")", (const char *)&raw->fourcc, bad_fmt_count);
+            const uint32_t want = h264_enc_input_fourcc();
+            ESP_LOGE(TAG, "encoder sink was handed '%.4s'; it takes '%.4s' only "
+                          "(count=%" PRIu32 ")", (const char *)&raw->fourcc,
+                          (const char *)&want, bad_fmt_count);
         }
         return;
     }
@@ -724,11 +731,11 @@ static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
     /* Borrowed: valid only until the next encode, which is why it is copied into
      * the pool below rather than published directly. */
     esp_h264_out_buf_t enc = {0};
-    if (esp_h264_hw_enc_encode_frame_borrow((uint8_t *)src, src_len, &enc) != ESP_OK) {
+    if (h264_enc_encode_borrow((uint8_t *)src, src_len, &enc) != ESP_OK) {
         static uint32_t enc_fail_count;
         enc_fail_count++;
         if (enc_fail_count == 1 || (enc_fail_count & 0x1F) == 0) {
-            ESP_LOGW(TAG, "esp_h264_hw_enc_encode_frame_borrow() failed (count=%" PRIu32 ")",
+            ESP_LOGW(TAG, "h264_enc_encode_borrow() failed (count=%" PRIu32 ")",
                      enc_fail_count);
         }
         return;
@@ -981,7 +988,7 @@ static esp_err_t register_raw_sink(void)
         return ESP_ERR_NOT_SUPPORTED;
     }
     const bool     passthrough = (camera_fourcc == VIDEO_FOURCC_H264);
-    const uint32_t want_fourcc = passthrough ? VIDEO_FOURCC_H264 : VIDEO_FOURCC_O_UYY_E_VYY;
+    const uint32_t want_fourcc = passthrough ? VIDEO_FOURCC_H264 : h264_enc_input_fourcc();
 
     if (s_enc_sink != NULL) {
         if (s_enc_sink_fourcc == want_fourcc) {
@@ -1004,6 +1011,8 @@ static esp_err_t register_raw_sink(void)
         .user       = NULL,
         .task_stack = CONFIG_VIDEO_ENCODER_TASK_STACK_SIZE,
         .task_prio  = ENC_TASK_PRIO,
+        .task_core  = CONFIG_VIDEO_ENCODER_TASK_CORE < 0 ? VIDEO_RAW_SINK_CORE_ANY
+                                                         : VIDEO_RAW_SINK_CORE(CONFIG_VIDEO_ENCODER_TASK_CORE),
 
         /* Depth 1, so the claim is 2: one queued plus one in hand. That second buffer is
          * what stops the pump stalling behind an encode that runs longer than the frame
@@ -1289,6 +1298,11 @@ esp_err_t esp32p4_frame_grabber_init(void)
     init_chip();
     init_clock();
 
+#if H264_ENCODE
+    /* Set once the encoder is up, so a failure after that takes it down again. */
+    bool encoder_up = false;
+#endif
+
     // Create semaphore for start/stop control
     s_p4_enc_data.run_semaphore = xSemaphoreCreateBinary();
     if (!s_p4_enc_data.run_semaphore) {
@@ -1417,7 +1431,11 @@ esp_err_t esp32p4_frame_grabber_init(void)
      * the camera's own GOP until the driver exposes UVC encoding-unit controls. */
     ESP_LOGI(TAG, "UVC passthrough: hardware encoder and rate control stay idle");
 #else
-    esp_h264_setup_encoder(&cfg);
+    if (h264_enc_setup(&cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "H.264 encoder setup failed");
+        goto cleanup;
+    }
+    encoder_up = true;
 
     /* Congestion-adaptive rate control: fps-first degradation (floor 12),
      * bitrate as stage 2, with recovery. Driven by send-latency reports
@@ -1464,6 +1482,11 @@ esp_err_t esp32p4_frame_grabber_init(void)
 
 cleanup:
     // Conditional cleanup based on what was allocated
+#if H264_ENCODE
+    if (encoder_up) {
+        h264_enc_destroy();
+    }
+#endif
     if (s_p4_enc_data.task_buffer != NULL) {
         heap_caps_free(s_p4_enc_data.task_buffer);
         s_p4_enc_data.task_buffer = NULL;
@@ -1609,7 +1632,7 @@ esp_err_t esp32p4_frame_grabber_deinit(void)
     }
     if (s_drain_clean) {
         enc_pool_free();
-#if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
+#if UVC_REPACK_FOR_HW_ENC
         /* The YUY2 repack buffer goes with it: the repack runs in the same callback. */
         if (s_conv_buf) {
             heap_caps_free(s_conv_buf);
@@ -1663,7 +1686,7 @@ esp_err_t video_capture_request_keyframe(void)
     if (!s_p4_enc_data.encoder_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    return esp_h264_hw_enc_request_idr();
+    return h264_enc_request_idr();
 #endif
 }
 

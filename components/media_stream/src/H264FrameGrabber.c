@@ -32,7 +32,7 @@ static const char *TAG __attribute__((unused)) = "H264FrameGrabber";
 #include "esp_h264_enc_single_sw.h"
 #include "esp_h264_enc_single.h"
 #else
-#include "esp_h264_hw_enc.h"
+#include "h264_enc.h"
 #if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_enc_single.h"
 #endif
@@ -445,7 +445,7 @@ esp_err_t video_capture_set_bitrate(video_capture_handle_t handle, uint32_t bitr
 {
     (void) handle;
 #if MEDIA_STREAM_HAS_HW_H264_ENC
-    return esp_h264_hw_enc_set_bitrate(bitrate_kbps * 1000);
+    return h264_enc_set_bitrate(bitrate_kbps * 1000);
 #else
     /* The camera encodes and owns its own bitrate; the UVC host driver exposes no
      * encoding-unit control to change it. */
@@ -461,7 +461,7 @@ esp_err_t video_capture_get_bitrate(video_capture_handle_t handle, uint32_t *bit
         return ESP_ERR_INVALID_ARG;
     }
 #if MEDIA_STREAM_HAS_HW_H264_ENC
-    *bitrate_kbps = esp_h264_hw_enc_get_bitrate() / 1000;
+    *bitrate_kbps = h264_enc_get_bitrate() / 1000;
     return ESP_OK;
 #else
     *bitrate_kbps = 0;

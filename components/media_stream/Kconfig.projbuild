@@ -613,6 +613,51 @@ menu "Media Stream Configuration"
             help
                 Priority of the video encoder task (higher number = higher priority).
 
+        config VIDEO_ENCODER_TASK_CORE
+            int "Video Encoder Task Core (-1 = any)"
+            range -1 1
+            default 1 if IDF_TARGET_ESP32S3
+            default -1
+            help
+                Core the H.264 encoder sink runs on. -1 lets the scheduler pick.
+
+                On the ESP32-S3 the software encoder takes most of a core, so it is
+                pinned to core 1 by default and Wi-Fi keeps core 0.
+
+        menu "Software H.264 encoder"
+            depends on IDF_TARGET_ESP32S3
+
+            config MEDIA_STREAM_SW_H264_MAX_FPS
+                int "Maximum encoded frame rate"
+                range 1 30
+                default 10
+                help
+                    Cap on the encoder's frame rate. The software encoder manages about
+                    11 fps at QVGA on an ESP32-S3, so frames beyond this are dropped on
+                    the pump rather than queued behind a busy encoder.
+
+            config MEDIA_STREAM_SW_H264_GOP
+                int "Keyframe interval (frames)"
+                range 1 255
+                default 20
+                help
+                    Frames between periodic IDRs. There is no forced-IDR API for the
+                    software encoder, so this also bounds how long a viewer that lost a
+                    frame waits if the GOP=1 fallback cannot help.
+
+            config MEDIA_STREAM_SW_H264_QP_MIN
+                int "Minimum QP"
+                range 10 51
+                default 26
+
+            config MEDIA_STREAM_SW_H264_QP_MAX
+                int "Maximum QP"
+                range 10 51
+                default 42
+                help
+                    Must be above the minimum for bitrate control to have any effect.
+        endmenu
+
         config AUDIO_ENCODER_TASK_PRIORITY
             int "Audio Encoder Task Priority"
             range 1 10

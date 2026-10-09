@@ -21,6 +21,7 @@ else()
     set(srcs
         "src/esp_video_if.c"
         "src/esp_h264_hw_enc.c"
+        "src/esp_h264_sw_enc.c"
         "src/app_camera_esp.c"
         "src/esp32p4_frame_grabber.c"
         "src/video_rate_ctrl.c"

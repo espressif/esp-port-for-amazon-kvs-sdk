@@ -37,7 +37,6 @@ static const char *TAG = "video_convert";
 struct video_frame_convert_s {
     video_frame_convert_cfg_t cfg;
     uint8_t                   src_bpp;
-    uint8_t                   dst_bpp;
     size_t                    buf_size;
     uint8_t                  *buf[MAX_POOL_DEPTH];
     QueueHandle_t             free_idx;              /* Indices of buffers nobody holds */
@@ -68,15 +67,15 @@ struct video_frame_convert_s {
 /* At 5 fps this is a line every thirteen seconds. */
 #define CONV_TIMING_EVERY  64
 
-static bool fourcc_bpp(uint32_t fourcc, uint8_t *bpp)
+/* Bytes per pixel of the packed formats the crop and scale stages work in. */
+static uint8_t packed_bpp(uint32_t fourcc)
 {
-    switch (fourcc) {
-    case VIDEO_FOURCC_YUYV:
-    case VIDEO_FOURCC_UYVY:
-    case VIDEO_FOURCC_RGB565: *bpp = 2; return true;
-    case VIDEO_FOURCC_RGB24:  *bpp = 3; return true;
-    default:                            return false;
-    }
+    return fourcc == VIDEO_FOURCC_RGB24 ? 3 : 2;
+}
+
+static size_t frame_size(uint32_t fourcc, uint32_t w, uint32_t h)
+{
+    return fourcc == VIDEO_FOURCC_I420 ? (size_t)w * h * 3 / 2 : (size_t)w * h * packed_bpp(fourcc);
 }
 
 static esp_imgfx_pixel_fmt_t imgfx_fmt(uint32_t fourcc)
@@ -85,14 +84,16 @@ static esp_imgfx_pixel_fmt_t imgfx_fmt(uint32_t fourcc)
     case VIDEO_FOURCC_YUYV:   return ESP_IMGFX_PIXEL_FMT_YUYV;
     case VIDEO_FOURCC_UYVY:   return ESP_IMGFX_PIXEL_FMT_UYVY;
     case VIDEO_FOURCC_RGB565: return ESP_IMGFX_PIXEL_FMT_RGB565_LE;
+    case VIDEO_FOURCC_I420:   return ESP_IMGFX_PIXEL_FMT_I420;
     default:                  return ESP_IMGFX_PIXEL_FMT_RGB888;   /* VIDEO_FOURCC_RGB24 */
     }
 }
 
 esp_err_t video_frame_convert_check_dst(uint32_t dst_fourcc)
 {
-    if (dst_fourcc != VIDEO_FOURCC_RGB565 && dst_fourcc != VIDEO_FOURCC_RGB24) {
-        ESP_LOGE(TAG, "target format '%.4s' cannot be a converter output (RGB565 or RGB24)",
+    if (dst_fourcc != VIDEO_FOURCC_RGB565 && dst_fourcc != VIDEO_FOURCC_RGB24 &&
+        dst_fourcc != VIDEO_FOURCC_I420) {
+        ESP_LOGE(TAG, "target format '%.4s' cannot be a converter output (RGB565, RGB24 or I420)",
                  (const char *)&dst_fourcc);
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -102,8 +103,8 @@ esp_err_t video_frame_convert_check_dst(uint32_t dst_fourcc)
 esp_err_t video_frame_convert_check(uint32_t src_fourcc, uint32_t dst_fourcc)
 {
     if (src_fourcc != VIDEO_FOURCC_YUYV && src_fourcc != VIDEO_FOURCC_UYVY &&
-        src_fourcc != VIDEO_FOURCC_RGB565) {
-        ESP_LOGE(TAG, "source format '%.4s' is not a converter input (YUYV, UYVY or RGB565)",
+        src_fourcc != VIDEO_FOURCC_RGB565 && src_fourcc != VIDEO_FOURCC_RGB24) {
+        ESP_LOGE(TAG, "source format '%.4s' is not a converter input (YUYV, UYVY, RGB565 or RGB24)",
                  (const char *)&src_fourcc);
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -264,6 +265,17 @@ esp_err_t video_frame_convert_create(const video_frame_convert_cfg_t *cfg,
     if (cfg == NULL || out == NULL || cfg->dst_width == 0 || cfg->dst_height == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* I420 subsamples 2x2. A YUYV/UYVY source is cropped and scaled in its own format, and
+     * esp_image_effects only scales YUV 4:2:2 to an even size (an odd width would split a
+     * two-pixel macropixel). */
+    const bool yuv422_src = cfg->src_fourcc == VIDEO_FOURCC_YUYV || cfg->src_fourcc == VIDEO_FOURCC_UYVY;
+    if ((cfg->dst_fourcc == VIDEO_FOURCC_I420 || yuv422_src) &&
+        ((cfg->dst_width | cfg->dst_height) & 1)) {
+        ESP_LOGE(TAG, "'%.4s' -> '%.4s' needs an even size, not %ux%u",
+                 (const char *)&cfg->src_fourcc, (const char *)&cfg->dst_fourcc,
+                 cfg->dst_width, cfg->dst_height);
+        return ESP_ERR_INVALID_ARG;
+    }
     esp_err_t err = video_frame_convert_check(cfg->src_fourcc, cfg->dst_fourcc);
     if (err != ESP_OK) {
         return err;
@@ -281,9 +293,8 @@ esp_err_t video_frame_convert_create(const video_frame_convert_cfg_t *cfg,
     }
     c->cfg = *cfg;
     c->cfg.pool_depth = depth;
-    fourcc_bpp(cfg->src_fourcc, &c->src_bpp);
-    fourcc_bpp(cfg->dst_fourcc, &c->dst_bpp);
-    c->buf_size = (size_t)cfg->dst_width * cfg->dst_height * c->dst_bpp;
+    c->src_bpp  = packed_bpp(cfg->src_fourcc);
+    c->buf_size = frame_size(cfg->dst_fourcc, cfg->dst_width, cfg->dst_height);
 
     c->free_idx = xQueueCreate(depth, sizeof(uint8_t));
     if (c->free_idx == NULL) {

@@ -8,13 +8,12 @@
 
 #include "H264FrameGrabber.h"
 #include "media_stream_caps.h"
-#if MEDIA_STREAM_HAS_HW_H264_ENC
+#if MEDIA_STREAM_HAS_ESP_H264
 #include "esp_h264_types.h"
 #else
-/* No hardware encoder on this target (see media_stream_caps.h). The camera
- * delivers H.264 itself, so only the config types the grabber names are needed -
- * esp_h264_frame_type_t and esp_h264_out_buf_t already come from
- * H264FrameGrabber.h, which defines them locally off-target. */
+/* No esp_h264 on this target (see media_stream_caps.h), so only the config types
+ * the grabber names are needed - esp_h264_frame_type_t and esp_h264_out_buf_t
+ * already come from H264FrameGrabber.h, which defines them locally off-target. */
 typedef enum {
     ESP_H264_RAW_FMT_YUYV,
     ESP_H264_RAW_FMT_I420,
@@ -39,12 +38,18 @@ typedef struct {
     esp_h264_resolution_t res;
     esp_h264_enc_rc_t     rc;
 } esp_h264_enc_cfg_t;
-#endif /* MEDIA_STREAM_HAS_HW_H264_ENC */
+#endif /* MEDIA_STREAM_HAS_ESP_H264 */
 #include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR */
 #include "esp_err.h"
 
+#if MEDIA_STREAM_HAS_SW_H264_ENC
+/* The software encoder manages about 11 fps at QVGA on an ESP32-S3. */
+#define WIDTH               (320)
+#define HEIGHT              (240)
+#else
 #define WIDTH               (1920)
 #define HEIGHT              (1080)
+#endif
 
 typedef struct {
     uint8_t *buffer; /*<! Data buffer */
@@ -58,9 +63,15 @@ typedef void data_read_cb_t(void *ctx, esp_h264_buf_t *in_data);
 typedef void data_write_cb_t(void *ctx, esp_h264_out_buf_t *out_data);
 
 /* The P4 hardware encoder accepts exactly one raw layout - O_UYY_E_VYY - per
- * esp_h264_types.h (YUYV and I420 are software-encoder only). The ISP produces it
- * natively; a UVC camera's YUY2 is repacked into it in the grabber. */
+ * esp_h264_types.h. The ISP produces it natively; a UVC camera's YUY2 is repacked
+ * into it in the grabber. The software encoder takes YUYV or I420; the grabber sets
+ * pic_type from what the camera negotiated (h264_enc_input_for()), so its entry here is
+ * only the default. */
+#if MEDIA_STREAM_HAS_SW_H264_ENC
+#define MEDIA_STREAM_H264_ENC_PIC_TYPE  ESP_H264_RAW_FMT_YUYV
+#else
 #define MEDIA_STREAM_H264_ENC_PIC_TYPE  ESP_H264_RAW_FMT_O_UYY_E_VYY
+#endif
 
 #define DEFAULT_ENCODER_CFG() { \
     .gop = 10, \

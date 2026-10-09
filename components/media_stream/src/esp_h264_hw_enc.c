@@ -5,8 +5,9 @@
  */
 
 #include "sdkconfig.h"
+#include "media_stream_caps.h"
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 

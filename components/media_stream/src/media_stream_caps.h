@@ -28,16 +28,27 @@
 #define MEDIA_STREAM_HAS_IMG_EFFECTS         0
 #endif
 
-/* Targets with the H.264 hardware encoder, i.e. where espressif/esp_h264 is
- * available. Keep in lockstep with the esp_h264 rule in ../idf_component.yml. */
+/* Targets with the H.264 hardware encoder. */
 #if CONFIG_IDF_TARGET_ESP32P4
 #define MEDIA_STREAM_HAS_HW_H264_ENC         1
 #else
 #define MEDIA_STREAM_HAS_HW_H264_ENC         0
 #endif
 
+/* Targets where espressif/esp_h264 is a dependency at all, hardware encoder or
+ * not. Keep in lockstep with the esp_h264 rule in ../idf_component.yml. */
+#if CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S3
+#define MEDIA_STREAM_HAS_ESP_H264            1
+#else
+#define MEDIA_STREAM_HAS_ESP_H264            0
+#endif
+
+/* esp_h264 without the hardware block: the capture pump's encoder sink runs the
+ * software (openh264) encoder instead. */
+#define MEDIA_STREAM_HAS_SW_H264_ENC         (MEDIA_STREAM_HAS_ESP_H264 && !MEDIA_STREAM_HAS_HW_H264_ENC)
+
 /* Targets with the PPA (2D pixel-processing accelerator). It backs the hardware
- * colour-convert/scale behind VIDEO_RAW_MODE_CONVERTED. Unlike the three above,
+ * colour-convert/scale behind VIDEO_RAW_MODE_CONVERTED. Unlike the target lists above,
  * this one is a real SoC feature test rather than a target list. */
 #if CONFIG_SOC_PPA_SUPPORTED
 #define MEDIA_STREAM_HAS_PPA                 1
