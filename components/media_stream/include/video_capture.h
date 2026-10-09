@@ -155,10 +155,11 @@ typedef struct {
  * Zeroes any field whose first window has not closed yet, so a caller may display it
  * immediately after boot.
  *
- * Implemented by the ESP32-P4 CSI grabber. Other capture backends do not define it.
+ * Implemented by the esp_video capture pump (ESP32-P4, ESP32-S3). Elsewhere it zeroes
+ * @p out and returns ESP_ERR_NOT_SUPPORTED.
  *
  * @param[out] out Filled in on success
- * @return ESP_OK or ESP_ERR_INVALID_ARG
+ * @return ESP_OK, ESP_ERR_INVALID_ARG, or ESP_ERR_NOT_SUPPORTED
  */
 esp_err_t video_capture_get_live_stats(video_capture_live_stats_t *out);
 

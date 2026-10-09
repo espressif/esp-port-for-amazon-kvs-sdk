@@ -82,10 +82,11 @@ menu "Media Stream Configuration"
     endmenu
 
     menu "Camera Configuration"
+        depends on IDF_TARGET_ESP32
+        comment "esp32-camera pinout. The ESP32-P4 and ESP32-S3 capture through esp_video; see Video Initialization Configuration."
         choice CAMERA_MODULE
             bool "Select Camera Pinout"
-            default CAMERA_MODULE_ESP_S3_EYE if IDF_TARGET_ESP32S3
-            default CAMERA_MODULE_WROVER_KIT if IDF_TARGET_ESP32
+            default CAMERA_MODULE_WROVER_KIT
             help
                 Select Camera Pinout.
 
@@ -95,8 +96,6 @@ menu "Media Stream Configuration"
                 bool "ESP-EYE DevKit"
             config CAMERA_MODULE_ESP_S2_KALUGA
                 bool "ESP32-S2-Kaluga-1 V1.3"
-            config CAMERA_MODULE_ESP_S3_EYE
-                bool "ESP-S3-EYE DevKit"
             config CAMERA_MODULE_ESP32_CAM_BOARD
                 bool "ESP32 Camera Development Board"
             config CAMERA_MODULE_M5STACK_PSRAM
@@ -439,21 +438,15 @@ menu "Media Stream Configuration"
         config VIDEO_RATE_CTRL_FPS_FLOOR
             int "Rate control: lowest frame rate the ladder may schedule"
             range 1 30
+            default 5 if IDF_TARGET_ESP32S3
             default 12
             help
                 The ladder never asks for fewer frames per second than this, whatever
                 the link is doing. Its rungs are clamped up to it, so raising this
-                shortens the ladder rather than changing its shape.
-
-                12 is the historical default, measured on a contended 2.4 GHz uplink
-                where a single frame took ~70 ms to send: a 15-fps budget (67 ms) stays
-                under water and the controller cannot catch up, while 12 fps (~83 ms)
-                has the headroom to match those sends.
-
-                Raise it when a consumer has a hard frame-rate requirement and would
-                rather lose quality than smoothness - an archive upload that must stay
-                at 20 fps, say. The bitrate floor rises with it in effect, since fewer
-                bits per frame at more frames is what the encoder is then asked for.
+                shortens the ladder rather than changing its shape. The rungs are written
+                for a 25 fps camera and scaled down for a slower one (or a capped
+                encoder), so the floor has to sit below that rate for frame rate to move
+                at all.
 
         config VIDEO_RATE_CTRL_MIN_MBPS_PER_PX
             int "Rate control: bitrate floor in milli-bits per pixel per second"

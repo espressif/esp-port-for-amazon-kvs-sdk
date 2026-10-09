@@ -43,9 +43,13 @@ extern "C" {
  *                        encode. False on UVC H.264 passthrough, where dropping an encoded
  *                        frame corrupts the stream to the next IDR; the ladder's fps
  *                        column is then pinned to camera_fps and only bitrate moves
+ * @param fps_capped      True when camera_fps is the encoder's cap, below the sensor's own
+ *                        rate (the S3's software encoder). The ladder's fps rungs are then
+ *                        scaled to it; otherwise they would all clamp to it
  */
 void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
-                          uint32_t width, uint32_t height, bool fps_actuable);
+                          uint32_t width, uint32_t height, bool fps_actuable,
+                          bool fps_capped);
 
 /**
  * @brief The frame rate the encoder should be fed, or 0 for the camera's own rate

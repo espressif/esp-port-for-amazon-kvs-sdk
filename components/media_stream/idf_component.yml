@@ -1,11 +1,10 @@
 dependencies:
-  # esp32-camera supports esp32 + esp32s3 (Wrover-Kit and ESP-S3-EYE
-  # board pinouts). H264FrameGrabber.c and MJPEGFrameGrabber.c both have
-  # an explicit `#if CONFIG_IDF_TARGET_ESP32S3` arm that uses esp_camera_*.
+  # esp32-camera is plain ESP32 only (MJPEGFrameGrabber.c). The P4 and S3 capture
+  # through esp_video instead.
   espressif/esp32-camera:
     version: ^2.0.2
     rules:
-      - if: "target in [esp32, esp32s3]"
+      - if: "target in [esp32]"
 
   # Require esp_video >= 2.0.1 for the AWB subwindow zero-init fix (upstream
   # MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon; also auto-climbs the

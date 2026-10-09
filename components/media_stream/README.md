@@ -354,7 +354,7 @@ webrtc_config.video_capture = my_custom_camera_if_get();
 
 ## Supported Hardware
 
-- **ESP32-S3** with camera modules (OV2640, OV3660, etc.)
+- **ESP32-S3** with a DVP camera.
 - **ESP32-P4** with advanced camera and audio capabilities
 - **ESP32** with external camera/audio via I2S/SPI
 - **Custom hardware** via interface implementation

@@ -15,6 +15,11 @@
 #include "media_stream_caps.h"
 #if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE && !MEDIA_STREAM_HAS_PPA
 
+/* The raw-frame bus needs a converter wherever it runs; without a PPA this is it. */
+#if !MEDIA_STREAM_HAS_IMG_EFFECTS
+#error "esp_video target without a PPA: add it to the esp_image_effects rule in idf_component.yml and to MEDIA_STREAM_HAS_IMG_EFFECTS"
+#endif
+
 #include <string.h>
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"

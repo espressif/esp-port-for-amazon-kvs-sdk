@@ -27,9 +27,14 @@ esp_err_t h264_enc_setup(h264_enc_user_cfg_t *cfg);
 
 /**
  * @brief Encode one frame; @p out borrows the encoder's output until the next call.
+ *
+ * @p timestamp_us is the frame's capture time (0 if unknown), which the encoder's pts follows.
  */
-esp_err_t h264_enc_encode_borrow(uint8_t *frame, size_t frame_len, esp_h264_out_buf_t *out);
+esp_err_t h264_enc_encode_borrow(uint8_t *frame, size_t frame_len, uint64_t timestamp_us,
+                                 esp_h264_out_buf_t *out);
 esp_err_t h264_enc_set_bitrate(uint32_t bitrate);
+/** @brief The frame rate the encoder is offered; its per-frame bit budget follows it. */
+esp_err_t h264_enc_set_fps(uint32_t fps);
 uint32_t  h264_enc_get_bitrate(void);
 esp_err_t h264_enc_request_idr(void);
 void      h264_enc_destroy(void);
@@ -59,8 +64,9 @@ static inline esp_err_t h264_enc_setup(h264_enc_user_cfg_t *cfg)
 }
 
 static inline esp_err_t h264_enc_encode_borrow(uint8_t *frame, size_t frame_len,
-                                               esp_h264_out_buf_t *out)
+                                               uint64_t timestamp_us, esp_h264_out_buf_t *out)
 {
+    (void)timestamp_us;
     return esp_h264_hw_enc_encode_frame_borrow(frame, frame_len, out);
 }
 
@@ -72,6 +78,13 @@ static inline esp_err_t h264_enc_set_bitrate(uint32_t bitrate)
 static inline uint32_t h264_enc_get_bitrate(void)
 {
     return esp_h264_hw_enc_get_bitrate();
+}
+
+/* The hardware encoder keeps the rate it was set up with. */
+static inline esp_err_t h264_enc_set_fps(uint32_t fps)
+{
+    (void)fps;
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 static inline esp_err_t h264_enc_request_idr(void)

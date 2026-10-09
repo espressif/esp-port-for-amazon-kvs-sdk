@@ -16,11 +16,10 @@
 #include "driver/jpeg_encode.h"
 #include "esp_video_if.h"
 #include "esp_heap_caps.h"
-#elif CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
-/* esp32-camera is registered for `target in [esp32, esp32s3]` only —
- * these headers do not exist on c-series / P4 builds. The camera-init
- * paths below gate on ESP_CAMERA_SUPPORTED (defined by esp_camera.h),
- * so on other targets they fold to empty. */
+#elif CONFIG_IDF_TARGET_ESP32
+/* esp32-camera is registered for plain ESP32 only - these headers do not exist
+ * elsewhere. The camera paths below gate on ESP_CAMERA_SUPPORTED (defined by
+ * esp_camera.h), so on other targets they fold to empty. */
 #include "esp_camera.h"
 #include "app_camera_esp.h"
 #endif
@@ -280,6 +279,13 @@ esp_err_t mjpeg_camera_and_encoder_init(uint16_t width, uint16_t height, uint8_t
         return ESP_OK;
     }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+    /* The S3 camera goes through esp_video for H.264, and there is no JPEG encoder to
+     * feed from it. */
+    ESP_LOGE(TAG, "MJPEG capture is not supported on the ESP32-S3");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+
     // Store parameters
     frame_width = width;
     frame_height = height;
@@ -292,71 +298,7 @@ esp_err_t mjpeg_camera_and_encoder_init(uint16_t width, uint16_t height, uint8_t
         return ESP_ERR_NO_MEM;
     }
 
-#if CONFIG_IDF_TARGET_ESP32S3 && defined(ESP_CAMERA_SUPPORTED)
-    // Initialize camera for ESP32-S3
-    camera_config_t camera_config = {
-        .pin_pwdn = CAMERA_PIN_PWDN,
-        .pin_reset = CAMERA_PIN_RESET,
-        .pin_xclk = CAMERA_PIN_XCLK,
-        .pin_sccb_sda = CAMERA_PIN_SIOD,
-        .pin_sccb_scl = CAMERA_PIN_SIOC,
-
-        .pin_d7 = CAMERA_PIN_D7,
-        .pin_d6 = CAMERA_PIN_D6,
-        .pin_d5 = CAMERA_PIN_D5,
-        .pin_d4 = CAMERA_PIN_D4,
-        .pin_d3 = CAMERA_PIN_D3,
-        .pin_d2 = CAMERA_PIN_D2,
-        .pin_d1 = CAMERA_PIN_D1,
-        .pin_d0 = CAMERA_PIN_D0,
-        .pin_vsync = CAMERA_PIN_VSYNC,
-        .pin_href = CAMERA_PIN_HREF,
-        .pin_pclk = CAMERA_PIN_PCLK,
-
-        .xclk_freq_hz = 20000000,  // 20MHz XCLK frequency
-        .ledc_timer = LEDC_TIMER_0,
-        .ledc_channel = LEDC_CHANNEL_0,
-
-        .pixel_format = PIXFORMAT_JPEG,  // Use JPEG format for direct output
-        .frame_size = FRAMESIZE_VGA,     // Default to VGA, will adjust based on requested size
-
-        .jpeg_quality = quality,
-        .fb_count = 2,
-        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
-        .fb_location = CAMERA_FB_IN_PSRAM
-    };
-
-    // Determine the best frame size based on requested dimensions
-    if (width <= 160 && height <= 120) {
-        camera_config.frame_size = FRAMESIZE_QQVGA;
-    } else if (width <= 240 && height <= 176) {
-        camera_config.frame_size = FRAMESIZE_HQVGA;
-    } else if (width <= 320 && height <= 240) {
-        camera_config.frame_size = FRAMESIZE_QVGA;
-    } else if (width <= 640 && height <= 480) {
-        camera_config.frame_size = FRAMESIZE_VGA;
-    } else if (width <= 800 && height <= 600) {
-        camera_config.frame_size = FRAMESIZE_SVGA;
-    }
-
-    // Initialize the camera
-    esp_err_t err = esp_camera_init(&camera_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Camera init failed with error 0x%x", err);
-        vQueueDelete(mjpeg_frame_queue);
-        mjpeg_frame_queue = NULL;
-        return err;
-    }
-
-    // Additional camera settings if needed
-    sensor_t *s = esp_camera_sensor_get();
-    if (s) {
-        // Flip the image if needed
-        // s->set_vflip(s, 1);
-        // s->set_hmirror(s, 1);
-    }
-
-#elif CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4
     /* Set desired resolution before init so esp_video_if configures correctly */
     video_resolution_t res = { .width = width, .height = height, .fps = 25 };
     esp_video_if_set_desired_resolution(&res);

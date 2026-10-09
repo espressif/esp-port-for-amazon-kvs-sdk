@@ -8,9 +8,10 @@
  * @brief Software (openh264) backend for h264_enc.h, on targets with no H.264 hardware.
  *
  * Everything that touches the encoder instance happens in h264_enc_encode_borrow(), on the
- * encoder sink's task. Bitrate changes and keyframe requests arrive from other tasks (the
- * rate controller, a viewer's PLI) and are only recorded there, then applied before the next
- * encode, so openh264 is never reconfigured in the middle of a frame.
+ * encoder sink's task. Bitrate and frame-rate changes and keyframe requests arrive from other
+ * tasks (the rate controller, the capture pump, a viewer's PLI) and are only recorded there,
+ * then applied before the next encode, so openh264 is never reconfigured in the middle of a
+ * frame.
  */
 
 #include "media_stream_caps.h"
@@ -47,8 +48,10 @@ static struct {
     esp_h264_enc_in_frame_t        in_frame;
     esp_h264_enc_out_frame_t       out_frame;
     uint32_t                       frame_count;
+    uint64_t                       first_ts_us;   /* capture time of pts 0 */
 
     _Atomic uint32_t pending_bitrate;   /* 0 = nothing pending */
+    _Atomic uint32_t pending_fps;       /* 0 = nothing pending */
     atomic_bool      idr_requested;
     bool             gop_overridden;
     uint8_t          frames_since_force;
@@ -153,6 +156,15 @@ esp_err_t h264_enc_set_bitrate(uint32_t bitrate)
     return ESP_FAIL;
 }
 
+esp_err_t h264_enc_set_fps(uint32_t fps)
+{
+    if (fps == 0 || fps > UINT8_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    atomic_store(&s_enc.pending_fps, fps);
+    return ESP_OK;
+}
+
 uint32_t h264_enc_get_bitrate(void)
 {
     const uint32_t pending = atomic_load(&s_enc.pending_bitrate);
@@ -174,6 +186,14 @@ static void apply_pending(void)
     const uint32_t bitrate = atomic_exchange(&s_enc.pending_bitrate, 0);
     if (bitrate && esp_h264_enc_set_bitrate(s_enc.param, bitrate) == ESP_H264_ERR_OK) {
         s_enc.cfg.rc.bitrate = bitrate;
+    }
+
+    /* openh264 budgets each frame as bitrate / frame rate, so it has to know the rate it is
+     * actually being offered, or it undershoots the bitrate in proportion. */
+    const uint32_t fps = atomic_exchange(&s_enc.pending_fps, 0);
+    if (fps && fps != s_enc.cfg.fps &&
+        esp_h264_enc_set_fps(s_enc.param, (uint8_t)fps) == ESP_H264_ERR_OK) {
+        s_enc.cfg.fps = (uint8_t)fps;
     }
 
     /* esp_h264 has no force-IDR for the software encoder, so the GOP is dropped to 1 for
@@ -203,7 +223,8 @@ static void recreate_for_idr(void)
     (void)enc_open();
 }
 
-esp_err_t h264_enc_encode_borrow(uint8_t *frame, size_t frame_len, esp_h264_out_buf_t *out)
+esp_err_t h264_enc_encode_borrow(uint8_t *frame, size_t frame_len, uint64_t timestamp_us,
+                                 esp_h264_out_buf_t *out)
 {
     if (frame == NULL || out == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -218,7 +239,14 @@ esp_err_t h264_enc_encode_borrow(uint8_t *frame, size_t frame_len, esp_h264_out_
 
     s_enc.in_frame.raw_data.buffer = frame;
     s_enc.in_frame.raw_data.len    = frame_len;
-    s_enc.in_frame.pts             = (uint32_t)((uint64_t)s_enc.frame_count++ * 1000 / s_enc.cfg.fps);
+    /* pts follows the capture clock, so it stays true while the frame rate moves. */
+    if (timestamp_us != 0 && s_enc.first_ts_us == 0) {
+        s_enc.first_ts_us = timestamp_us;
+    }
+    s_enc.in_frame.pts = (timestamp_us != 0 && timestamp_us >= s_enc.first_ts_us)
+                         ? (uint32_t)((timestamp_us - s_enc.first_ts_us) / 1000)
+                         : (uint32_t)((uint64_t)s_enc.frame_count * 1000 / s_enc.cfg.fps);
+    s_enc.frame_count++;
 
     const int64_t t0 = esp_timer_get_time();
     esp_h264_err_t ret = esp_h264_enc_process(s_enc.enc, &s_enc.in_frame, &s_enc.out_frame);

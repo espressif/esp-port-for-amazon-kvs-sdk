@@ -33,6 +33,10 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #define USE_ESP_VIDEO_IF 1
 #endif
 
+#if CONFIG_IDF_TARGET_ESP32S3 && !USE_ESP_VIDEO_IF
+#error "ESP32-S3 capture needs esp_video (CONFIG_USE_ESP_VIDEO_IF); the legacy camera path is P4-only"
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -47,7 +51,9 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #include "video_rate_ctrl_priv.h"
 #include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR selection */
 
+#if !CONFIG_BSP_SELECT_NONE
 #include "bsp/esp-bsp.h"
+#endif
 #if !USE_ESP_VIDEO_IF
 /* Old camera API path - only available with local component override */
 /* Define camera clock rate constants if not using esp_video_if */
@@ -245,6 +251,9 @@ static void h264_scan_au(const uint8_t *buf, uint32_t len, h264_au_info_t *info)
 
 #if H264_ENCODE
 #include "h264_enc.h"
+#if MEDIA_STREAM_HAS_SW_H264_ENC
+#include "video_frame_convert.h"
+#endif
 #if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_alloc.h"
 #include "esp_cache.h"
@@ -712,8 +721,9 @@ static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
     }
 #endif
 
-    /* Whatever reaches the encoder has to be its input layout by now - natively, or via the
-     * repack above, which is the only thing that moves src off the camera buffer. Anything
+    /* Whatever reaches the encoder has to be its input layout by now - natively, via the
+     * bus's conversion when this is a converted sink (software encoder), or via the repack
+     * above, which is the only thing that moves src off the frame it was handed. Anything
      * else would be read as if it were, giving plausible-looking corrupt video instead of an
      * error. */
     if (src == raw->buffer && raw->fourcc != h264_enc_input_fourcc()) {
@@ -731,7 +741,7 @@ static void h264_raw_sink_on_frame(const video_raw_frame_t *raw, void *user)
     /* Borrowed: valid only until the next encode, which is why it is copied into
      * the pool below rather than published directly. */
     esp_h264_out_buf_t enc = {0};
-    if (h264_enc_encode_borrow((uint8_t *)src, src_len, &enc) != ESP_OK) {
+    if (h264_enc_encode_borrow((uint8_t *)src, src_len, raw->timestamp_us, &enc) != ESP_OK) {
         static uint32_t enc_fail_count;
         enc_fail_count++;
         if (enc_fail_count == 1 || (enc_fail_count & 0x1F) == 0) {
@@ -994,6 +1004,27 @@ static esp_err_t register_raw_sink(void)
     const bool     passthrough = (camera_fourcc == VIDEO_FOURCC_H264);
     const uint32_t want_fourcc = passthrough ? VIDEO_FOURCC_H264 : h264_enc_input_fourcc();
 
+    /* A camera format the software encoder does not read is converted to its input on the
+     * sink's own task, at the camera's resolution. The camera buffer goes back as soon as
+     * that pass is done, so the encode itself holds none. Checked here so an unconvertible
+     * format fails init instead of disabling the sink on its first frame. */
+    bool convert = false;
+#if MEDIA_STREAM_HAS_SW_H264_ENC
+    convert = !passthrough && camera_fourcc != want_fourcc;
+    if (convert && video_frame_convert_check(camera_fourcc, want_fourcc) != ESP_OK) {
+        ESP_LOGE(TAG, "the camera delivers '%.4s', which the software encoder cannot take "
+                      "or have converted to '%.4s'",
+                 (const char *)&camera_fourcc, (const char *)&want_fourcc);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+#endif
+    video_resolution_t cam_res = {0};
+    if (convert && (esp_video_if_get_resolution(&cam_res) != ESP_OK ||
+                    cam_res.width == 0 || cam_res.height == 0)) {
+        ESP_LOGE(TAG, "camera resolution unknown; cannot size the encoder's conversion");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (s_enc_sink != NULL) {
         if (s_enc_sink_fourcc == want_fourcc) {
             return ESP_OK;               /* Already subscribed to this format; nothing to do. */
@@ -1010,7 +1041,10 @@ static esp_err_t register_raw_sink(void)
 
     const video_raw_sink_config_t cfg = {
         .name       = passthrough ? "h264-pass" : "h264-enc",
-        .mode       = VIDEO_RAW_MODE_PASSTHROUGH,
+        .mode       = convert ? VIDEO_RAW_MODE_CONVERTED : VIDEO_RAW_MODE_PASSTHROUGH,
+        .want_fourcc = convert ? want_fourcc : 0,
+        .want_width  = cam_res.width,
+        .want_height = cam_res.height,
         .on_frame   = passthrough ? h264_passthrough_sink_on_frame : h264_raw_sink_on_frame,
         .user       = NULL,
         .task_stack = CONFIG_VIDEO_ENCODER_TASK_STACK_SIZE,
@@ -1183,10 +1217,24 @@ static void video_pump_task(void *arg)
          * frames there are already encoded and dropping one corrupts the stream to the next
          * IDR, so its limit stays 0. */
         if (s_enc_sink != NULL && s_enc_sink_fourcc != VIDEO_FOURCC_H264) {
-            const uint32_t target = video_rate_ctrl_target_fps();
+            uint32_t target = video_rate_ctrl_target_fps();
+#if MEDIA_STREAM_HAS_SW_H264_ENC
+            /* The software encoder's cap holds whether or not a controller is steering;
+             * with none, the target is 0 and would otherwise offer it every frame. */
+            if (target == 0 || target > CONFIG_MEDIA_STREAM_SW_H264_MAX_FPS) {
+                target = CONFIG_MEDIA_STREAM_SW_H264_MAX_FPS;
+            }
+#endif
             if (target != s_enc_fps_limit) {
                 video_raw_sink_set_fps_limit(s_enc_sink, (uint8_t)((target > 255) ? 0 : target));
                 s_enc_fps_limit = target;
+                /* And the encoder is told the rate it will now be offered, which its bit
+                 * budget per frame follows (software encoder only). */
+                uint32_t enc_fps = target;
+                if (have_res && cap_res.fps != 0 && enc_fps > cap_res.fps) {
+                    enc_fps = cap_res.fps;
+                }
+                (void)h264_enc_set_fps(enc_fps);
             }
         }
 
@@ -1372,6 +1420,8 @@ esp_err_t esp32p4_frame_grabber_init(void)
     h264_enc_user_cfg_t cfg = {
         .enc_cfg = DEFAULT_ENCODER_CFG()
     };
+    /* The encoder runs below the camera's rate (software encoder cap); see the rate ladder. */
+    bool fps_capped = false;
 
     /* Get the ACTUAL camera resolution (which may differ from desired due to fallback) */
 #if USE_ESP_VIDEO_IF
@@ -1418,6 +1468,32 @@ esp_err_t esp32p4_frame_grabber_init(void)
      * them costs bandwidth. On the flaky 2.4GHz uplink, bounded recovery wins
      * over a leaner steady state. 15 = IDR every ~0.6s at 25fps / ~1s at 15fps. */
     cfg.enc_cfg.gop = 15;
+
+#if MEDIA_STREAM_HAS_SW_H264_ENC
+    /* The software encoder runs well below the sensor's rate (about 11 fps at QVGA on an
+     * S3), so its configured rate is capped to what it can hold; the pump's fps gate then
+     * drops the rest before they are queued. It needs a QP range to act on bitrate at all,
+     * and without a forced-IDR API its GOP is what bounds recovery from a lost frame. */
+    if (cfg.enc_cfg.fps > CONFIG_MEDIA_STREAM_SW_H264_MAX_FPS) {
+        cfg.enc_cfg.fps = CONFIG_MEDIA_STREAM_SW_H264_MAX_FPS;
+        fps_capped = true;
+    }
+    cfg.enc_cfg.gop       = CONFIG_MEDIA_STREAM_SW_H264_GOP;
+    cfg.enc_cfg.rc.qp_min = CONFIG_MEDIA_STREAM_SW_H264_QP_MIN;
+    cfg.enc_cfg.rc.qp_max = CONFIG_MEDIA_STREAM_SW_H264_QP_MAX;
+
+    /* Encode the camera's own layout when the encoder reads it, and I420 otherwise; the
+     * encoder sink converts to it (register_raw_sink()). */
+    uint32_t cam_pixfmt = 0, cam_fourcc = 0;
+    (void)esp_video_if_get_pixel_format(&cam_pixfmt);
+    if (!capture_fourcc(cam_pixfmt, &cam_fourcc)) {
+        ESP_LOGE(TAG, "camera negotiated '%.4s', which this pipeline cannot carry",
+                 (const char *)&cam_pixfmt);
+        goto cleanup;
+    }
+    cfg.enc_cfg.pic_type = (h264_enc_input_for(cam_fourcc) == VIDEO_FOURCC_YUYV)
+                           ? ESP_H264_RAW_FMT_YUYV : ESP_H264_RAW_FMT_I420;
+#endif
 #else
     cfg.read_cb = &data_read_callback,
     cfg.write_cb = &data_write_callback,
@@ -1434,6 +1510,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
      * viewer's PLI cannot shorten the wait for a key frame here - recovery is bounded by
      * the camera's own GOP until the driver exposes UVC encoding-unit controls. */
     ESP_LOGI(TAG, "UVC passthrough: hardware encoder and rate control stay idle");
+    (void)fps_capped;
 #else
     if (h264_enc_setup(&cfg) != ESP_OK) {
         ESP_LOGE(TAG, "H.264 encoder setup failed");
@@ -1446,7 +1523,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
      * from kvs_media. */
     video_rate_ctrl_init(cfg.enc_cfg.fps, cfg.enc_cfg.rc.bitrate,
                          cfg.enc_cfg.res.width, cfg.enc_cfg.res.height,
-                         /* fps_actuable = */ true);
+                         /* fps_actuable = */ true, fps_capped);
 #endif
 
     /* TCB stays in INTERNAL — accessed from the scheduler tick ISR.
