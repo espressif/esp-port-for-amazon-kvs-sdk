@@ -86,7 +86,6 @@ typedef struct {
     bool   is_initiator;
     char  *wss_url;
     char  *room_link;
-    char  *wss_post_url;
     char  *room_id;
     char  *ice_server;
     cJSON *msg_json;
@@ -301,13 +300,6 @@ static esp_err_t get_websocket_url(const char *room_id, char **wss_url)
         }
     }
 
-    // wss_post_url
-    item = cJSON_GetObjectItem(params, "wss_post_url");
-    if (item && cJSON_IsString(item)) {
-        apprtc_client.client_info.wss_post_url = item->valuestring;
-        ESP_LOGI(TAG, "WSS Post URL: %s", item->valuestring);
-    }
-
     // room_id
     item = cJSON_GetObjectItem(params, "room_id");
     if (item && cJSON_IsString(item)) {
@@ -500,12 +492,12 @@ static void ws_event_work_handler(void *priv_data)
     switch (work_item->event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "WEBSOCKET_EVENT_CONNECTED");
-            update_state(APPRTC_SIGNALING_STATE_CONNECTED);
-            // Register with room after connection
+            // Register before CONNECTED, as the collider drops a send from an unregistered client
             if (register_with_room(apprtc_client.room_id) != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to register with room");
                 update_state(APPRTC_SIGNALING_STATE_ERROR);
             } else {
+                update_state(APPRTC_SIGNALING_STATE_CONNECTED);
                 apprtc_client.reconnect_attempts = 0;
                 send_initial_messages();
 
@@ -1004,45 +996,6 @@ esp_err_t apprtc_signaling_disconnect(void)
     return ESP_OK;
 }
 
-// POST an outgoing signaling message to the collider REST endpoint so it is
-// stored/forwarded even when the remote peer hasn't connected yet. The ws
-// "send" path only reaches an ALREADY-connected peer; without this, an offer
-// created before the viewer joins is dropped and a late-joining viewer sees an
-// empty room (never receives the offer). Used for SDP (offer/answer) only —
-// trickle candidates ride the ws for connected peers and the SDP carries the
-// host candidate inline for late joiners.
-static void post_sdp_to_collider(const char *inner_message)
-{
-    const char *post_base = apprtc_client.client_info.wss_post_url;
-    if (!post_base || post_base[0] == '\0' || apprtc_client.client_id[0] == '\0') {
-        return;
-    }
-    char url[320];
-    snprintf(url, sizeof(url), "%s/%s/%s", post_base, apprtc_client.room_id, apprtc_client.client_id);
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
-#ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-        .crt_bundle_attach = esp_crt_bundle_attach,
-#endif
-        .skip_cert_common_name_check = true,
-        .timeout_ms = 8000,
-    };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) {
-        return;
-    }
-    esp_http_client_set_header(c, "Content-Type", "text/plain");
-    esp_http_client_set_post_field(c, inner_message, strlen(inner_message));
-    if (esp_http_client_perform(c) == ESP_OK) {
-        ESP_LOGI(TAG, "Stored SDP on collider for late joiners: %s", url);
-    } else {
-        ESP_LOGW(TAG, "Failed to store SDP on collider (%s)", url);
-    }
-    esp_http_client_cleanup(c);
-}
-
 esp_err_t apprtc_signaling_send_message(const char* message, size_t message_len)
 {
     if (!message || message_len == 0) {
@@ -1090,15 +1043,6 @@ esp_err_t apprtc_signaling_send_message(const char* message, size_t message_len)
     // Add the command
     cJSON_AddStringToObject(wrapper, "cmd", "send");
 
-    // Is this an SDP (offer/answer)? Those must be stored on the collider so a
-    // peer that hasn't connected yet still receives them.
-    bool is_sdp = false;
-    cJSON *mtype = cJSON_GetObjectItem(json, "type");
-    if (mtype && cJSON_IsString(mtype)) {
-        const char *t = cJSON_GetStringValue(mtype);
-        is_sdp = (t && (strcmp(t, "offer") == 0 || strcmp(t, "answer") == 0));
-    }
-
     // Convert the inner message to a string
     char *inner_message = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
@@ -1107,12 +1051,6 @@ esp_err_t apprtc_signaling_send_message(const char* message, size_t message_len)
         ESP_LOGE(TAG, "Failed to serialize inner message");
         cJSON_Delete(wrapper);
         return ESP_FAIL;
-    }
-
-    // Store SDP on the collider (forward-or-store) so a late-joining viewer
-    // receives the offer/answer even if it wasn't connected when we sent it.
-    if (is_sdp) {
-        post_sdp_to_collider(inner_message);
     }
 
     // Add the inner message as "msg" field
