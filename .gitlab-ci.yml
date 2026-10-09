@@ -55,16 +55,21 @@ default:
   - echo "Skipping $EXAMPLE for $TARGET (camera HTTP server — esp32p4 only)"
   - continue
   - fi
-  # webrtc_person_detect needs the raw-frame bus (esp_video MIPI-CSI), the PPA for
-  # its converted sinks and the hardware H.264 encoder. All three are esp32p4 only.
-  - if [ $EXAMPLE == "webrtc_person_detect" ] && [ $TARGET != "esp32p4" ]; then
-  - echo "Skipping $EXAMPLE for $TARGET (raw sinks + PPA + HW H.264 — esp32p4 only)"
+  # webrtc_person_detect needs the raw-frame bus (esp_video capture) and esp-dl: the
+  # P4 with its hardware encoder and PPA, or the S3 with the software ones.
+  - if [ $EXAMPLE == "webrtc_person_detect" ] && [ $TARGET != "esp32p4" ] && [ $TARGET != "esp32s3" ]; then
+  - echo "Skipping $EXAMPLE for $TARGET (esp_video capture + esp-dl - esp32p4 and esp32s3 only)"
   - continue
   - fi
   - example_path=$CI_PROJECT_DIR/examples/$EXAMPLE
   - cd $example_path
-  - echo "Building $EXAMPLE for $TARGET"
-  - idf.py set-target $TARGET
+  # person_detect on the S3 is the ESP32-S3-EYE: without its overlay the S3 BSP has no camera.
+  - DEFAULTS_ARG=""
+  - if [ $EXAMPLE == "webrtc_person_detect" ] && [ $TARGET == "esp32s3" ]; then
+  - DEFAULTS_ARG="-D SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.s3_eye.esp32s3"
+  - fi
+  - echo "Building $EXAMPLE for $TARGET $DEFAULTS_ARG"
+  - idf.py $DEFAULTS_ARG set-target $TARGET
   - idf.py build
   - mkdir -p $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
   - cp $example_path/build/*.bin $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/

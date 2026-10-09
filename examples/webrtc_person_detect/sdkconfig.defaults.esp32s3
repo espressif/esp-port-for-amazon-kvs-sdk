@@ -1,0 +1,70 @@
+# ESP32-S3: what any S3 needs for this example. The board itself - camera, LCD, SD card
+# pins - comes from an overlay, e.g. sdkconfig.defaults.s3_eye.esp32s3 (see README).
+#
+# Overrides the P4-tuned values in the base file (720p capture, a 20 fps rate floor, the
+# 4 MB table).
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+#
+# Flash and partitions. One app slot, as on the P4 - esp-dl makes the app ~5 MB, so this
+# example needs at least 8 MB of flash on any S3 board.
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.8mb.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.8mb.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+#
+# PSRAM and caches. 64 B data-cache lines keep the 64-byte rounding the capture path uses
+# for cache syncs valid.
+#
+# Code and read-only data stay in flash (no XIP from PSRAM, unlike the P4): copying them
+# costs ~5 MB of the 8 MB, and camera buffers, the model, the encoder and the converters
+# then leave WebRTC too little heap to start its threads.
+#
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# CONFIG_SPIRAM_XIP_FROM_PSRAM is not set
+# CONFIG_SPIRAM_RODATA is not set
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+#
+# Console on the USB-Serial-JTAG port.
+#
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Native Wi-Fi and BLE here: NimBLE is only for provisioning, which needs no BLE 5.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+
+# No co-processor. IDF turns Wi-Fi Remote on for every target, which enables esp_hosted,
+# whose constructor then starts an SDIO host at boot - on GPIO 19, the S3's USB D-, which
+# kills the USB-Serial-JTAG console and leaves the board looking dead.
+CONFIG_ESP_HOSTED_ENABLED=n
+
+#
+# Pipeline sizing. The software encoder holds about 10 fps at QVGA; the rate ladder
+# may go down to 5. Six camera buffers leave a loan budget of four: two for the
+# encoder, one each for the detector and the preview.
+#
+CONFIG_PERSON_DETECT_VIDEO_WIDTH=320
+CONFIG_PERSON_DETECT_VIDEO_HEIGHT=240
+CONFIG_PERSON_DETECT_VIDEO_FPS=10
+CONFIG_PERSON_DETECT_VIDEO_BITRATE=340
+CONFIG_VIDEO_RATE_CTRL_FPS_FLOOR=5
+CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT=6
+CONFIG_MEDIA_STREAM_SW_H264_MAX_FPS=10
+
+# The encoder takes core 1; inference (about 120 ms a frame on the S3) takes core 0.
+CONFIG_VIDEO_ENCODER_TASK_CORE=1
+CONFIG_PERSON_DETECT_TASK_CORE=0
+CONFIG_PERSON_DETECT_FPS=2
+CONFIG_PERSON_DETECT_PREVIEW_FPS=5
+
+# The model lives in the pedestrian_det partition, not the app image.
+CONFIG_PEDESTRIAN_DETECT_MODEL_IN_FLASH_PARTITION=y

@@ -101,9 +101,9 @@ esp_err_t detect_sink_init(void)
 
     const video_raw_sink_config_t cfg = {
         .name          = "detect",
-        /* CONVERTED: the bus runs the PPA pass on this sink's own task and releases the
-         * camera buffer before handing the frame over, so a 90 ms inference costs the
-         * camera nothing. */
+        /* CONVERTED: the bus runs the conversion (PPA on the P4, esp_image_effects on the S3) on this sink's
+         * own task and releases the camera buffer before handing the frame over, so a 90 ms
+         * inference costs the camera nothing. */
         .mode          = VIDEO_RAW_MODE_CONVERTED,
         /* PULL mode - see the comment on detect_task(). */
         .on_frame      = NULL,
@@ -138,8 +138,10 @@ esp_err_t detect_sink_init(void)
         goto fail;
     }
     s_run = true;
-    s_task = xTaskCreateStatic(detect_task, "detect", DETECT_TASK_STACK, NULL,
-                               DETECT_TASK_PRIO, s_task_stack, s_task_tcb);
+    s_task = xTaskCreateStaticPinnedToCore(detect_task, "detect", DETECT_TASK_STACK, NULL,
+                                           DETECT_TASK_PRIO, s_task_stack, s_task_tcb,
+                                           CONFIG_PERSON_DETECT_TASK_CORE < 0 ? tskNO_AFFINITY
+                                                                              : CONFIG_PERSON_DETECT_TASK_CORE);
     if (s_task == NULL) {
         s_run = false;
         goto fail;

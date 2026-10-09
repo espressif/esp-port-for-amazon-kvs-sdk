@@ -29,12 +29,6 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_SIZE=0x8000
 CONFIG_ESP32S3_DATA_CACHE_64KB=y
 CONFIG_ESP32S3_DATA_CACHE_SIZE=0x10000
 
-#
-# Camera Configuration
-#
-CONFIG_CAMERA_MODULE_ESP_S3_EYE=y
-CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=16384
-
 CONFIG_AWS_DEFAULT_REGION="us-east-1"
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=16000
 
@@ -48,3 +42,23 @@ CONFIG_ESP_SYSTEM_PANIC_GDBSTUB=y
 # errors out if BLE 5 is on. The s3 has native Wi-Fi (no co-processor) and uses
 # NimBLE only for provisioning, so the BLE 5 features are not needed here.
 CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+
+#
+# Camera: ESP32-S3-EYE OV2640 over DVP, through esp_video. The BSP brings the sensor up;
+# the software H.264 encoder takes YUYV as-is (anything else is converted first), so the
+# sensor is set to emit that at QVGA.
+#
+CONFIG_BSP_SELECT_ESP32_S3_EYE=y
+CONFIG_CAMERA_OV2640=y
+CONFIG_CAMERA_OV2640_AUTO_DETECT_DVP_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV2640_DVP_YUV422_YUYV_320x240_25FPS=y
+# CONFIG_CAMERA_OV2640_DVP_YUV422_YUYV_640X480_6FPS is not set
+CONFIG_CAMERA_OV2640_DVP_DEFAULT_FMT_YUV422_YUYV_320x240_25FPS=y
+# Same orientation as the old esp32-camera path: vertical flip on, no mirror.
+# CONFIG_ESP_VIDEO_IF_HOR_FLIP is not set
+CONFIG_ESP_VIDEO_IF_VER_FLIP=y
+
+# No co-processor: native Wi-Fi. IDF turns Wi-Fi Remote on for every target, which enables
+# esp_hosted, whose constructor starts an SDIO host at boot on GPIO 19 - the S3's USB D- -
+# and kills the USB-Serial-JTAG console.
+CONFIG_ESP_HOSTED_ENABLED=n
