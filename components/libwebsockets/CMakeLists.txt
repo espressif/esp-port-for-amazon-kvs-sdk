@@ -94,11 +94,32 @@ if(IDF_TARGET STREQUAL "linux")
     set(LWS_ROLE_QUIC OFF CACHE BOOL "" FORCE)
 endif()
 
+# IDF v6 ships mbedTLS 4 and picolibc, whose errno is thread-local. lws decides at the
+# top of its CMakeLists, before its own mbedtls probe runs, whether to force
+# LWIP_PROVIDE_ERRNO; with LWS_HAVE_MBEDTLS_V4 unset it does, lwIP then declares a
+# non-TLS `extern int errno`, and the link fails ("TLS definition ... mismatches
+# non-TLS reference"). Set the probe result up front; it also lands in lws_config.h.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
+    set(LWS_HAVE_MBEDTLS_V4 1 CACHE INTERNAL "ESP: IDF v6 ships mbedTLS 4" FORCE)
+endif()
+
 # Add libwebsockets as a subdirectory
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libwebsockets
                  ${CMAKE_CURRENT_BINARY_DIR}/libwebsockets)
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE websockets)
+
+# The other half of the IDF v6 errno fix above: lws's lib/CMakeLists puts lwIP's own
+# src/include/lwip dir on the path, where <errno.h> is lwip/errno.h. Without
+# LWIP_PROVIDE_ERRNO that declares nothing, so drop the dir and let <errno.h> reach
+# picolibc. <netdb.h> still resolves through lwip/port/include.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
+    get_target_property(_lws_inc websockets INCLUDE_DIRECTORIES)
+    if(_lws_inc)
+        list(FILTER _lws_inc EXCLUDE REGEX "components/lwip/lwip/src/include/lwip/?$")
+        set_target_properties(websockets PROPERTIES INCLUDE_DIRECTORIES "${_lws_inc}")
+    endif()
+endif()
 
 # GCC 13+ (IDF v5.5.4 toolchain) flags lws's own mbedtls-client.c ALPN code
 # (temp_alpn stack buffer aliased into alpn_comma, used after its scope ends) —
