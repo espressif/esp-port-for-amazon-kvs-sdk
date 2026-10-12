@@ -39,10 +39,11 @@ others:
 All three patches apply cleanly against this base (`git am`, no fuzz). 0001's
 `LwsApiCalls.c` part sits on top of #2401's reconnect and receive-worker code and #2425's
 message drop. The SDP-renegotiation patches were dropped earlier (that flow is upstream
-as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392, 0004 as
-awslabs#2385 and 0006 as awslabs#2415, so all three are dropped. 0003 was
-dropped as unnecessary; see its note. The numbers of the remaining patches are
-unchanged.
+as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392 and 0004 as
+awslabs#2385, so both are dropped. 0003 was dropped as unnecessary; see its note.
+An earlier 0006, the `pSeenTransceivers` fix, is upstream as awslabs#2415. The
+current 0006 is the WSS ping interval guard. The numbers of the remaining patches
+are unchanged.
 
 | # | Patch | Category | Upstream PR / status |
 |---|-------|----------|----------------------|
@@ -51,8 +52,8 @@ unchanged.
 | ~~0003~~ | Ice: accept already-connected TCP in `socketConnectionIsConnected` via `getpeername` | n/a | **dropped**: not needed; upstream's check works on lwIP (see note) |
 | ~~0004~~ | Crypto: take the RNG from PSA when mbedTLS has no entropy module (ESP-IDF 6 / TF-PSA-Crypto builds) | aligned | **upstream** as [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385); dropped |
 | ~~0005~~ | Crypto: hash the DTLS certificate through `mbedtls_md()` | portability | **upstream** as [awslabs#2392](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2392); dropped |
+| 0006 | Signaling: let the build override the WSS ping interval (`#ifndef` guard around `SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS`) | aligned | candidate: two-line guard, not yet proposed upstream |
 | 0010 | Signaling: end the fetch and GET_TOKEN back-offs on shutdown | aligned | not yet raised upstream |
-| ~~0006~~ | SessionDescription: initialise `pSeenTransceivers` before the first `CHK` in `findTransceiversByRemoteDescription` (early-exit paths reach `hashTableFree()` on an indeterminate pointer) | aligned | **upstream** as [awslabs#2415](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2415); dropped |
 
 > **Not carried as patches:** the upstream `Network.c` uses POSIX `getifaddrs()`,
 > which ESP-IDF does not ship, so the ESP-IDF adaptation lives as a full port file
@@ -160,6 +161,15 @@ compiles and then fails at link with `undefined reference to 'mbedtls_sha256'`.
 driver is active; `pMdInfo` was already being fetched two lines above for
 `mbedtls_md_get_size()`, so this also removes the `MBEDTLS_BEFORE_V3` fork.
 
+**0006 — Let the build override the WSS ping interval.** On battery targets the
+signaling ping is a power knob: each ping is a radio transmit. The patch guards
+the upstream `SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS` default (10 s)
+with `#ifndef`, and `components/signaling/kvs_signaling/CMakeLists.txt` defines it
+from `CONFIG_KVS_SIGNALING_WSS_PING_INTERVAL_SEC` on the libwebsockets path, so
+both signaling backends use one cadence. `Signaling.c` derives
+`secs_since_valid_ping` from the same constant, so the two move together. With
+nothing defined the default stays 10 s.
+
 ## Patches-removal schedule
 
 The "aligned" patches represent local divergence from upstream and drop as the
@@ -170,5 +180,6 @@ matching PRs land:
 | 0001 (aligned / dynamic-allocs half) | `awslabs#2146` merges |
 | ~~0004~~ | dropped: upstream as awslabs#2385 |
 | ~~0005~~ | dropped: upstream as awslabs#2392 |
+| 0006 | the build override is accepted upstream |
 
 Keep this file up-to-date as patches are added, removed, or split.
