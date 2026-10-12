@@ -166,6 +166,11 @@ typedef struct kvs_pc_session_s {
 
     // Metrics
     uint64_t start_time;
+    uint64_t answer_time;       // initiator: when the remote answer was applied
+    bool answer_applied;        // set with release after answer_time; read with acquire
+                                // Set once, by the first answer: it starts the connect clock
+                                // of the initial negotiation. A later renegotiation happens on
+                                // a session that already connected, so the clock no longer applies.
     PeerConnectionMetrics pc_metrics;
     KvsIceAgentMetrics ice_metrics;
 

@@ -180,8 +180,16 @@ WEBRTC_STATUS app_webrtc_run(void);
  * @brief Terminate the WebRTC application
  *
  * This function cleans up resources and terminates the WebRTC application.
+ * Once app_webrtc_run() has started, the teardown runs on the WebRTC task: this
+ * call asks it to stop and waits for it (up to 45 s), or returns at once when
+ * called from a callback running on that task. Call it from a FreeRTOS task,
+ * not from signaling or peer-connection callbacks (those run on SDK threads the
+ * teardown waits for).
  *
- * @return STATUS code of the execution
+ * @return STATUS code of the execution; WEBRTC_STATUS_INTERNAL_ERROR if the
+ *         teardown did not finish in time (it carries on in the background);
+ *         WEBRTC_STATUS_INVALID_OPERATION if not initialised or another
+ *         terminate is already tearing down
  */
 WEBRTC_STATUS app_webrtc_terminate(void);
 

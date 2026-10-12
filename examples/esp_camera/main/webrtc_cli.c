@@ -49,6 +49,14 @@ static void join_room_task(void *priv_data)
         ESP_LOGI(TAG, "[Work Queue] Creating a new room (Role: %s)", get_role_type_str());
     }
 
+    /* Leave the current room first (also after an error, which leaves the old
+     * websocket and sessions behind): the client serves one room at a time.
+     * Disconnect is a no-op when not in a room. */
+    if (apprtc_signaling_get_state() != APPRTC_SIGNALING_STATE_DISCONNECTED) {
+        ESP_LOGI(TAG, "[Work Queue] Leaving the current room first");
+    }
+    apprtc_signaling_disconnect();
+
     esp_err_t err = apprtc_signaling_connect(room_id);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "[Work Queue] Failed to join/create room: %s", esp_err_to_name(err));
@@ -175,9 +183,9 @@ static int webrtc_get_role_cli_handler(int argc, char *argv[])
     printf("\n");
 
     printf("Current role type: %s\n", get_role_type_str());
-    printf("Role explanation:\n");
-    printf("  - MASTER: Creates a room and waits for viewers to connect\n");
-    printf("  - VIEWER: Can create a room or join an existing one\n");
+    printf("With AppRTC the role does not change the session:\n");
+    printf("  - the device sends the offer when it is first in the room\n");
+    printf("  - it answers when it joins a room a browser is already in\n");
 
     return 0;
 }

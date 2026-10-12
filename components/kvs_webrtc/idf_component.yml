@@ -38,3 +38,5 @@ dependencies:
 
   espressif/esp_websocket_client:
     version: "*"
+    rules:
+      - if: "target != linux"

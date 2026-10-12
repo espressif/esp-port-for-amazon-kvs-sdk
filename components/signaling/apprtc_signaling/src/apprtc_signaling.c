@@ -26,6 +26,7 @@
 #include "apprtc_signaling.h"
 #include "apprtc_signaling_internal.h"
 #include "message_queue.h"
+#include "apprtc_send_order.h"
 #include "signaling_conversion.h"
 #include "app_webrtc.h"
 #include "signaling_serializer.h"
@@ -76,7 +77,6 @@ esp_err_t apprtc_signaling_queue_message(const void *data, int len);
 #define MAX_RESPONSE_SIZE 4096
 #define ROOM_RETRY_INTERVAL_MS 5000
 #define MAX_ROOM_RETRY_ATTEMPTS 3
-#define MAX_QUEUED_MESSAGES 10
 
 static const char *TAG = "apprtc_signaling";
 
@@ -114,6 +114,11 @@ typedef struct {
 static struct {
     apprtc_signaling_state_t state;
     esp_websocket_client_handle_t client;
+    /* Bumped whenever the websocket client is replaced or dropped. Events carry the
+     * value of the client that raised them; older ones (an old socket's close or data
+     * still in the work queue) are dropped, not applied to the new connection.
+     * Changed under the mutex, read without it: __atomic access only. */
+    uint32_t ws_generation;
     char room_id[MAX_ROOM_ID_LENGTH + 1];
     char client_id[64];
     bool is_initiator;
@@ -152,6 +157,7 @@ typedef struct {
     esp_websocket_event_id_t event_id;
     void *data;
     size_t data_len;
+    uint32_t generation;   /* ws_generation of the client that raised the event */
 } ws_event_work_item_t;
 
 // HTTP event handler for collecting response data
@@ -293,11 +299,12 @@ static esp_err_t get_websocket_url(const char *room_id, char **wss_url)
         apprtc_client.client_info.is_initiator = (strcmp(item->valuestring, "true") == 0);
         ESP_LOGI(TAG, "Is Initiator: %s (value: %d)", item->valuestring, apprtc_client.client_info.is_initiator);
 
-        // If the server says we're the initiator, update our local flag
-        if (apprtc_client.client_info.is_initiator) {
-            apprtc_client.is_initiator = true;
-            ESP_LOGI(TAG, "Server designated this client as the initiator");
-        }
+        // The server knows whether the room is empty: first in the room offers, a later
+        // joiner answers the stored offer. Our own guess (a fixed room counts as created
+        // by us) only stands when the server does not say.
+        apprtc_client.is_initiator = apprtc_client.client_info.is_initiator;
+        ESP_LOGI(TAG, "Server designated this client as the %s",
+                 apprtc_client.is_initiator ? "initiator" : "joiner (answers the stored offer)");
     }
 
     // room_id
@@ -362,10 +369,32 @@ cleanup:
     return ret;
 }
 
+/* A frame larger than one read arrives as several DATA events; they are joined here.
+ * Events come in order on the client task, so one accumulator is enough. Only that
+ * task touches it; a partial frame left by a replaced client is recognised by its
+ * generation and dropped by the next client's task. */
+#define APPRTC_MAX_WS_FRAME_LEN (128 * 1024)   /* well above any SDP; larger frames are dropped */
+static char *s_frame = NULL;
+static int s_frame_len = 0;
+static uint32_t s_frame_generation;   /* ws_generation of the client the partial frame came from */
+
+static void frame_reset(void)
+{
+    free(s_frame);
+    s_frame = NULL;
+    s_frame_len = 0;
+}
+
 static void apprtc_websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
     ws_event_work_item_t *work_item = NULL;
+    uint32_t generation = (uint32_t) (uintptr_t) handler_args;
+
+    if (generation != __atomic_load_n(&apprtc_client.ws_generation, __ATOMIC_ACQUIRE)) {
+        ESP_LOGD(TAG, "Ignoring event %d from a replaced WebSocket client", (int) event_id);
+        return;
+    }
 
     // Log all WebSocket events
     switch (event_id) {
@@ -374,6 +403,7 @@ static void apprtc_websocket_event_handler(void *handler_args, esp_event_base_t 
             break;
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "WebSocket disconnected");
+            frame_reset();   /* a partial frame will not be completed */
             break;
         case WEBSOCKET_EVENT_DATA:
             if (!data || !data->data_ptr || data->data_len <= 0) {
@@ -408,6 +438,7 @@ static void apprtc_websocket_event_handler(void *handler_args, esp_event_base_t 
             break;
         case WEBSOCKET_EVENT_CLOSED:
             ESP_LOGI(TAG, "WebSocket connection closed");
+            frame_reset();
             update_state(APPRTC_SIGNALING_STATE_DISCONNECTED);
 
             // Check if we were already registered successfully
@@ -445,11 +476,59 @@ static void apprtc_websocket_event_handler(void *handler_args, esp_event_base_t 
     work_item->event_id = event_id;
     work_item->data = NULL;
     work_item->data_len = 0;
+    work_item->generation = generation;
 
     // For data events, safely copy the data
     if (event_id == WEBSOCKET_EVENT_DATA && data->data_len > 0 && data->data_ptr) {
         // Only process text data, skip binary data
-        if (data->op_code == WS_TRANSPORT_OPCODES_TEXT) {
+        if (data->op_code == WS_TRANSPORT_OPCODES_TEXT &&
+                (data->payload_len > data->data_len || data->payload_offset > 0)) {
+            /* A frame larger than one read arrives as several DATA events (payload_offset
+             * within payload_len). Hand the work queue whole frames only: a fragment does not
+             * parse as JSON, and an SDP offer/answer is easily that large. */
+            if (s_frame && s_frame_generation != generation) {
+                frame_reset();   /* left by a replaced client */
+            }
+            if (data->payload_offset == 0) {
+                frame_reset();
+                if (data->payload_len > APPRTC_MAX_WS_FRAME_LEN) {
+                    /* payload_len comes from the frame header: do not let a peer size the buffer */
+                    ESP_LOGW(TAG, "Dropping a %d-byte WebSocket frame (limit %d)",
+                             data->payload_len, APPRTC_MAX_WS_FRAME_LEN);
+                    free(work_item);
+                    return;
+                }
+                s_frame = heap_caps_calloc(1, (size_t) data->payload_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                s_frame_generation = generation;
+                if (!s_frame) {
+                    ESP_LOGE(TAG, "Failed to allocate %d bytes for a WebSocket frame", data->payload_len);
+                    free(work_item);
+                    return;
+                }
+            }
+            if (!s_frame) {
+                free(work_item);   // the rest of a frame already dropped (and logged)
+                return;
+            }
+            if (data->payload_offset != s_frame_len || s_frame_len + data->data_len > data->payload_len) {
+                ESP_LOGW(TAG, "WebSocket frame chunk out of sequence (offset %d, have %d of %d bytes); dropping the frame",
+                         data->payload_offset, s_frame_len, data->payload_len);
+                frame_reset();
+                free(work_item);
+                return;
+            }
+            memcpy(s_frame + s_frame_len, data->data_ptr, data->data_len);
+            s_frame_len += data->data_len;
+            if (s_frame_len < data->payload_len) {
+                free(work_item);   // wait for the rest of the frame
+                return;
+            }
+            s_frame[s_frame_len] = '\0';
+            work_item->data = s_frame;   // the work item owns the whole frame now
+            work_item->data_len = s_frame_len;
+            s_frame = NULL;   // handed over, not freed
+            s_frame_len = 0;
+        } else if (data->op_code == WS_TRANSPORT_OPCODES_TEXT) {
             // work_item->data = malloc(data->data_len + 1);
             work_item->data = heap_caps_calloc(1, data->data_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             if (!work_item->data) {
@@ -480,12 +559,28 @@ static void apprtc_websocket_event_handler(void *handler_args, esp_event_base_t 
 }
 
 static esp_err_t ensure_apprtc_client_initialized(void);
+static void set_queue_callbacks(void);
+
+/* Outgoing messages wait here while the websocket comes up: room for a full
+ * trickle-ICE burst; when full, an ICE candidate is shed (set_queue_callbacks) */
+static const message_queue_config_t s_queue_config = {
+    .depth       = 32,
+    .full_policy = MESSAGE_QUEUE_FULL_DROP_OLDEST,
+};
 
 static void ws_event_work_handler(void *priv_data)
 {
     ws_event_work_item_t *work_item = (ws_event_work_item_t *)priv_data;
     if (!work_item) {
         ESP_LOGE(TAG, "Invalid work item");
+        return;
+    }
+    if (work_item->generation != __atomic_load_n(&apprtc_client.ws_generation, __ATOMIC_ACQUIRE)) {
+        /* Queued before its client was replaced (join-room, reconnect): acting on it
+         * would tear down or feed the new connection */
+        ESP_LOGI(TAG, "Dropping stale WebSocket event %d", (int) work_item->event_id);
+        free(work_item->data);
+        free(work_item);
         return;
     }
 
@@ -755,12 +850,13 @@ esp_err_t apprtc_signaling_init(apprtc_signaling_message_handler_t message_handl
     memset(apprtc_client.room_id, 0, sizeof(apprtc_client.room_id));
 
     // Initialize message queue - make sure to do this before it's used
-    err = message_queue_init(&apprtc_client.message_queue);
+    err = message_queue_init_with_config(&apprtc_client.message_queue, &s_queue_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize message queue");
         xSemaphoreGive(apprtc_client.mutex);
         return err;
     }
+    set_queue_callbacks();
 
 #if AUTO_REJOIN_ENABLED
     // Create reconnect timer if it doesn't exist
@@ -798,7 +894,16 @@ esp_err_t apprtc_signaling_init(apprtc_signaling_message_handler_t message_handl
     return ESP_OK;
 }
 
+/* expect_generation: the reconnect timer's, to give up under the lock when a
+ * join-room or disconnect has replaced the client since it decided to reconnect */
+static esp_err_t connect_room(const char *room_id, bool check_generation, uint32_t expect_generation);
+
 esp_err_t apprtc_signaling_connect(const char* room_id)
+{
+    return connect_room(room_id, false, 0);
+}
+
+static esp_err_t connect_room(const char *room_id, bool check_generation, uint32_t expect_generation)
 {
     esp_err_t ret;
 
@@ -817,6 +922,12 @@ esp_err_t apprtc_signaling_connect(const char* room_id)
     }
 
     xSemaphoreTake(apprtc_client.mutex, portMAX_DELAY);
+
+    if (check_generation && __atomic_load_n(&apprtc_client.ws_generation, __ATOMIC_ACQUIRE) != expect_generation) {
+        ESP_LOGI(TAG, "Reconnect superseded; not reconnecting to room %s", room_id ? room_id : "");
+        xSemaphoreGive(apprtc_client.mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     // If we're already connected or connecting, return an error
     if (apprtc_client.state == APPRTC_SIGNALING_STATE_CONNECTED ||
@@ -875,6 +986,14 @@ esp_err_t apprtc_signaling_connect(const char* room_id)
         return err;
     }
 
+    // Use the server-provided client_id. Before the stored messages are processed:
+    // they are tagged with it, like everything this room sends later.
+    if (apprtc_client.client_info.client_id) {
+        strncpy(apprtc_client.client_id, apprtc_client.client_info.client_id, sizeof(apprtc_client.client_id) - 1);
+        apprtc_client.client_id[sizeof(apprtc_client.client_id) - 1] = '\0';
+        ESP_LOGI(TAG, "Using server-provided client ID: %s", apprtc_client.client_id);
+    }
+
     // Process initial messages received from the server (offer and ICE candidates)
     if (!apprtc_client.is_initiator) {
         // Only process initial messages if we're not the initiator (i.e., we're joining a room)
@@ -883,13 +1002,6 @@ esp_err_t apprtc_signaling_connect(const char* room_id)
             ESP_LOGE(TAG, "Failed to process initial messages");
             // Continue anyway, as this is not a fatal error
         }
-    }
-
-    // Use the server-provided client_id
-    if (apprtc_client.client_info.client_id) {
-        strncpy(apprtc_client.client_id, apprtc_client.client_info.client_id, sizeof(apprtc_client.client_id) - 1);
-        apprtc_client.client_id[sizeof(apprtc_client.client_id) - 1] = '\0';
-        ESP_LOGI(TAG, "Using server-provided client ID: %s", apprtc_client.client_id);
     }
 
     // Step 2: Configure and connect WebSocket client
@@ -927,8 +1039,10 @@ esp_err_t apprtc_signaling_connect(const char* room_id)
             return ESP_FAIL;
         }
 
-        // Register WebSocket event handler
-        esp_websocket_register_events(apprtc_client.client, WEBSOCKET_EVENT_ANY, apprtc_websocket_event_handler, NULL);
+        // Register WebSocket event handler, tagged with this client's generation
+        uint32_t generation = __atomic_add_fetch(&apprtc_client.ws_generation, 1, __ATOMIC_RELEASE);
+        esp_websocket_register_events(apprtc_client.client, WEBSOCKET_EVENT_ANY, apprtc_websocket_event_handler,
+                                      (void *) (uintptr_t) generation);
     }
 
     // Start WebSocket connection
@@ -958,7 +1072,8 @@ esp_err_t apprtc_signaling_disconnect(void)
 
     xSemaphoreTake(apprtc_client.mutex, portMAX_DELAY);
 
-    // Stop WebSocket client if it exists
+    // Stop WebSocket client if it exists; its remaining events are stale from here
+    __atomic_add_fetch(&apprtc_client.ws_generation, 1, __ATOMIC_RELEASE);
     if (apprtc_client.client) {
         esp_websocket_client_stop(apprtc_client.client);
         esp_websocket_client_destroy(apprtc_client.client);
@@ -1100,6 +1215,32 @@ esp_err_t apprtc_signaling_send_message(const char* message, size_t message_len)
     return ret;
 }
 
+/* Queued messages are webrtc_message_t copies with their own payload */
+static bool queued_msg_droppable(const void *data, int len)
+{
+    return len == (int) sizeof(webrtc_message_t) &&
+           ((const webrtc_message_t *) data)->message_type == WEBRTC_MESSAGE_TYPE_ICE_CANDIDATE;
+}
+
+static void queued_msg_free(void *data)
+{
+    webrtc_message_t *msg = (webrtc_message_t *) data;
+    free(msg->payload);
+    free(msg);
+}
+
+static void set_queue_callbacks(void)
+{
+    apprtc_client.message_queue.droppable = queued_msg_droppable;
+    apprtc_client.message_queue.free_item = queued_msg_free;
+}
+
+/* The peer id this client puts on outgoing messages (see apprtc_signaling_send_webrtc_message) */
+const char *apprtc_signaling_get_peer_key(void)
+{
+    return apprtc_client.client_id[0] != '\0' ? apprtc_client.client_id : apprtc_client.room_id;
+}
+
 const char* apprtc_signaling_get_room_id(void)
 {
     return apprtc_client.room_id[0] != '\0' ? apprtc_client.room_id : NULL;
@@ -1126,7 +1267,7 @@ static void update_state(apprtc_signaling_state_t new_state)
     }
 }
 
-__attribute__((unused))
+__attribute__((unused))   /* referenced only with AUTO_REJOIN_ENABLED */
 static void reconnect_timer_callback(void* arg)
 {
     (void)arg;
@@ -1151,46 +1292,45 @@ static void reconnect_timer_callback(void* arg)
     ESP_LOGI(TAG, "Attempting to reconnect (%d/%d)",
              apprtc_client.reconnect_attempts, APPRTC_MAX_RECONNECT_ATTEMPTS);
 
+    if (apprtc_client.room_id[0] == '\0') {
+        /* A disconnect got the lock first: there is no room to go back to */
+        xSemaphoreGive(apprtc_client.mutex);
+        return;
+    }
+
     // Try to reconnect with the same room ID
     char room_id[MAX_ROOM_ID_LENGTH + 1];
     strncpy(room_id, apprtc_client.room_id, MAX_ROOM_ID_LENGTH);
     room_id[MAX_ROOM_ID_LENGTH] = '\0';
 
-    // Save the client ID and initiator status
-    char client_id[64];
-    bool was_initiator = apprtc_client.is_initiator;
-    if (apprtc_client.client_id[0] != '\0') {
-        strncpy(client_id, apprtc_client.client_id, sizeof(client_id) - 1);
-        client_id[sizeof(client_id) - 1] = '\0';
-    } else {
-        client_id[0] = '\0';
-    }
+    /* The client id and the initiator role come fresh from the rejoin: the room's
+     * messages are addressed with that id, and the server decides who offers (a
+     * browser that stayed in the room re-offers, and this device then answers) */
+
+    /* Take the current WebSocket client over under the lock: join-room or disconnect
+     * may be replacing it at the same time, and it must be destroyed once. Its
+     * remaining events are stale from here. */
+    esp_websocket_client_handle_t old_client = apprtc_client.client;
+    apprtc_client.client = NULL;
+    uint32_t generation = __atomic_add_fetch(&apprtc_client.ws_generation, 1, __ATOMIC_RELEASE);
 
     xSemaphoreGive(apprtc_client.mutex);
 
-    // Destroy the current WebSocket connection if it exists
-    if (apprtc_client.client) {
-        esp_websocket_client_stop(apprtc_client.client);
-        esp_websocket_client_destroy(apprtc_client.client);
-        apprtc_client.client = NULL;
+    if (old_client) {
+        esp_websocket_client_stop(old_client);
+        esp_websocket_client_destroy(old_client);
     }
 
     // Wait a short time before reconnecting
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Call connect again with the same room ID
-    esp_err_t err = apprtc_signaling_connect(room_id);
+    // Call connect again with the same room ID, unless a join-room or disconnect
+    // has taken over the connection meanwhile (checked under the lock)
+    esp_err_t err = connect_room(room_id, true, generation);
 
-    // Restore client ID and initiator status if reconnection was successful
-    if (err == ESP_OK && client_id[0] != '\0') {
-        xSemaphoreTake(apprtc_client.mutex, portMAX_DELAY);
-        strncpy(apprtc_client.client_id, client_id, sizeof(apprtc_client.client_id) - 1);
-        apprtc_client.client_id[sizeof(apprtc_client.client_id) - 1] = '\0';
-        apprtc_client.is_initiator = was_initiator;
-        xSemaphoreGive(apprtc_client.mutex);
-
-        ESP_LOGI(TAG, "Restored client ID: %s and initiator status: %d after reconnection",
-                 apprtc_client.client_id, apprtc_client.is_initiator);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Rejoined room %s as client %s (initiator: %d)",
+                 room_id, apprtc_client.client_id, apprtc_client.is_initiator);
     }
 }
 
@@ -1302,7 +1442,34 @@ esp_err_t apprtc_signaling_process_message(const char *message, size_t message_l
     return ESP_OK;
 }
 
-int apprtc_signaling_send_webrtc_message(webrtc_message_t *pWebrtcMessage)
+/* One drain pending on the work queue at a time, however many messages queue up;
+ * __atomic access only */
+static bool s_drain_scheduled;
+/* Senders against the drain: who may send directly (apprtc_send_order.h) */
+static apprtc_send_order_t s_send_order;
+
+static void drain_queue_work(void *arg);
+
+static void schedule_drain(void)
+{
+    if (!__atomic_exchange_n(&s_drain_scheduled, true, __ATOMIC_ACQ_REL)) {
+        if (esp_work_queue_add_task(drain_queue_work, NULL) != ESP_OK) {
+            __atomic_store_n(&s_drain_scheduled, false, __ATOMIC_RELEASE);
+        }
+    }
+}
+
+static void drain_queue_work(void *arg)
+{
+    (void) arg;
+    /* before draining: a message queued from now on schedules another */
+    __atomic_store_n(&s_drain_scheduled, false, __ATOMIC_RELEASE);
+    apprtc_signaling_process_queued_messages();
+}
+
+/* from_queue: the message comes from the outgoing queue (the drain); it is not
+ * queued again here, and 2 means "not connected, put it back". */
+static int send_webrtc_message(webrtc_message_t *pWebrtcMessage, bool from_queue)
 {
     esp_err_t ret;
     char *apprtc_json_msg = NULL;
@@ -1321,10 +1488,20 @@ int apprtc_signaling_send_webrtc_message(webrtc_message_t *pWebrtcMessage)
     }
 
     // Check if we're connected to the signaling server first
-    if (apprtc_client.state != APPRTC_SIGNALING_STATE_CONNECTED ||
-        !apprtc_client.client ||
-        !esp_websocket_client_is_connected(apprtc_client.client)) {
-        ESP_LOGW(TAG, "Not connected to signaling server, queueing message for later");
+    bool connected = apprtc_client.state == APPRTC_SIGNALING_STATE_CONNECTED &&
+                     apprtc_client.client &&
+                     esp_websocket_client_is_connected(apprtc_client.client);
+    if (from_queue && !connected) {
+        return 2;
+    }
+    /* While earlier messages wait in the queue (the drain after connecting is still to
+     * run), this one goes behind them: a candidate must not overtake the answer. */
+    bool behind_queue = connected && !from_queue &&
+                        apprtc_send_order_decide(&s_send_order, &apprtc_client.message_queue) == APPRTC_SEND_QUEUE;
+    if (!connected || behind_queue) {
+        if (!connected) {
+            ESP_LOGW(TAG, "Not connected to signaling server, queueing message for later");
+        }
         webrtc_message_t *webrtc_message_copy = (webrtc_message_t *) malloc(sizeof(webrtc_message_t));
         if (webrtc_message_copy == NULL) {
             ESP_LOGE(TAG, "Failed to allocate memory for signaling message");
@@ -1343,6 +1520,11 @@ int apprtc_signaling_send_webrtc_message(webrtc_message_t *pWebrtcMessage)
             free(webrtc_message_copy->payload);
             free(webrtc_message_copy);
             return -1;
+        }
+        /* Make sure a drain follows: the running one may have just finished, or (not
+         * connected) the connect may have come up and drained an empty queue meanwhile */
+        if (behind_queue || apprtc_client.state == APPRTC_SIGNALING_STATE_CONNECTED) {
+            schedule_drain();
         }
         // Return a special status code to indicate "message queued"
         return 1;  // Custom code for "message queued"
@@ -1392,6 +1574,11 @@ int apprtc_signaling_send_webrtc_message(webrtc_message_t *pWebrtcMessage)
 
     ESP_LOGI(TAG, "Message sent successfully");
     return 0;
+}
+
+int apprtc_signaling_send_webrtc_message(webrtc_message_t *pWebrtcMessage)
+{
+    return send_webrtc_message(pWebrtcMessage, false);
 }
 
 static int send_register(esp_websocket_client_handle_t ws, const char *room_id, const char *client_id)
@@ -1693,6 +1880,27 @@ esp_err_t apprtc_signaling_queue_message(const void *data, int len)
  *
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
+static apprtc_drain_result_t send_queued_message(void *data, int len, void *ctx)
+{
+    (void) len;
+    (void) ctx;
+    int result = send_webrtc_message((webrtc_message_t *) data, true);
+    if (result == 2) {
+        return APPRTC_DRAIN_NOT_CONNECTED;
+    }
+    if (result != 0) {
+        ESP_LOGW(TAG, "Failed to send a queued message, result: %d", result);
+        return APPRTC_DRAIN_FAILED;
+    }
+    return APPRTC_DRAIN_SENT;
+}
+
+/* The offer and the answer get a second try after a failed send; candidates do not */
+static bool queued_msg_must_deliver(const void *data, int len)
+{
+    return !queued_msg_droppable(data, len);
+}
+
 esp_err_t apprtc_signaling_process_queued_messages(void)
 {
     esp_err_t ret = ESP_OK;
@@ -1706,36 +1914,9 @@ esp_err_t apprtc_signaling_process_queued_messages(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Process all queued messages
-    while (!message_queue_is_empty(&apprtc_client.message_queue)) {
-        void *data = NULL;
-        int len = 0;
-
-        // Get the next message
-        if (message_queue_get_next(&apprtc_client.message_queue, &data, &len) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to get message from queue");
-            ret = ESP_FAIL;
-            break;
-        }
-
-
-        // Process the message
-        ESP_LOGI(TAG, "Processing queued message %d", processed + 1);
-
-        webrtc_message_t *webrtcMessage = (webrtc_message_t *)data;
-        // Call the send callback directly with the message data
-        int result = apprtc_signaling_send_webrtc_message(webrtcMessage);
-        if (result != 0) {
-            ESP_LOGW(TAG, "Failed to process queued message %d, result: %d", processed + 1, result);
-            ret = ESP_FAIL;
-        } else {
-            processed++;
-        }
-
-        // Free the message data
-        free(webrtcMessage->payload);
-        free(data);
-    }
+    // Send all queued messages, in order (apprtc_send_order.h)
+    ret = apprtc_send_order_drain(&s_send_order, &apprtc_client.message_queue, send_queued_message,
+                                  queued_msg_must_deliver, NULL, &processed);
 
     ESP_LOGI(TAG, "Processed %d queued messages", processed);
     return ret;
@@ -1761,11 +1942,12 @@ static esp_err_t ensure_apprtc_client_initialized(void)
     // Initialize message queue early to prevent crashes
     if (apprtc_client.message_queue.mutex == NULL) {
         ESP_LOGI(TAG, "Message queue not initialized, initializing now...");
-        esp_err_t err = message_queue_init(&apprtc_client.message_queue);
+        esp_err_t err = message_queue_init_with_config(&apprtc_client.message_queue, &s_queue_config);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to initialize message queue early: %s", esp_err_to_name(err));
             return err;
         }
+        set_queue_callbacks();
         ESP_LOGI(TAG, "Message queue initialized early successfully");
     } else {
         ESP_LOGI(TAG, "Message queue already initialized (mutex: %p)", apprtc_client.message_queue.mutex);

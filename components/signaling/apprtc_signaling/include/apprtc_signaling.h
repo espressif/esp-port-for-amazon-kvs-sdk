@@ -97,6 +97,9 @@ esp_err_t apprtc_signaling_deinit(void);
 /**
  * @brief Get the AppRTC signaling client interface
  *
+ * On the IDF linux target its send_message hands the message to the work queue and
+ * returns; the send itself, and any failure, happen later (logged only).
+ *
  * @return webrtc_signaling_client_if_t* Pointer to the AppRTC signaling interface
  */
 webrtc_signaling_client_if_t* apprtc_signaling_client_if_get(void);

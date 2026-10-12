@@ -71,6 +71,19 @@ typedef struct {
  */
 webrtc_peer_connection_if_t* kvs_peer_connection_if_get(void);
 
+/**
+ * @brief Let an offer wait longer for its answer
+ *
+ * A session must reach CONNECTED within 30 s of starting, or the liveness watchdog
+ * frees it. Where the offer can wait for a peer to show up, as in an AppRTC room the
+ * device created, set how long it may wait: until the answer arrives the session
+ * gets this long, and the 30 s then run from the answer. 0 (the default) keeps the
+ * plain 30 s. Set it before sessions start.
+ *
+ * @param seconds How long an offer may wait for its answer; 0 for no extra wait
+ */
+void kvs_peer_connection_set_answer_timeout(uint32_t seconds);
+
 #ifdef __cplusplus
 }
 #endif

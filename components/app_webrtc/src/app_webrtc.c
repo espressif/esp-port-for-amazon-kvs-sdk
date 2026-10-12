@@ -18,6 +18,7 @@
 #include "media_stream.h"
 
 #include "sdkconfig.h"
+#include <pthread.h>
 #include "esp_log.h"
 
 static const char *TAG = "app_webrtc";
@@ -53,6 +54,20 @@ static struct {
 
 // Task handle for the WebRTC run task
 static TaskHandle_t gWebRtcRunTaskHandle = NULL;
+/* Set by the run task when its teardown starts: from then on the context it frees
+ * must not be touched by app_webrtc_terminate() calls that only wait for it */
+static volatile BOOL gRunTaskTearingDown = FALSE;
+/* Set by the run task once its teardown is done */
+static volatile BOOL gRunTaskDone = FALSE;
+/* Set while app_webrtc_terminate() runs the teardown itself (no run task), so a
+ * second terminate cannot free the same state again */
+static BOOL gTerminateTeardownBusy = FALSE;
+/* Makes app_webrtc_terminate()'s check of gRunTaskTearingDown and its write to the
+ * context one step against the run task setting gRunTaskTearingDown; also serialises
+ * reaping the run task and claiming the teardown in app_webrtc_terminate() */
+static pthread_mutex_t gRunTaskLock = PTHREAD_MUTEX_INITIALIZER;
+
+static WEBRTC_STATUS app_webrtc_teardown(void);
 
 // Global KVS WebRTC client handle for interface calls
 static void* g_kvs_webrtc_client = NULL;
@@ -683,6 +698,43 @@ CleanUp:
 
 // Note: getIceCandidatePairStatsCallback moved to kvs_webrtc.c where it belongs
 
+/* Free every streaming session. The cleanup loop normally frees them as they end;
+ * at teardown it has exited, and the SDK deinit waits for every SCTP association. */
+static VOID freeAllAppWebRTCSessions(papp_webrtc_context_t pContext)
+{
+    PAppWebRTCSession sessions[ARRAY_SIZE(pContext->webrtcSessionList)];
+    UINT32 i, count;
+
+    if (!IS_VALID_MUTEX_VALUE(pContext->streamingSessionListReadLock)) {
+        return;   /* context never finished init: no sessions */
+    }
+    /* Unpublish them first: callers such as app_webrtc_trigger_offer() look sessions
+     * up by peer under the object lock, and must not find one being freed */
+    if (IS_VALID_MUTEX_VALUE(pContext->sampleConfigurationObjLock)) {
+        MUTEX_LOCK(pContext->sampleConfigurationObjLock);
+        if (pContext->pRtcPeerConnectionForRemoteClient != NULL) {
+            hashTableClear(pContext->pRtcPeerConnectionForRemoteClient);
+        }
+        MUTEX_UNLOCK(pContext->sampleConfigurationObjLock);
+    }
+    /* Detach under the list lock, free outside it: freeing a session closes its peer
+     * connection, whose state callback takes the same (non-recursive) lock. */
+    MUTEX_LOCK(pContext->streamingSessionListReadLock);
+    count = pContext->streamingSessionCount;
+    for (i = 0; i < count; ++i) {
+        sessions[i] = pContext->webrtcSessionList[i];
+        pContext->webrtcSessionList[i] = NULL;
+    }
+    pContext->streamingSessionCount = 0;
+    MUTEX_UNLOCK(pContext->streamingSessionListReadLock);
+
+    for (i = 0; i < count; ++i) {
+        if (sessions[i] != NULL) {
+            freeAppWebRTCSession(&sessions[i]);
+        }
+    }
+}
+
 /**
  * @brief Free WebRTC application context
  *
@@ -694,10 +746,8 @@ STATUS freeAppWebRTCContext(papp_webrtc_context_t* ppContext)
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
     papp_webrtc_context_t pContext;
-    UINT32 i;
     UINT64 data;
     StackQueueIterator iterator;
-    BOOL locked = FALSE;
 
     CHK(ppContext != NULL, STATUS_NULL_ARG);
     pContext = *ppContext;
@@ -727,28 +777,11 @@ STATUS freeAppWebRTCContext(papp_webrtc_context_t* ppContext)
     if (pContext->pRtcPeerConnectionForRemoteClient != NULL) {
         hashTableClear(pContext->pRtcPeerConnectionForRemoteClient);
         hashTableFree(pContext->pRtcPeerConnectionForRemoteClient);
+        pContext->pRtcPeerConnectionForRemoteClient = NULL;
     }
 
     /* === Free Sessions === */
-    if (IS_VALID_MUTEX_VALUE(pContext->sampleConfigurationObjLock)) {
-        MUTEX_LOCK(pContext->sampleConfigurationObjLock);
-        locked = TRUE;
-    }
-
-    /* Free all active sessions and reset session count */
-    UINT32 sessionCount = pContext->streamingSessionCount;
-    for (i = 0; i < sessionCount; ++i) {
-        if (pContext->webrtcSessionList[i] != NULL) {
-            /* Sessions are freed via interface layer which handles stats collection */
-            freeAppWebRTCSession(&pContext->webrtcSessionList[i]);
-            pContext->webrtcSessionList[i] = NULL;
-        }
-    }
-    pContext->streamingSessionCount = 0;
-
-    if (locked) {
-        MUTEX_UNLOCK(pContext->sampleConfigurationObjLock);
-    }
+    freeAllAppWebRTCSessions(pContext);
 
     /* === Free Media Buffers === */
     SAFE_MEMFREE(pContext->pVideoFrameBuffer);
@@ -1150,15 +1183,15 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
     STATUS retStatus = STATUS_SUCCESS;
     PSampleConfiguration pSampleConfiguration = (PSampleConfiguration) HANDLE_TO_POINTER(customData);
 
-    CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
-
-    // Normal processing (bridge mode is handled in wrapper, never reaches here)
+    // Declared before the first CHK: it jumps to CleanUp, which reads most of these.
     BOOL peerConnectionFound = FALSE, locked = FALSE, freeStreamingSession = FALSE;
     UINT32 clientIdHash;
     UINT64 hashValue = 0;
     PPendingMessageQueue pPendingMessageQueue = NULL;
     PAppWebRTCSession pAppWebRTCSession = NULL;
     webrtc_message_t* pWebRtcMessageCopy = NULL;
+
+    CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
 
     MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
     locked = TRUE;
@@ -1470,9 +1503,6 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
 CleanUp:
 
     // Clean up webrtc message copy if allocated
-    // Suppress false positive warning: pWebRtcMessageCopy is initialized in ICE_CANDIDATE case
-    #pragma GCC diagnostic push
-    #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
     if (pWebRtcMessageCopy != NULL) {
         // Free the payload if allocated separately
         if (pWebRtcMessageCopy->payload != NULL) {
@@ -1480,9 +1510,8 @@ CleanUp:
         }
         // Free the message itself
         SAFE_MEMFREE(pWebRtcMessageCopy);
-        pWebRtcMessageCopy = NULL; // Clear after freeing to help compiler analysis
+        pWebRtcMessageCopy = NULL;
     }
-    #pragma GCC diagnostic pop
 
     if (pPendingMessageQueue != NULL) {
         freeMessageQueue(pPendingMessageQueue);
@@ -1876,7 +1905,11 @@ static void app_webrtc_runTask(void *pvParameters)
 
             ESP_LOGW(TAG, "Signaling init failed (attempt %d, ret 0x%08" PRIx32 "), retrying in %" PRIu32 " ms...",
                      attempt, retStatus, init_delay_ms);
-            THREAD_SLEEP(init_delay_ms * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
+            for (UINT32 slept = 0; slept < init_delay_ms && !ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag);
+                 slept += 100) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            CHK(!ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag), STATUS_SUCCESS);
             init_delay_ms = MIN(init_delay_ms * 2, 60000);
         }
 
@@ -1962,17 +1995,48 @@ CleanUp:
         raiseEvent(APP_WEBRTC_EVENT_ERROR, retStatus, NULL, "WebRTC application run failed");
     }
 
-    // Terminate WebRTC application
-    app_webrtc_terminate();
+    // Terminate WebRTC application: this task owns the teardown
+    pthread_mutex_lock(&gRunTaskLock);
+    gRunTaskTearingDown = TRUE;   /* stays set until the next app_webrtc_run() */
+    pthread_mutex_unlock(&gRunTaskLock);
+    app_webrtc_teardown();
     DLOGI("WebRTC task cleanup done");
 
-    // Clear the task handle since we're about to delete the task
+#if CONFIG_IDF_TARGET_LINUX
     gWebRtcRunTaskHandle = NULL;
-
-    // Delete the task
+    gRunTaskDone = TRUE;
     vTaskDelete(NULL);
+#else
+    /* The TCB and stack are static and the next app_webrtc_run() reuses them. A
+     * self-deleted task stays on the kernel's termination list until the idle task
+     * reaps it, so park here instead; reapRunTask() deletes the task from outside. */
+    gRunTaskDone = TRUE;
+    for (;;) {
+        vTaskSuspend(NULL);
+    }
+#endif
 
     LEAVES();
+}
+
+/* Delete a run task that has finished its teardown (ESP targets; on Linux the task
+ * deletes itself). Deleting a task that is not running unlinks it before
+ * vTaskDelete() returns, so its static buffers are free to reuse. Call with
+ * gRunTaskLock held. */
+static void reapRunTask(void)
+{
+#if !CONFIG_IDF_TARGET_LINUX
+    TaskHandle_t handle = gWebRtcRunTaskHandle;
+
+    if (handle == NULL || !gRunTaskDone) {
+        return;
+    }
+    while (eTaskGetState(handle) != eSuspended) {
+        vTaskDelay(1);
+    }
+    vTaskDelete(handle);
+    gWebRtcRunTaskHandle = NULL;
+#endif
 }
 
 /**
@@ -1988,8 +2052,12 @@ WEBRTC_STATUS app_webrtc_run(void)
 
     DLOGI("WebRTC app running");
 
-    // Check if task is already running
-    if (gWebRtcRunTaskHandle != NULL) {
+    // Check if task is already running (a finished one is reaped first)
+    pthread_mutex_lock(&gRunTaskLock);
+    reapRunTask();
+    BOOL running = gWebRtcRunTaskHandle != NULL;
+    pthread_mutex_unlock(&gRunTaskLock);
+    if (running) {
         DLOGI("WebRTC task is already running");
         CHK(FALSE, WEBRTC_STATUS_INVALID_OPERATION);
     }
@@ -1997,9 +2065,20 @@ WEBRTC_STATUS app_webrtc_run(void)
     // Create a task to run the WebRTC application
     // Use a higher stack size for the WebRTC task as signaling requires substantial stack
     DLOGI("Creating WebRTC run task");
+    gRunTaskTearingDown = FALSE;
+    gRunTaskDone = FALSE;
 
 #define WEBRTC_TASK_STACK_SIZE     CONFIG_APP_WEBRTC_TASK_STACK_SIZE
 #define WEBRTC_TASK_PRIO           5
+#if CONFIG_IDF_TARGET_LINUX
+    /* Linux: dynamic task (no SPIRAM; static stacks crash in prvInitialiseNewTask),
+     * at the caller's priority: it idles in a host condvar wait the port can't see as
+     * blocking, so a higher priority would starve the caller. */
+    if (xTaskCreate(app_webrtc_runTask, "webrtc_run", WEBRTC_TASK_STACK_SIZE,
+                    NULL, uxTaskPriorityGet(NULL), &gWebRtcRunTaskHandle) != pdPASS) {
+        gWebRtcRunTaskHandle = NULL;
+    }
+#else
     static StaticTask_t *task_buffer = NULL;
     static void *task_stack = NULL;
 
@@ -2026,6 +2105,7 @@ WEBRTC_STATUS app_webrtc_run(void)
         task_stack,
         task_buffer
     );
+#endif
 
     if (gWebRtcRunTaskHandle == NULL) {
         DLOGE("Failed to create WebRTC run task");
@@ -2076,6 +2156,12 @@ WEBRTC_STATUS app_webrtc_close_all_sessions(void)
     CVAR_BROADCAST(pSampleConfiguration->cvar);
     ESP_LOGI(TAG, "Marked %" PRIu32 " active session(s) for cleanup on disconnect", marked);
 
+    /* During the app's own teardown the cleanup loop has already returned, so
+     * nothing would bring the count down: the teardown frees the sessions next. */
+    if (ATOMIC_LOAD_BOOL(&pSampleConfiguration->appTerminateFlag)) {
+        return WEBRTC_STATUS_SUCCESS;
+    }
+
     /* Give the cleanup loop a bounded window to drain so an immediate rejoin
      * finds free slots. Cleanup is async; do not block forever. */
     for (int waited = 0; waited < 200; ++waited) {
@@ -2087,12 +2173,82 @@ WEBRTC_STATUS app_webrtc_close_all_sessions(void)
     return WEBRTC_STATUS_SUCCESS;
 }
 
+/* Upper bound for app_webrtc_terminate() waiting on the run task's own teardown:
+ * the teardown may first wait out a signaling reconnect for up to
+ * APP_WEBRTC_RECONNECT_DRAIN_TIMEOUT_MS, then disconnect and free the clients */
+#define APP_WEBRTC_TERMINATE_WAIT_MS (APP_WEBRTC_RECONNECT_DRAIN_TIMEOUT_MS + 15000)
+
 WEBRTC_STATUS app_webrtc_terminate(void)
 {
     ENTERS();
     WEBRTC_STATUS retStatus = WEBRTC_STATUS_SUCCESS;
+    BOOL runTaskAlive;
 
     CHK(gapp_webrtc_initialized, WEBRTC_STATUS_INVALID_OPERATION);
+
+    pthread_mutex_lock(&gRunTaskLock);
+    /* A run task that left on its own (an error exit) has already torn down what it
+     * ran with and is parked; anything initialised since is this call's to tear
+     * down. Reap it so the check below sees no run task. */
+    reapRunTask();
+    runTaskAlive = gWebRtcRunTaskHandle != NULL;
+    if (!runTaskAlive) {
+        if (gTerminateTeardownBusy) {
+            pthread_mutex_unlock(&gRunTaskLock);
+            DLOGW("Terminate: a teardown is already in progress");
+            CHK(FALSE, WEBRTC_STATUS_INVALID_OPERATION);
+        }
+        gTerminateTeardownBusy = TRUE;
+    }
+    pthread_mutex_unlock(&gRunTaskLock);
+
+    /* While the run task is alive it owns the teardown: it leaves its loop on
+     * appTerminateFlag and runs app_webrtc_teardown() itself. Any call here only
+     * raises the flag (unless that teardown has started), then waits for the task,
+     * or returns at once when made from a callback on the run task. */
+    if (runTaskAlive) {
+        pthread_mutex_lock(&gRunTaskLock);
+        if (!gRunTaskTearingDown && gSampleConfiguration != NULL) {
+            ATOMIC_STORE_BOOL(&gSampleConfiguration->appTerminateFlag, TRUE);
+            CVAR_BROADCAST(gSampleConfiguration->cvar);
+        }
+        pthread_mutex_unlock(&gRunTaskLock);
+        if (xTaskGetCurrentTaskHandle() == gWebRtcRunTaskHandle) {
+            goto CleanUp;
+        }
+        UINT32 waited_ms = 0;
+        while (!gRunTaskDone && waited_ms < APP_WEBRTC_TERMINATE_WAIT_MS) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            waited_ms += 20;
+        }
+        if (!gRunTaskDone) {
+            DLOGW("Terminate: run task still tearing down after %u ms", APP_WEBRTC_TERMINATE_WAIT_MS);
+            CHK(FALSE, WEBRTC_STATUS_INTERNAL_ERROR);
+        }
+        pthread_mutex_lock(&gRunTaskLock);
+        reapRunTask();
+        pthread_mutex_unlock(&gRunTaskLock);
+        DLOGI("Terminate: run task finished teardown after %u ms", waited_ms);
+        goto CleanUp;
+    }
+
+    retStatus = app_webrtc_teardown();
+
+    pthread_mutex_lock(&gRunTaskLock);
+    gTerminateTeardownBusy = FALSE;
+    pthread_mutex_unlock(&gRunTaskLock);
+
+CleanUp:
+    LEAVES();
+    return retStatus;
+}
+
+/* The teardown proper: the run task's own, or app_webrtc_terminate()'s when the run
+ * task never started */
+static WEBRTC_STATUS app_webrtc_teardown(void)
+{
+    ENTERS();
+    WEBRTC_STATUS retStatus = WEBRTC_STATUS_SUCCESS;
 
     if (gSampleConfiguration != NULL) {
         // Kick off the termination sequence
@@ -2137,6 +2293,10 @@ WEBRTC_STATUS app_webrtc_terminate(void)
                 DLOGI("Signaling client disconnected successfully");
             }
         }
+
+        // Sessions first: the peer connection client's free deinitialises the SDK,
+        // which waits for every session's SCTP association to be gone
+        freeAllAppWebRTCSessions(gSampleConfiguration);
 
         // Free the peer connection client if available
         if (g_kvs_webrtc_client != NULL) {
@@ -2185,7 +2345,6 @@ WEBRTC_STATUS app_webrtc_terminate(void)
 
     DLOGI("WebRTC app terminated successfully");
 
-CleanUp:
     if (WEBRTC_STATUS_FAILED(retStatus)) {
         DLOGE("WebRTC app termination failed with status 0x%08x", retStatus);
     }

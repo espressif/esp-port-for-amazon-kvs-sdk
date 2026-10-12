@@ -3,7 +3,12 @@ dependencies:
   idf:
     version: ">=4.4.0"
   ## Required IDF components
-  esp_websocket_client: "*"
+  # esp_websocket_client is the ESP signaling transport; linux uses libwebsockets
+  # (CONFIG_USE_ESP_WEBSOCKET_CLIENT=n) and it doesn't build clean on the host.
+  esp_websocket_client:
+    version: "*"
+    rules:
+      - if: "target != linux"
 
   libwebsockets:
     path: ../../libwebsockets

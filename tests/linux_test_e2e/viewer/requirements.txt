@@ -1,0 +1,6 @@
+# aiortc >= 1.10 for Python 3.12 (RTCBundlePolicy); av >= 13 builds against ffmpeg 8.x
+aiortc>=1.10
+boto3>=1.34
+botocore>=1.34
+websockets>=12.0
+av>=13.0

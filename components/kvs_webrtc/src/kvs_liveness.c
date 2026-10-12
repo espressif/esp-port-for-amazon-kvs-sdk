@@ -18,6 +18,13 @@ bool kvs_liveness_should_evict(const kvs_liveness_health_t *h,
     if (h->terminate_flag) {
         return false;
     }
+    /* An unanswered offer is waiting for a peer to join: give it the (longer) answer deadline */
+    if (h->awaiting_answer) {
+        if (now < h->offer_time) {
+            return false;
+        }
+        return (now - h->offer_time) > cfg->answer_deadline;
+    }
 
     if (!h->ever_connected) {
         /* Never reached CONNECTED. Give it until the connect deadline from when

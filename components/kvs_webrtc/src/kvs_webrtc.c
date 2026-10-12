@@ -45,7 +45,16 @@ static struct {
 } g_data_channel_callbacks = {0};
 
 // Certificate pre-generation settings - match Common.c timing
+#if CONFIG_IDF_TARGET_LINUX
+/* The pre-generation timer thread calls mbedtls RNG to build DTLS keypairs
+ * concurrently with the signaling TLS handshakes. On the IDF Linux target
+ * mbedTLS threading (THREADING_ALT) is not wired, so the two race and the
+ * handshake intermittently fails cert verification. Disable pre-generation
+ * here (certs are generated on demand instead); ESP builds keep it on. */
+#define KVS_PRE_GENERATE_CERT FALSE
+#else
 #define KVS_PRE_GENERATE_CERT TRUE
+#endif
 #define KVS_PRE_GENERATE_CERT_PERIOD (1000 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND)  // 1 second (same as Common.c)
 #define KVS_TIMER_QUEUE_THREAD_SIZE (8 * 1024)
 
@@ -58,7 +67,8 @@ static struct {
 // Liveness watchdog thresholds (evaluated on the KVS_ICE_STATS_DURATION tick).
 #define KVS_LIVENESS_CONNECT_DEADLINE (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)  // reach CONNECTED within 30s
 #define KVS_LIVENESS_STALL_DEADLINE   (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)  // once up, send bytes must advance within 30s
-static const kvs_liveness_cfg_t gKvsLivenessCfg = {
+static kvs_liveness_cfg_t gKvsLivenessCfg = {
+    .answer_deadline  = 0,   /* no extra wait for an answer unless the app sets one */
     .connect_deadline = KVS_LIVENESS_CONNECT_DEADLINE,
     .stall_deadline   = KVS_LIVENESS_STALL_DEADLINE,
 };
@@ -1714,6 +1724,11 @@ webrtc_peer_connection_if_t* kvs_peer_connection_if_get(void)
     return &kvs_peer_connection_if;
 }
 
+void kvs_peer_connection_set_answer_timeout(uint32_t seconds)
+{
+    gKvsLivenessCfg.answer_deadline = (uint64_t) seconds * HUNDREDS_OF_NANOS_IN_A_SECOND;
+}
+
 // =============================================================================
 // Internal KVS Peer Connection Implementation - equivalent to app_webrtc.c
 // =============================================================================
@@ -2073,6 +2088,8 @@ static STATUS kvs_handleAnswer(kvs_pc_session_t* session, webrtc_message_t* mess
 
     // Set remote description
     CHK_STATUS(setRemoteDescription(session->peer_connection, &answerSessionDescriptionInit));
+    session->answer_time = GETTIME();
+    __atomic_store_n(&session->answer_applied, true, __ATOMIC_RELEASE);   /* the watchdog reads answer_time after it */
 
     // CRITICAL PARITY FIX: Start media threads exactly like legacy handleAnswer
     if (session->on_peer_state_changed != NULL) {
@@ -2771,12 +2788,16 @@ static STATUS kvs_metricsCollectionCallback(UINT64 callerData, PHashEntry pHashE
             pSession->wd_last_recv_time = now;
             pSession->wd_ever_recvd = true;
         }
+        bool answered = __atomic_load_n(&pSession->answer_applied, __ATOMIC_ACQUIRE);
+        bool answer_wait = pSession->is_initiator && gKvsLivenessCfg.answer_deadline > 0;
         kvs_liveness_health_t health = {
             .terminate_flag     = pSession->terminated,
+            .awaiting_answer    = answer_wait && !answered,
             .ever_connected     = pSession->wd_ever_connected,
             .ever_sent          = pSession->wd_ever_sent,
             .ever_recvd         = pSession->wd_ever_recvd,
-            .offer_time         = pSession->start_time,
+            /* An offerer's connect clock starts at the answer; until then it runs from the offer */
+            .offer_time         = (answer_wait && answered) ? pSession->answer_time : pSession->start_time,
             .last_send_progress = pSession->wd_last_send_time,
             .last_recv_progress = pSession->wd_last_recv_time,
         };

@@ -9,6 +9,13 @@ set(srcs
     "test_pending_ice.c"
     "test_stale_peer_watchdog.c"
     "test_bridge_ready_query.c"
+    "test_message_queue.c"
+    "test_apprtc_send_order.c"
+    # esp_webrtc_utils' message queue: FreeRTOS, pthread + libc only, linked standalone.
+    "../../components/esp_webrtc_utils/src/message_queue.c"
+    # AppRTC's send ordering (direct senders against the queue drain): message_queue
+    # and libc only, linked standalone.
+    "../../components/signaling/apprtc_signaling/src/apprtc_send_order.c"
     # P4 bridge signaling compiled standalone: the test stubs its app_webrtc /
     # webrtc_bridge / ice_bridge_client deps and drives bridge_message_handler()
     # directly to lock in the "answer READY_QUERY only once offers can be consumed"
@@ -35,6 +42,7 @@ idf_component_register(SRCS ${srcs}
                            "../../components/app_webrtc/include"
                            "../../components/webrtc_bridge/include"
                            "../../components/esp_webrtc_utils/include"
+                           "../../components/signaling/apprtc_signaling/src"
                            # esp_work_queue.h transitively includes esp_event.h; we only
                            # need it to parse (esp_work_queue_add_task is stubbed), so pull
                            # the headers, not the component.

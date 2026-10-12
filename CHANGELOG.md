@@ -13,13 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
   repository. The upstream SDK is now a git submodule with platform patches
   applied via `git am patches/*.patch`.
-- Bumped the webrtc-c submodule to **1.20.0** (`4dd058d5`) and dropped the two
-  SDP-renegotiation patches — that flow is now upstream (awslabs#2214). The
-  patch set is down to three (ESP platform, Opus cap, ICE EALREADY). 1.20.0 also
-  brings opt-in mbedTLS 4 support (awslabs#2325), unused on IDF 5.5.
+- Moved the webrtc-c submodule to `develop` at `efdec3bf`: release **1.20.0** plus
+  the relay candidate filter (awslabs#2388), the TURN rejected-peer timeout fix
+  (#2387), the rtpmap payload-type fix for 32-bit platforms (#2405), no cipher list
+  on any mbedTLS build (#2409), srflx candidates from a pre-resolved STUN address
+  (#2410), the DTLS fingerprint through `mbedtls_md()` (#2392), the RNG from PSA
+  on mbedTLS 4 (#2385) and the `pSeenTransceivers` initialisation (#2415). 1.20.0
+  brought the SDP-renegotiation flow upstream (awslabs#2214), so the two local
+  patches for it are dropped, and opt-in mbedTLS 4 support (awslabs#2325); #2392,
+  #2385 and #2415 replace local patches 0005, 0004 and 0006. The previous pin
+  `4dd058d5` was the head of the `release-v1.20.0` branch (awslabs#2383); a commit
+  on `develop` stays fetchable when release branches are deleted. The current patch set is listed in `patches/README.md`.
 
 ### Added
 
+- **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
+  with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
+  master.
+- **`linux_test` host example** — the SDK as a KVS master on the IDF linux target
+  (Linux and macOS hosts), streaming file-backed H.264 + Opus; `tests/linux_test_e2e`
+  checks what an aiortc viewer receives against the sample frames. Builds on IDF
+  5.5, 6.0, 6.1 and master.
 - **Raw-frame sink bus** — the capture loop is a pump: it publishes each camera
   frame and moves on, and N consumers share the buffer by reference with a
   per-sink queue depth, overflow policy and fps limit. The H.264 encoder is just
@@ -38,10 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
   alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
   stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from
-  esp-protocols#1114), and `KVS_USE_MBEDTLS4` is defined for IDF >= 6 so signaling
-  stops sending an OpenSSL-style cipher list. No `USE_LIBSRTP3` is required; two
-  webrtc-c patches are: `patches/0004` (entropy-less RNG from PSA, upstream
-  awslabs#2385) and `patches/0005` (fingerprint via `mbedtls_md()`).
+  esp-protocols#1114). No `USE_LIBSRTP3` is required, and no webrtc-c patch: the
+  entropy-less RNG from PSA (awslabs#2385), the fingerprint through `mbedtls_md()`
+  (awslabs#2392) and signaling sending no OpenSSL-style cipher list on mbedTLS builds
+  (awslabs#2409) are upstream.
 
 - **SDP re-negotiation** — re-offer from the same peer re-uses an active
   session or replaces a terminated one.
@@ -69,6 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- esp_camera: `join-room` leaves the current room first instead of failing with
+  "Already connected"; a separate `disconnect` is no longer needed.
 - **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under
   *Media Stream Configuration → Video Initialization Configuration*. Only the
   prefix changes, e.g. `CONFIG_EXAMPLE_ENABLE_MIPI_CSI_CAM_SENSOR` →
@@ -82,6 +98,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **AppRTC:** a WebSocket frame larger than one read (typically an SDP offer or
+  answer) arrives as several events; each was parsed on its own and failed, so the
+  call never connected. Chunks are now reassembled before the frame is handled,
+  for frames up to 128 KB.
+
+- An offer waiting for its answer was evicted by the liveness watchdog after 30 s,
+  so a device-created AppRTC room had to be joined within ~40 s. The new
+  `kvs_peer_connection_set_answer_timeout()` lets an offer wait longer, with the
+  30 s connect deadline running from the answer; esp_camera sets 10 minutes. Other
+  offerers keep the 30 s.
+- AppRTC: a full outgoing queue (the websocket still connecting) dropped its oldest
+  message, which could be the answer. It now drops the oldest ICE candidate and never
+  an offer or answer, and holds 32 messages instead of 10. Dropped and purged
+  messages also leaked their payload. Messages sent while others still wait now
+  queue behind them, so candidates no longer overtake the answer, and a drain that
+  loses the websocket stops instead of spinning. An offer or answer whose send fails
+  while connected gets one more try.
+- AppRTC: events still queued from a replaced websocket (a rejoin, or a connect to
+  another room) are dropped instead of tearing down or feeding the new connection,
+  and the reconnect timer no longer races a disconnect or connect over the client.
+  On an automatic rejoin the server's initiator role now applies instead of the
+  previous one.
+- AppRTC: when the device created the room and sent the offer, the browser's
+  answer was dropped for lack of a matching session, so no media flowed.
+- `app_webrtc_terminate()` called from an app task raced the WebRTC task's own
+  teardown, and a terminate with a live session never finished.
+- `signalingMessageReceived()` read uninitialised locals on its NULL-argument
+  error path; the same pattern in the SDK's
+  `findTransceiversByRemoteDescription()` is fixed upstream (awslabs#2415).
 - Jitter buffer dropping multiple valid packets (increased buffer size and
   queue depth).
 - OV2710 black frames (sensor detection, flip-control skip, ioctl access).

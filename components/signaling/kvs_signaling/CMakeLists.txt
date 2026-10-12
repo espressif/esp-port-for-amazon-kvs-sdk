@@ -80,8 +80,12 @@ set(component_requires
 
 set(component_priv_requires
     "esp_netif"
-    "esp_wifi"
 )
+
+# esp_wifi exists only on real ESP targets.
+if(NOT IDF_TARGET STREQUAL "linux")
+    list(APPEND component_priv_requires "esp_wifi")
+endif()
 
 idf_component_register(
     SRCS
@@ -96,14 +100,6 @@ if(CONFIG_USE_ESP_WEBSOCKET_CLIENT)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC -DUSE_ESP_WEBSOCKET -DESP_PLATFORM)
 endif()
 
-# IDF v6 ships mbedTLS 4 (TF-PSA-Crypto). KVS_USE_MBEDTLS4 switches Signaling.c off
-# the OpenSSL-style cipher-list string ("HIGH:!PSK:...") that a mbedTLS-4 lws backend
-# rejects, failing vhost creation. Signaling.c is only compiled on the libwebsockets
-# path (CONFIG_USE_ESP_WEBSOCKET_CLIENT=n), which is the only build that needs this.
-if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC -DKVS_USE_MBEDTLS4)
-endif()
-
 # Add the necessary compile definitions for KVS signaling
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DKVS_USE_MBEDTLS
@@ -112,11 +108,16 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DESP_PLATFORM
     -DAWS_IOT_SDK
     -DKVS_PLAT_ESP
-    -DLWS_WITH_CUSTOM_HEADERS
     -DENABLE_STREAMING
     -DKVS_USE_PLATFORM_TYPES
     -DKVS_PLAT_ESP_FREERTOS
 )
+
+# Same as kvs_webrtc: lws_config.h defines LWS_WITH_CUSTOM_HEADERS on the Linux
+# target, and a second definition here clashes with it (an error on IDF 6 hosts).
+if(NOT IDF_TARGET STREQUAL "linux")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC -DLWS_WITH_CUSTOM_HEADERS)
+endif()
 
 # Propagate the CONFIG_PREFER_DYNAMIC_ALLOCS Kconfig to the un-prefixed
 # PREFER_DYNAMIC_ALLOCS source macro that the submodule's Include.h

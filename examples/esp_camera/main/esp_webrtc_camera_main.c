@@ -6,20 +6,37 @@
 
 #include <string.h>
 #include <inttypes.h>
+#include "sdkconfig.h"
 #include "esp_system.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
-
-#include "esp_cli.h"
 
 #include "app_webrtc.h"
-#include "app_wifi_prov.h"
 #include "media_stream.h"
 #include "apprtc_signaling.h"
-#include "wifi_cli.h"
-#include "webrtc_cli.h"
 #include "app_webrtc_if.h"
 #include "kvs_peer_connection.h"
+
+#if CONFIG_IDF_TARGET_LINUX
+/* Host build: host networking, sample frames from disk, config from the environment */
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+#include <termios.h>
+#include <sys/stat.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_event.h"
+#include "file_capture.h"
+#include "webrtc_cli.h"
+#else
+#include "nvs_flash.h"
+#include "esp_cli.h"
+#include "app_wifi_prov.h"
+#include "wifi_cli.h"
+#include "webrtc_cli.h"
+#endif
 
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
 #include "slave_flasher.h"
@@ -111,10 +128,100 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
     }
 }
 
+#if CONFIG_IDF_TARGET_LINUX
+static volatile sig_atomic_t s_should_exit = 0;
+static struct termios s_term;          /* the terminal as we found it, for a forced quit */
+static bool s_term_saved;
+
+/* First Ctrl+C stops the run cleanly (exit() also restores the terminal the console
+ * set up). A second one quits at once: tcsetattr() is async-signal-safe, atexit is not. */
+static void on_signal(int sig)
+{
+    (void) sig;
+    if (s_should_exit) {
+        if (s_term_saved) {
+            tcsetattr(STDIN_FILENO, TCSANOW, &s_term);
+        }
+        _exit(130);
+    }
+    s_should_exit = 1;
+}
+
+#include "esp_console.h"
+
+static int host_exit_cmd(int argc, char **argv)
+{
+    (void) argc;
+    (void) argv;
+    s_should_exit = 1;
+    return 0;
+}
+
+/* The same console as on target (join-room, get-room, ...) on stdin/stdout, plus exit */
+static void host_console_start(void)
+{
+    /* Only with something to read from: at end of input (stdin on /dev/null or a file)
+     * the REPL spins on empty reads and starves the main task */
+    struct stat in;
+    if (!isatty(STDIN_FILENO) && !(fstat(STDIN_FILENO, &in) == 0 && S_ISFIFO(in.st_mode))) {
+        ESP_LOGI(TAG, "stdin is not a terminal or a pipe: no console");
+        return;
+    }
+    esp_console_repl_t *repl = NULL;
+    esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    repl_config.prompt = "esp_camera> ";
+    const esp_console_cmd_t exit_cmd = {
+        .command = "exit",
+        .help = "Stop the example and exit",
+        .func = host_exit_cmd,
+    };
+
+    s_term_saved = isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &s_term) == 0;
+    esp_console_register_help_command();
+    esp_console_cmd_register(&exit_cmd);
+    webrtc_register_cli();
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 1, 0)
+    /* IDF 6.1 replaced the UART REPL on the Linux target with a stdio one */
+    esp_err_t err = esp_console_new_repl_stdio(&repl_config, &repl);
+#else
+    esp_console_dev_uart_config_t dev_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
+    esp_err_t err = esp_console_new_repl_uart(&dev_config, &repl_config, &repl);
+#endif
+    if (err != ESP_OK || esp_console_start_repl(repl) != ESP_OK) {
+        ESP_LOGW(TAG, "Console not available; the example runs without it");
+    }
+}
+
+/* Returning from app_main leaves the POSIX port's scheduler running: exit instead */
+#define EXIT_ON_HOST(code) exit(code)
+#else
+#define EXIT_ON_HOST(code) ((void) 0)
+#endif
+
 void app_main(void)
 {
-    esp_err_t ret;
     WEBRTC_STATUS status = WEBRTC_STATUS_SUCCESS;
+
+#if CONFIG_IDF_TARGET_LINUX
+    /* SIGINT only: the POSIX port blocks every other signal in all threads */
+    signal(SIGINT, on_signal);
+    ESP_LOGI(TAG, "ESP WebRTC Camera Example (linux host, sample frames)");
+    /* esp_http_client posts its events to the default loop; on ESP targets the
+     * Wi-Fi bring-up creates it, on the host nothing else does */
+    esp_err_t loop_err = esp_event_loop_create_default();
+    if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to create the default event loop: %s", esp_err_to_name(loop_err));
+        EXIT_ON_HOST(1);
+    }
+
+    const char *frames_dir = getenv("KVS_FRAMES_DIR");
+    if (frames_dir && *frames_dir) {
+        file_capture_set_frames_dir(frames_dir);
+    }
+    media_stream_video_capture_t *video_capture = file_capture_get_video_if();
+    media_stream_audio_capture_t *audio_capture = file_capture_get_audio_if();
+#else
+    esp_err_t ret;
 
     // Initialize NVS
     ret = nvs_flash_init();
@@ -160,11 +267,6 @@ void app_main(void)
         return;
     }
 
-    // Register the WebRTC event callback to receive events from the WebRTC SDK
-    if (app_webrtc_register_event_callback(app_webrtc_event_handler, NULL) != 0) {
-        ESP_LOGE(TAG, "Failed to register WebRTC event callback");
-    }
-
     // This example is a lean camera *sender*: it captures the camera (and mic)
     // and streams to the browser. It deliberately does NOT render received
     // media locally — no video player (no H.264 decoder, no LVGL/LCD draw
@@ -174,6 +276,13 @@ void app_main(void)
     // build wants local playback.
     media_stream_video_capture_t *video_capture = media_stream_get_video_capture_if();
     media_stream_audio_capture_t *audio_capture = media_stream_get_audio_capture_if();
+#endif /* CONFIG_IDF_TARGET_LINUX */
+
+    // Register the WebRTC event callback to receive events from the WebRTC SDK
+    if (app_webrtc_register_event_callback(app_webrtc_event_handler, NULL) != 0) {
+        ESP_LOGE(TAG, "Failed to register WebRTC event callback");
+    }
+
     media_stream_video_player_t *video_player = NULL;
     media_stream_audio_player_t *audio_player = NULL;
 
@@ -187,11 +296,19 @@ void app_main(void)
     // Configure AppRTC signaling (must outlive app_main since app_webrtc stores the pointer)
     static apprtc_signaling_config_t apprtc_config = {
         .serverUrl = NULL,  // Use default AppRTC server
-        .roomId = NULL,     // Will be set based on role type
+        .roomId = NULL,     // NULL: the signaling client picks the room
         .autoConnect = false,
         .connectionTimeout = 30000,
         .logLevel = 3
     };
+
+#if CONFIG_IDF_TARGET_LINUX
+    /* APPRTC_ROOM_ID joins that room; unset creates a new one (its URL is logged) */
+    const char *room = getenv("APPRTC_ROOM_ID");
+    if (room && *room) {
+        apprtc_config.roomId = (char *) room;
+    }
+#endif
 
     // Configure WebRTC app with our new simplified API
     app_webrtc_config_t app_webrtc_config = APP_WEBRTC_CONFIG_DEFAULT();
@@ -202,6 +319,8 @@ void app_main(void)
 
     // Peer connection interface
     app_webrtc_config.peer_connection_if = kvs_peer_connection_if_get();
+    /* In a room the device creates, its offer waits for someone to join */
+    kvs_peer_connection_set_answer_timeout(10 * 60);
     app_webrtc_config.implementation_config = NULL;
 
     // Media interfaces for bi-directional streaming
@@ -219,17 +338,16 @@ void app_main(void)
     status = app_webrtc_init(&app_webrtc_config);
     if (status != WEBRTC_STATUS_SUCCESS) {
         ESP_LOGE(TAG, "Failed to initialize WebRTC application: 0x%08" PRIx32, (uint32_t) status);
+        EXIT_ON_HOST(1);
         return;
     }
 
-    // Advanced configuration: Set role type based on configuration
+    // Role type from the configuration. With AppRTC it does not decide who offers:
+    // the server does (the first in the room offers, a later joiner answers).
 #if CONFIG_APPRTC_ROLE_TYPE == 0
-    // This mode can be used when you want to connect to the existing room.
-    // Will then receive the offer from the other peer and send the answer.
     app_webrtc_set_role(WEBRTC_CHANNEL_ROLE_TYPE_MASTER);
     ESP_LOGI(TAG, "Configured as MASTER role using advanced API");
 #else
-    // In this mode, the application will send the offer and wait for the answer.
     app_webrtc_set_role(WEBRTC_CHANNEL_ROLE_TYPE_VIEWER);
     ESP_LOGI(TAG, "Configured as VIEWER role using advanced API");
 #endif
@@ -243,24 +361,22 @@ void app_main(void)
     if (status != WEBRTC_STATUS_SUCCESS) {
         ESP_LOGE(TAG, "Failed to start WebRTC application: 0x%08" PRIx32, (uint32_t) status);
         app_webrtc_terminate();
+        EXIT_ON_HOST(1);
         return;
     }
 
 #if CONFIG_APPRTC_AUTO_CONNECT
-#if CONFIG_APPRTC_ROLE_TYPE == 0
-    // For MASTER role, the WebRTC app will automatically create and connect to a new room
-    ESP_LOGI(TAG, "MASTER role - will create a new room automatically");
-#else
-    // For VIEWER role, configure room ID if specified
+    // The boot connect has started. Without a room id the signaling client picks
+    // the room: CONFIG_APPRTC_ROOM_ID with APPRTC_USE_FIXED_ROOM, otherwise a new one
+    if (apprtc_config.roomId != NULL) {
+        ESP_LOGI(TAG, "Joining room: %s", apprtc_config.roomId);
+    } else {
 #if CONFIG_APPRTC_USE_FIXED_ROOM
-    // Set the room ID to join in the AppRTC configuration
-    apprtc_config.roomId = CONFIG_APPRTC_ROOM_ID;
-    ESP_LOGI(TAG, "VIEWER role - will join fixed room: %s", CONFIG_APPRTC_ROOM_ID);
+        ESP_LOGI(TAG, "Joining fixed room: %s", CONFIG_APPRTC_ROOM_ID);
 #else
-    // For VIEWER role without fixed room, will create a new room
-    ESP_LOGI(TAG, "VIEWER role - will create a new room");
+        ESP_LOGI(TAG, "Creating a new room");
 #endif
-#endif
+    }
 #else
     // Manual connection mode - user must use CLI commands
     ESP_LOGI(TAG, "------------------------------------------------------------");
@@ -277,4 +393,28 @@ void app_main(void)
     ESP_LOGI(TAG, "| The signaling will connect automatically                 |");
     ESP_LOGI(TAG, "| Room URL will be displayed once connection is established|");
     ESP_LOGI(TAG, "------------------------------------------------------------");
+
+#if CONFIG_IDF_TARGET_LINUX
+    host_console_start();
+
+    /* Run for TEST_DURATION_SEC (0 = until `exit` or Ctrl+C), then exit: the POSIX
+     * port keeps the scheduler running otherwise. */
+    long duration = 0;
+    const char *dur_env = getenv("TEST_DURATION_SEC");
+    if (dur_env && *dur_env) {
+        char *end = NULL;
+        duration = strtol(dur_env, &end, 10);
+        if (*end != '\0' || duration < 0) {
+            ESP_LOGW(TAG, "Ignoring invalid TEST_DURATION_SEC='%s', running until Ctrl+C", dur_env);
+            duration = 0;
+        }
+    }
+    /* app_main is a FreeRTOS task: a raw sleep() is cut short by the port's SIGALRM tick */
+    for (long i = 0; (duration == 0 || i < duration) && !s_should_exit; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI(TAG, "shutting down");
+    app_webrtc_terminate();
+    exit(0);
+#endif
 }

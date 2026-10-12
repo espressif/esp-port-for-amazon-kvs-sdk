@@ -24,10 +24,13 @@ set(component_requires
     "freertos"
     "esp_system"
     "heap"
-    "driver"
-    "spi_flash"
     "mbedtls"
 )
+
+# `driver` and `spi_flash` exist as components only on real ESP targets.
+if(NOT IDF_TARGET STREQUAL "linux")
+    list(APPEND component_requires "driver" "spi_flash")
+endif()
 
 idf_component_register(
     SRCS

@@ -230,7 +230,25 @@ BOOL defaultWaitLockMutex(MUTEX mutex, UINT64 timeout)
     time += timeout;
     mutexTimeout.tv_nsec = (time % HUNDREDS_OF_NANOS_IN_A_SECOND) / HUNDREDS_OF_NANOS_IN_A_MICROSECOND;
     mutexTimeout.tv_sec = time / HUNDREDS_OF_NANOS_IN_A_SECOND;
+#if defined(__APPLE__)
+    /* macOS libc doesn't ship pthread_mutex_timedlock; emulate it with a
+     * trylock + short sleep loop. Linux and ESP-IDF have the real call. */
+    while (true) {
+        if (pthread_mutex_trylock((pthread_mutex_t*) HANDLE_TO_POINTER(mutex)) == 0) {
+            return TRUE;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > mutexTimeout.tv_sec ||
+            (now.tv_sec == mutexTimeout.tv_sec && now.tv_nsec >= mutexTimeout.tv_nsec)) {
+            return FALSE;
+        }
+        struct timespec slice = { .tv_sec = 0, .tv_nsec = 1 * 1000 * 1000 }; /* 1 ms */
+        nanosleep(&slice, NULL);
+    }
+#else
     return (0 == pthread_mutex_timedlock((pthread_mutex_t*) HANDLE_TO_POINTER(mutex), &mutexTimeout));
+#endif
 }
 
 VOID defaultFreeMutex(MUTEX mutex)

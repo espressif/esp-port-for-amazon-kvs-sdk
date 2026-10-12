@@ -110,18 +110,25 @@ else()
     message(STATUS "Using direct mbedTLS for KVS TLS sessions")
 endif()
 
-# port/Network_esp.c replaces the upstream Network.c unconditionally. The
-# upstream version uses POSIX getifaddrs() / freeifaddrs() for local IP
-# enumeration, which ESP-IDF deliberately does not ship — there is no scenario
-# where the upstream Network.c links cleanly on an ESP target. The port file
-# uses esp_netif_get_handle_from_ifkey() over the standard WIFI_STA / WIFI_AP /
-# ETH keys and makes SO_SNDBUF setsockopt failure non-fatal on lwIP. It's a
-# port file, not one of the numbered patches.
-list(APPEND kvs_webrtc_srcs
-    "${CMAKE_CURRENT_SOURCE_DIR}/port/Network_esp.c"
-)
+# Network layer. ESP targets use port/Network_esp.c because ESP-IDF doesn't
+# ship POSIX getifaddrs()/freeifaddrs(); it enumerates via
+# esp_netif_get_handle_from_ifkey() and makes SO_SNDBUF failure non-fatal on
+# lwIP. The IDF Linux target HAS getifaddrs(), so it uses upstream Network.c.
+if(IDF_TARGET STREQUAL "linux")
+    list(APPEND kvs_webrtc_srcs
+        "${KVS_WEBRTC_ROOT}/src/source/Ice/Network.c"
+    )
+else()
+    list(APPEND kvs_webrtc_srcs
+        "${CMAKE_CURRENT_SOURCE_DIR}/port/Network_esp.c"
+    )
+endif()
 
-set(requires "mbedtls" "lwip" "esp_timer" "nvs_flash" "freertos" "esp_system" "heap" "driver" "spi_flash" "esp_http_client")
+set(requires "mbedtls" "lwip" "esp_timer" "nvs_flash" "freertos" "esp_system" "heap" "esp_http_client")
+# driver/spi_flash/esp_wifi exist as components only on real ESP targets.
+if(NOT IDF_TARGET STREQUAL "linux")
+    list(APPEND requires "esp_wifi" "driver" "spi_flash")
+endif()
 
 # Add ESP-TLS dependency if using ESP-TLS implementation
 if(CONFIG_USE_ESP_TLS_FOR_KVS)
@@ -137,17 +144,7 @@ idf_component_register(
 
     PRIV_INCLUDE_DIRS "${KVS_WEBRTC_ROOT}/src/source"
 
-    REQUIRES "mbedtls"
-             "lwip"
-             "esp_timer"
-             "esp_wifi"
-             "nvs_flash"
-             "freertos"
-             "esp_system"
-             "heap"
-             "driver"
-             "spi_flash"
-             "esp_http_client"
+    REQUIRES "${requires}"
 )
 
 # option(ENABLE_KVS_THREADPOOL "Enable support for KVS thread pool in signaling" OFF)
@@ -197,17 +194,22 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DESP_PLATFORM
     -DAWS_IOT_SDK
     -DKVS_PLAT_ESP
-    -DLWS_WITH_CUSTOM_HEADERS
     -DENABLE_STREAMING
     -DKVS_USE_PLATFORM_TYPES
     -DKVS_PLAT_ESP_FREERTOS
 )
 
+# lws needs custom headers on FreeRTOS, where its own config leaves them off. On
+# the Linux target lws_config.h already defines LWS_WITH_CUSTOM_HEADERS, so a
+# second definition here clashes with it in every consumer that includes
+# libwebsockets.h (kvs_signaling); IDF 6 builds that clash as an error.
+if(NOT IDF_TARGET STREQUAL "linux")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC -DLWS_WITH_CUSTOM_HEADERS)
+endif()
+
 # Add definitions for usrsctp
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DHAVE_SCONN_LEN=1
-    -DSCTP_USE_LWIP=1
-    -DSCTP_USE_RTOS=1
     -DSCTP_SIMPLE_ALLOCATOR
     -D__Userspace__
     -DINET=1
@@ -215,6 +217,17 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DSCTP_USE_IPV6=0
     -DSCTP_USE_MBEDTLS_SHA1=1
 )
+# usrsctp over lwIP/FreeRTOS is ESP-only; the Linux target uses host sockets.
+if(NOT IDF_TARGET STREQUAL "linux")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC -DSCTP_USE_LWIP=1 -DSCTP_USE_RTOS=1)
+endif()
+
+# The GCC/glibc host build compiles the upstream SDK sources whose %llu/%d
+# format specifiers don't match the LP64 UINT64/int widths, and upstream Ice
+# code has intentional switch fall-throughs. ESP builds keep -Werror strict.
+if(IDF_TARGET STREQUAL "linux")
+    target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=format -Wno-error=implicit-fallthrough)
+endif()
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=unused-function
@@ -244,8 +257,6 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # Add definitions for usrsctp
 add_definitions(
   "-DHAVE_SCONN_LEN=1"
-  "-DSCTP_USE_LWIP=1"
-  "-DSCTP_USE_RTOS=1"
   "-DSCTP_SIMPLE_ALLOCATOR"
   "-D__Userspace__"
   "-DINET=1"
@@ -253,6 +264,9 @@ add_definitions(
   "-DSCTP_USE_IPV6=0"
   "-DSCTP_USE_MBEDTLS_SHA1=1"
 )
+if(NOT IDF_TARGET STREQUAL "linux")
+    add_definitions("-DSCTP_USE_LWIP=1" "-DSCTP_USE_RTOS=1")
+endif()
 
 if (CONFIG_PREFER_DYNAMIC_ALLOCS)
     add_definitions(-DPREFER_DYNAMIC_ALLOCS=1)

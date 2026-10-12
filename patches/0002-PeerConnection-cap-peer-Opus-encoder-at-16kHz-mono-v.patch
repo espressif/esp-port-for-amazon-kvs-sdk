@@ -37,7 +37,7 @@ SDK actually offered/answered without having to dump full SDP.
  2 files changed, 9 insertions(+), 4 deletions(-)
 
 diff --git a/src/source/PeerConnection/SessionDescription.c b/src/source/PeerConnection/SessionDescription.c
-index e4012640..6d613b40 100644
+index eccc1c701e..1ca9aa544b 100644
 --- a/src/source/PeerConnection/SessionDescription.c
 +++ b/src/source/PeerConnection/SessionDescription.c
 @@ -853,9 +853,11 @@ STATUS populateSingleMediaSection(PKvsPeerConnection pKvsPeerConnection, PKvsRtp
@@ -65,7 +65,7 @@ index e4012640..6d613b40 100644
          }
      } else if (pRtcMediaStreamTrack->codec == RTC_CODEC_VP8) {
 diff --git a/src/source/PeerConnection/SessionDescription.h b/src/source/PeerConnection/SessionDescription.h
-index acb85502..eb315cb8 100644
+index acb85502c7..eb315cb840 100644
 --- a/src/source/PeerConnection/SessionDescription.h
 +++ b/src/source/PeerConnection/SessionDescription.h
 @@ -53,7 +53,8 @@ extern "C" {

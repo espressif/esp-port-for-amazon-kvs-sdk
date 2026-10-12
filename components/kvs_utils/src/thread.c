@@ -18,6 +18,10 @@
 #include "platform_utils.h"
 #include "thread.h"
 #include "esp_pthread.h"
+#include "sdkconfig.h"
+#if CONFIG_IDF_TARGET_LINUX
+#include <signal.h>
+#endif
 
 #ifndef DEFAULT_THREAD_SIZE
 #define DEFAULT_THREAD_SIZE (16 * 1024)
@@ -282,7 +286,19 @@ STATUS defaultCreateThreadPriWithCaps(PTID pThreadId, PCHAR threadName, UINT32 t
     }
 #endif
 
+#if CONFIG_IDF_TARGET_LINUX
+    /* FreeRTOS POSIX port: its SIGALRM tick must only reach task threads (on a plain
+     * pthread it parks the thread and freezes the scheduler). The child inherits the
+     * caller's mask, so block the tick around the create. */
+    sigset_t tick, saved;
+    sigemptyset(&tick);
+    sigaddset(&tick, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &tick, &saved);
     result = pthread_create(&threadId, pAttr, start, args);
+    pthread_sigmask(SIG_SETMASK, &saved, NULL);
+#else
+    result = pthread_create(&threadId, pAttr, start, args);
+#endif
     DLOGD("pthread_create finished, result: %d", (int) result);
 
 #if defined(KVS_PLAT_ESP_FREERTOS)
