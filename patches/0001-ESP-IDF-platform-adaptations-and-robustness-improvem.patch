@@ -1,4 +1,4 @@
-From 28dc488f800b728fd835a08d7e3c5ea941e90a50 Mon Sep 17 00:00:00 2001
+From ea68596996e1ff86c0e9b477763a1e6dd0ba3fe5 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 3 Mar 2026 20:48:28 +0530
 Subject: [PATCH 1/3] ESP-IDF platform adaptations and robustness improvements
@@ -18,10 +18,10 @@ Subject: [PATCH 1/3] ESP-IDF platform adaptations and robustness improvements
  src/source/Ice/SocketConnection.c             |   3 +-
  src/source/Ice/SocketConnection.h             |   4 +-
  src/source/Sctp/Sctp.c                        |   8 +-
- src/source/Signaling/LwsApiCalls.c            | 433 +++++++++++++++---
- src/source/Signaling/LwsApiCalls.h            |  13 +-
+ src/source/Signaling/LwsApiCalls.c            | 281 +++++++++++++++++-
+ src/source/Signaling/LwsApiCalls.h            |  10 +-
  src/source/Srtp/SrtpSession.c                 |  16 +-
- 10 files changed, 457 insertions(+), 80 deletions(-)
+ 10 files changed, 345 insertions(+), 37 deletions(-)
 
 diff --git a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
 index 883b65bd40..18e0651f7d 100644
@@ -247,30 +247,10 @@ index 3c78ab4630..da89f5d11b 100644
          putUnalignedInt32BigEndian(pSctpSession->packet + SIZEOF(UINT32), pRtcDataChannelInit->maxPacketLifeTime.value);
      }
 diff --git a/src/source/Signaling/LwsApiCalls.c b/src/source/Signaling/LwsApiCalls.c
-index 687dc034c2..aa5de8a0c3 100644
+index 687dc034c2..af5e97fd2d 100644
 --- a/src/source/Signaling/LwsApiCalls.c
 +++ b/src/source/Signaling/LwsApiCalls.c
-@@ -252,7 +252,9 @@ INT32 lwsHttpCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
-             if (size != (INT32) pRequestInfo->bodySize) {
-                 DLOGW("Failed to write out the body of POST request entirely. Expected to write %d, wrote %d", pRequestInfo->bodySize, size);
-                 if (size > 0) {
--                    // Schedule again
-+                    // Update remainig data and schedule again
-+                    pRequestInfo->bodySize -= size;
-+                    pRequestInfo->body += size;
-                     lws_client_http_body_pending((struct lws*) wsi, 1);
-                     lws_callback_on_writable((struct lws*) wsi);
-                 } else {
-@@ -312,6 +314,8 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
-         case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
-         case LWS_CALLBACK_CLIENT_RECEIVE:
-         case LWS_CALLBACK_CLIENT_WRITEABLE:
-+        case LWS_CALLBACK_TIMER:
-+        case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
-             break;
-         default:
-             DLOGI("WSS callback with reason %d", reason);
-@@ -361,7 +365,11 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
+@@ -361,7 +361,11 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
                  // Handle re-connection in a reconnect handler thread. Set the terminated indicator before the thread
                  // creation and the thread itself will reset it. NOTE: Need to check for a failure and reset.
                  ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, FALSE);
@@ -282,33 +262,7 @@ index 687dc034c2..aa5de8a0c3 100644
                  if (STATUS_FAILED(retStatus)) {
                      ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, TRUE);
                      CHK(FALSE, retStatus);
-@@ -384,9 +392,16 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
-             pSignalingClient->diagnostics.connectTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient);
-             MUTEX_UNLOCK(pSignalingClient->diagnosticsLock);
- 
-+            lws_set_timer_usecs((struct lws*) wsi, SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS * HUNDREDS_OF_NANOS_IN_A_SECOND);
-             // Notify the listener thread
-             CVAR_BROADCAST(pSignalingClient->connectedCvar);
- 
-+            // Keep connection alive
-+            lws_callback_on_writable((struct lws*) wsi);
-+            break;
-+        case LWS_CALLBACK_TIMER:
-+            lws_callback_on_writable((struct lws*) wsi);
-+            lws_set_timer_usecs((struct lws*) wsi, SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS * HUNDREDS_OF_NANOS_IN_A_SECOND);
-             break;
- 
-         case LWS_CALLBACK_CLIENT_CLOSED:
-@@ -397,7 +412,7 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
- 
-             CVAR_BROADCAST(pSignalingClient->receiveCvar);
-             CVAR_BROADCAST(pSignalingClient->sendCvar);
--            ATOMIC_STORE(&pSignalingClient->messageResult, (SIZE_T) SERVICE_CALL_UNKNOWN);
-+            ATOMIC_STORE(&pSignalingClient->messageResult, (SIZE_T) SERVICE_CALL_RESULT_OK);
- 
-             if (connected && ATOMIC_LOAD(&pSignalingClient->result) != SERVICE_CALL_RESULT_SIGNALING_RECONNECT_ICE &&
-                 !ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-@@ -407,7 +422,11 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
+@@ -407,7 +411,11 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
                  // Handle re-connection in a reconnect handler thread. Set the terminated indicator before the thread
                  // creation and the thread itself will reset it. NOTE: Need to check for a failure and reset.
                  ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, FALSE);
@@ -320,174 +274,7 @@ index 687dc034c2..aa5de8a0c3 100644
                  if (STATUS_FAILED(retStatus)) {
                      ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, TRUE);
                      CHK(FALSE, retStatus);
-@@ -432,20 +451,33 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
- 
-             DLOGD("Peer initiated close with %d (0x%08x). Message: %.*s", status, (UINT32) status, size, pCurPtr);
- 
--            // Store the state as the result
--            retValue = -1;
-+            if ((status != 0 && status != LWS_CLOSE_STATUS_NORMAL) && !ATOMIC_LOAD_BOOL(&pLwsCallInfo->receiveMessage)) {
-+                ATOMIC_STORE(&pSignalingClient->result, SERVICE_CALL_INTERNAL_ERROR);
-+                retValue = -1;
-+            } else {
-+                // Store normal closure status
-+                ATOMIC_STORE(&pSignalingClient->result, SERVICE_CALL_RESULT_OK);
-+                retValue = 0;
-+            }
- 
--            ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) status);
-+            break;
- 
-+        case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
-+            DLOGV("Received PONG from server");
-             break;
- 
-         case LWS_CALLBACK_CLIENT_RECEIVE:
- 
-+            lwsl_info("WS receive callback, len: %zu, is_final: %d\n", dataSize, lws_is_final_fragment(wsi));
-+
-             // Check if it's a binary data
-+            if (lws_frame_is_binary(wsi)) {
-+                DLOGW("Received binary data");
-+            }
-             CHK(!lws_frame_is_binary(wsi), STATUS_SIGNALING_RECEIVE_BINARY_DATA_NOT_SUPPORTED);
- 
--            // Skip if it's the first and last fragment and the size is 0
--            CHK(!(lws_is_first_fragment(wsi) && lws_is_final_fragment(wsi) && dataSize == 0), retStatus);
-+            // Mark as receiving a message
-+            ATOMIC_STORE_BOOL(&pLwsCallInfo->receiveMessage, TRUE);
- 
-             // Check what type of a message it is. We will set the size to 0 on first and flush on last
-             if (lws_is_first_fragment(wsi)) {
-@@ -463,53 +495,74 @@ INT32 lwsWssCallbackRoutine(PVOID wsi, INT32 reason, PVOID user, PVOID pDataIn,
-             MEMCPY(&pLwsCallInfo->receiveBuffer[LWS_PRE + pLwsCallInfo->receiveBufferSize], pDataIn, dataSize);
-             pLwsCallInfo->receiveBufferSize += (UINT32) dataSize;
- 
--            // Flush on last
-+            // Process complete message
-             if (lws_is_final_fragment(wsi)) {
--                CHK_STATUS(receiveLwsMessage(pLwsCallInfo->pSignalingClient, (PCHAR) &pLwsCallInfo->receiveBuffer[LWS_PRE],
-+                CHK_STATUS(receiveLwsMessage(pSignalingClient, (PCHAR) &pLwsCallInfo->receiveBuffer[LWS_PRE],
-                                              pLwsCallInfo->receiveBufferSize / SIZEOF(CHAR)));
-+                pLwsCallInfo->receiveBufferSize = 0;
-+                ATOMIC_STORE_BOOL(&pLwsCallInfo->receiveMessage, FALSE);
-             }
- 
--            lws_callback_on_writable(wsi);
--
-+            // Keep connection alive after receiving data
-+            if (!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-+                lws_callback_on_writable((struct lws*) wsi);
-+            }
-             break;
- 
-         case LWS_CALLBACK_CLIENT_WRITEABLE:
-             DLOGD("Client is writable");
--
--            // Check if we are attempting to terminate the connection
--            if (!ATOMIC_LOAD_BOOL(&pSignalingClient->connected) && ATOMIC_LOAD(&pSignalingClient->messageResult) == SERVICE_CALL_UNKNOWN) {
--                retValue = 1;
--                CHK(FALSE, retStatus);
-+            lwsl_info("WS write callback, pending len: %zu\n",
-+                     lws_get_peer_write_allowance(wsi));
-+
-+            // Add buffer state check
-+            if (lws_send_pipe_choked(wsi)) {
-+                DLOGI("WS send pipe choked, retrying");
-+                lws_callback_on_writable((struct lws*) wsi);
-+                break;
-             }
- 
--            offset = (UINT32) ATOMIC_LOAD(&pLwsCallInfo->sendOffset);
--            bufferSize = (UINT32) ATOMIC_LOAD(&pLwsCallInfo->sendBufferSize);
--            writeSize = (INT32) (bufferSize - offset);
-+            // Log buffer state before write
-+            DLOGD("Send buffer size before write: %zu", pLwsCallInfo->sendBufferSize);
- 
--            // Check if we need to do anything
--            CHK(writeSize > 0, retStatus);
--
--            // Send data and notify on completion
--            size = lws_write(wsi, &(pLwsCallInfo->sendBuffer[pLwsCallInfo->sendOffset]), (SIZE_T) writeSize, LWS_WRITE_TEXT);
--
--            if (size < 0) {
--                DLOGW("Write failed. Returned write size is %d", size);
--                // Quit
--                retValue = -1;
--                CHK(FALSE, retStatus);
-+            // Only check termination if we're not in the middle of receiving a message
-+            if (!ATOMIC_LOAD_BOOL(&pLwsCallInfo->receiveMessage)) {
-+                CHK(!ATOMIC_LOAD_BOOL(&pRequestInfo->terminating), retStatus);
-             }
- 
--            if (size == writeSize) {
--                // Notify the listener
--                ATOMIC_STORE(&pLwsCallInfo->sendOffset, 0);
--                ATOMIC_STORE(&pLwsCallInfo->sendBufferSize, 0);
--                CVAR_BROADCAST(pLwsCallInfo->pSignalingClient->sendCvar);
--            } else {
--                // Partial write
--                DLOGV("Failed to write out the data entirely. Wrote %d out of %d", size, writeSize);
--                // Schedule again
--                lws_callback_on_writable(wsi);
-+            // Send data if anything is in the buffer
-+            if (pLwsCallInfo->sendBufferSize != 0) {
-+                SIZE_T remainingSize = pLwsCallInfo->sendBufferSize - LWS_PRE;
-+                // Log write attempt
-+                DLOGD("Attempting to write %zu bytes", remainingSize);
-+
-+                retValue = (INT32) lws_write(wsi, pLwsCallInfo->sendBuffer + LWS_PRE, remainingSize, LWS_WRITE_TEXT);
-+                if (retValue < 0) {
-+                    DLOGW("Write failed with %d", retValue);
-+                    CHK(FALSE, !STATUS_SUCCESS);
-+                } else if ((SIZE_T) retValue < remainingSize) {
-+                    DLOGW("Partial write occurred: %d of %zu bytes", retValue, remainingSize);
-+                    // Move remaining data to start of buffer
-+                    MEMMOVE(pLwsCallInfo->sendBuffer + LWS_PRE, pLwsCallInfo->sendBuffer + LWS_PRE + retValue, remainingSize - retValue);
-+                    // Update buffer size
-+                    pLwsCallInfo->sendBufferSize = (remainingSize - retValue) + LWS_PRE;
-+
-+                    // Handle partial write
-+                    lws_callback_on_writable((struct lws*) wsi);
-+                } else {
-+                    // Complete write
-+                    DLOGI("Write complete: %d bytes", retValue);
-+                    pLwsCallInfo->sendBufferSize = 0;
-+                    // Keep connection alive after write
-+                    if (!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-+                        lws_callback_on_writable((struct lws*) wsi);
-+                    }
-+                    ATOMIC_STORE(&pSignalingClient->messageResult, (SIZE_T) SERVICE_CALL_RESULT_OK);
-+                    // Signal completion immediately after successful write
-+                    CVAR_BROADCAST(pSignalingClient->sendCvar);
-+                }
-             }
-+            // Always return success from writeable callback
-+            retValue = 0;
- 
-             break;
- 
-@@ -580,8 +633,10 @@ STATUS lwsCompleteSync(PLwsCallInfo pCallInfo)
-     // Execute the LWS REST call
-     MEMSET(&connectInfo, 0x00, SIZEOF(struct lws_client_connect_info));
-     connectInfo.context = pContext;
--    connectInfo.ssl_connection = LCCSCF_USE_SSL;
-+    connectInfo.ssl_connection = LCCSCF_USE_SSL | LCCSCF_H2_QUIRK_OVERFLOWS_TXCR; // Add flag to handle H2 flow control
-     connectInfo.port = SIGNALING_DEFAULT_SSL_PORT;
-+    connectInfo.alpn = "http/1.1";     // Force HTTP/1.1 only
-+    connectInfo.protocol = "http/1.1"; // Force HTTP/1.1 protocol
- 
-     CHK_STATUS(getRequestHost(pCallInfo->callInfo.pRequestInfo->url, &pHostStart, &pHostEnd));
-     CHK(pHostEnd == NULL || *pHostEnd == '/' || *pHostEnd == '?', STATUS_INTERNAL_ERROR);
-@@ -675,6 +730,7 @@ STATUS lwsCompleteSync(PLwsCallInfo pCallInfo)
-         } else {
-             retVal = lws_service(pContext, 0);
-             MUTEX_UNLOCK(pCallInfo->pSignalingClient->lwsServiceLock);
-+            // vTaskDelay(1);
- 
-             // Add a minor timeout to relinquish the thread quota to eliminate thread starvation
-             // when competing for the service lock
-@@ -760,8 +816,14 @@ STATUS describeChannelLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -760,8 +768,14 @@ STATUS describeChannelLws(PSignalingClient pSignalingClient, UINT64 time)
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -502,7 +289,7 @@ index 687dc034c2..aa5de8a0c3 100644
      PLwsCallInfo pLwsCallInfo = NULL;
      PCHAR pResponseStr;
      jsmn_parser parser;
-@@ -773,12 +835,28 @@ STATUS describeChannelLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -773,12 +787,28 @@ STATUS describeChannelLws(PSignalingClient pSignalingClient, UINT64 time)
  
      CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
  
@@ -532,7 +319,7 @@ index 687dc034c2..aa5de8a0c3 100644
      // Create the request info with the body
      CHK_STATUS(createRequestInfo(url, paramsJson, pSignalingClient->pChannelInfo->pRegion, pSignalingClient->pChannelInfo->pCertPath, NULL, NULL,
                                   SSL_CERTIFICATE_TYPE_NOT_SPECIFIED, pSignalingClient->pChannelInfo->pUserAgent,
-@@ -891,6 +969,11 @@ CleanUp:
+@@ -891,6 +921,11 @@ CleanUp:
          DLOGE("Call Failed with Status:  0x%08x", retStatus);
      }
  
@@ -544,7 +331,7 @@ index 687dc034c2..aa5de8a0c3 100644
      freeLwsCallInfo(&pLwsCallInfo);
  
      LEAVES();
-@@ -904,8 +987,14 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -904,8 +939,14 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -559,7 +346,7 @@ index 687dc034c2..aa5de8a0c3 100644
      CHAR tagsJson[2 * MAX_JSON_PARAMETER_STRING_LEN];
      PCHAR pCurPtr, pTagsStart, pResponseStr;
      UINT32 i, strLen, resultLen;
-@@ -917,6 +1006,22 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -917,6 +958,22 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
  
      CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
  
@@ -582,7 +369,7 @@ index 687dc034c2..aa5de8a0c3 100644
      // Create the API url
      STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
      STRCAT(url, CREATE_SIGNALING_CHANNEL_API_POSTFIX);
-@@ -941,7 +1046,7 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -941,7 +998,7 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
      }
  
      // Prepare the json params for the call
@@ -591,7 +378,7 @@ index 687dc034c2..aa5de8a0c3 100644
               getStringFromChannelType(pSignalingClient->pChannelInfo->channelType),
               pSignalingClient->pChannelInfo->messageTtl / HUNDREDS_OF_NANOS_IN_A_SECOND, tagsJson);
  
-@@ -998,6 +1103,11 @@ CleanUp:
+@@ -998,6 +1055,11 @@ CleanUp:
          DLOGE("Call Failed with Status:  0x%08x", retStatus);
      }
  
@@ -603,7 +390,7 @@ index 687dc034c2..aa5de8a0c3 100644
      freeLwsCallInfo(&pLwsCallInfo);
  
      LEAVES();
-@@ -1011,8 +1121,14 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1011,8 +1073,14 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -618,7 +405,7 @@ index 687dc034c2..aa5de8a0c3 100644
      UINT32 i, resultLen, strLen, protocolLen = 0, endpointLen = 0;
      PCHAR pResponseStr, pProtocol = NULL, pEndpoint = NULL;
      PLwsCallInfo pLwsCallInfo = NULL;
-@@ -1026,6 +1142,22 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1026,6 +1094,22 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
      DLOGD("=== GetChannelEndpoint START ===");
      DLOGD("Storage status: %s (%d)", pSignalingClient->mediaStorageConfig.storageStatus ? "ENABLED" : "DISABLED",
            pSignalingClient->mediaStorageConfig.storageStatus);
@@ -641,7 +428,7 @@ index 687dc034c2..aa5de8a0c3 100644
  
      // Create the API url
      STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
-@@ -1034,11 +1166,11 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1034,11 +1118,11 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
      // Prepare the json params for the call
      if (pSignalingClient->mediaStorageConfig.storageStatus == FALSE) {
          DLOGD("Requesting protocols: WSS, HTTPS (storage disabled - no WEBRTC)");
@@ -655,7 +442,7 @@ index 687dc034c2..aa5de8a0c3 100644
                   SIGNALING_CHANNEL_PROTOCOL_W_MEDIA_STORAGE, getStringFromChannelRoleType(pSignalingClient->pChannelInfo->channelRoleType));
      }
      DLOGD("Request params: %s", paramsJson);
-@@ -1160,6 +1292,11 @@ CleanUp:
+@@ -1160,6 +1244,11 @@ CleanUp:
          DLOGE("Call Failed with Status:  0x%08x", retStatus);
      }
  
@@ -667,7 +454,7 @@ index 687dc034c2..aa5de8a0c3 100644
      freeLwsCallInfo(&pLwsCallInfo);
  
      LEAVES();
-@@ -1173,7 +1310,13 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1173,7 +1262,13 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -681,7 +468,7 @@ index 687dc034c2..aa5de8a0c3 100644
      PLwsCallInfo pLwsCallInfo = NULL;
      PCHAR pResponseStr;
      UINT32 resultLen;
-@@ -1181,6 +1324,23 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1181,6 +1276,23 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
      CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
      CHK(pSignalingClient->channelEndpointHttps[0] != '\0', STATUS_INTERNAL_ERROR);
  
@@ -705,7 +492,7 @@ index 687dc034c2..aa5de8a0c3 100644
      // Update the diagnostics info on the number of ICE refresh calls
      ATOMIC_INCREMENT(&pSignalingClient->diagnostics.iceRefreshCount);
  
-@@ -1189,7 +1349,7 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1189,7 +1301,7 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
      STRCAT(url, GET_ICE_CONFIG_API_POSTFIX);
  
      // Prepare the json params for the call
@@ -714,7 +501,7 @@ index 687dc034c2..aa5de8a0c3 100644
               pSignalingClient->clientInfo.signalingClientInfo.clientId);
  
      // Create the request info with the body
-@@ -1231,6 +1391,11 @@ CleanUp:
+@@ -1231,6 +1343,11 @@ CleanUp:
          DLOGE("Call Failed with Status:  0x%08x", retStatus);
      }
  
@@ -726,15 +513,7 @@ index 687dc034c2..aa5de8a0c3 100644
      freeLwsCallInfo(&pLwsCallInfo);
  
      LEAVES();
-@@ -1414,6 +1579,7 @@ STATUS createLwsCallInfo(PSignalingClient pSignalingClient, PRequestInfo pReques
-     pLwsCallInfo->callInfo.pRequestInfo = pRequestInfo;
-     pLwsCallInfo->pSignalingClient = pSignalingClient;
-     pLwsCallInfo->protocolIndex = protocolIndex;
-+    ATOMIC_STORE_BOOL(&pLwsCallInfo->receiveMessage, FALSE);
- 
-     *ppLwsCallInfo = pLwsCallInfo;
- 
-@@ -1462,7 +1628,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
+@@ -1462,7 +1579,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -746,7 +525,7 @@ index 687dc034c2..aa5de8a0c3 100644
      PLwsCallInfo pLwsCallInfo = NULL;
      BOOL locked = FALSE;
      SERVICE_CALL_RESULT callResult = SERVICE_CALL_RESULT_NOT_SET;
-@@ -1471,13 +1641,31 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
+@@ -1471,13 +1592,31 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
      CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
      CHK(pSignalingClient->channelEndpointWss[0] != '\0', STATUS_INTERNAL_ERROR);
  
@@ -780,7 +559,7 @@ index 687dc034c2..aa5de8a0c3 100644
                   SIGNALING_CHANNEL_ARN_PARAM_NAME, pSignalingClient->channelDescription.channelArn);
      }
  
-@@ -1504,7 +1692,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
+@@ -1504,7 +1643,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
  
      // The actual connection will be handled in a separate thread
      // Start the request/response thread
@@ -792,7 +571,7 @@ index 687dc034c2..aa5de8a0c3 100644
      CHK_STATUS(THREAD_DETACH(pSignalingClient->listenerTracker.threadId));
  
      timeout = (pSignalingClient->clientInfo.connectTimeout != 0) ? pSignalingClient->clientInfo.connectTimeout : SIGNALING_CONNECT_TIMEOUT;
-@@ -1528,6 +1720,10 @@ CleanUp:
+@@ -1528,6 +1671,10 @@ CleanUp:
  
      CHK_LOG_ERR(retStatus);
  
@@ -803,7 +582,7 @@ index 687dc034c2..aa5de8a0c3 100644
      if (STATUS_FAILED(retStatus) && pSignalingClient != NULL) {
          // Fix-up the timeout case
          SERVICE_CALL_RESULT serviceCallResult =
-@@ -1556,24 +1752,46 @@ STATUS joinStorageSessionLws(PSignalingClient pSignalingClient, UINT64 time)
+@@ -1556,24 +1703,46 @@ STATUS joinStorageSessionLws(PSignalingClient pSignalingClient, UINT64 time)
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -852,7 +631,7 @@ index 687dc034c2..aa5de8a0c3 100644
                   pSignalingClient->channelDescription.channelArn);
      }
  
-@@ -1615,6 +1833,11 @@ CleanUp:
+@@ -1615,6 +1784,11 @@ CleanUp:
          DLOGE("Call Failed with Status:  0x%08x", retStatus);
      }
  
@@ -864,7 +643,7 @@ index 687dc034c2..aa5de8a0c3 100644
      freeLwsCallInfo(&pLwsCallInfo);
  
      LEAVES();
-@@ -1628,8 +1851,14 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
+@@ -1628,8 +1802,14 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
      UNUSED_PARAM(time);
  
      PRequestInfo pRequestInfo = NULL;
@@ -879,7 +658,7 @@ index 687dc034c2..aa5de8a0c3 100644
      PLwsCallInfo pLwsCallInfo = NULL;
      PCHAR pResponseStr;
      jsmn_parser parser;
-@@ -1650,6 +1879,21 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
+@@ -1650,6 +1830,21 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
      previousStorageStatus = pSignalingClient->mediaStorageConfig.storageStatus;
      DLOGD("Previous storage status: %s (%d)", previousStorageStatus ? "ENABLED" : "DISABLED", previousStorageStatus);
      DLOGD("Previous storage stream ARN: %s", pSignalingClient->mediaStorageConfig.storageStreamArn);
@@ -901,7 +680,7 @@ index 687dc034c2..aa5de8a0c3 100644
  
      // Create the API url
      STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
-@@ -1657,7 +1901,7 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
+@@ -1657,7 +1852,7 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
  
      // Prepare the json params for the call
      CHK(pSignalingClient->channelDescription.channelArn[0] != '\0', STATUS_NULL_ARG);
@@ -910,7 +689,7 @@ index 687dc034c2..aa5de8a0c3 100644
      // Create the request info with the body
      CHK_STATUS(createRequestInfo(url, paramsJson, pSignalingClient->pChannelInfo->pRegion, pSignalingClient->pChannelInfo->pCertPath, NULL, NULL,
                                   SSL_CERTIFICATE_TYPE_NOT_SPECIFIED, pSignalingClient->pChannelInfo->pUserAgent,
-@@ -1753,6 +1997,11 @@ CleanUp:
+@@ -1753,6 +1948,11 @@ CleanUp:
          DLOGE("Call Failed with Status:  0x%08x", retStatus);
      }
  
@@ -922,7 +701,7 @@ index 687dc034c2..aa5de8a0c3 100644
      freeLwsCallInfo(&pLwsCallInfo);
  
      LEAVES();
-@@ -1869,7 +2118,12 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
+@@ -1869,7 +2069,12 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
  {
      ENTERS();
      STATUS retStatus = STATUS_SUCCESS;
@@ -935,7 +714,7 @@ index 687dc034c2..aa5de8a0c3 100644
      CHAR encodedIceConfig[MAX_ENCODED_ICE_SERVER_INFOS_STR_LEN + 1];
      CHAR encodedUris[MAX_ICE_SERVER_URI_STR_LEN + 1];
      UINT32 size, writtenSize, correlationLen, iceCount, uriCount, urisLen, iceConfigLen;
-@@ -1897,7 +2151,7 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
+@@ -1897,7 +2102,7 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
              CHK(FALSE, STATUS_INVALID_ARG);
      }
      DLOGD("%s", pMessageType);
@@ -944,7 +723,7 @@ index 687dc034c2..aa5de8a0c3 100644
      // Calculate the lengths if not specified
      if (messageLen == 0) {
          size = (UINT32) STRLEN(pMessage);
-@@ -1911,8 +2165,17 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
+@@ -1911,8 +2116,17 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
          correlationLen = correlationIdLen;
      }
  
@@ -963,7 +742,7 @@ index 687dc034c2..aa5de8a0c3 100644
      CHK_STATUS(base64Encode(pMessage, size, encodedMessage, &writtenSize));
  
      // Account for the template expansion + Action string + max recipient id
-@@ -1994,6 +2257,10 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
+@@ -1994,6 +2208,10 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
  CleanUp:
      CHK_LOG_ERR(retStatus);
  
@@ -974,56 +753,7 @@ index 687dc034c2..aa5de8a0c3 100644
      LEAVES();
      return retStatus;
  }
-@@ -2006,6 +2273,9 @@ STATUS writeLwsData(PSignalingClient pSignalingClient, BOOL awaitForResponse)
-     SIZE_T offset, size;
-     SERVICE_CALL_RESULT result;
- 
-+    UINT32 retryCount = 0;
-+    const UINT32 MAX_RETRY_COUNT = 3;
-+
-     CHK(pSignalingClient != NULL && pSignalingClient->pOngoingCallInfo != NULL, STATUS_NULL_ARG);
- 
-     // See if anything needs to be done
-@@ -2019,7 +2289,7 @@ STATUS writeLwsData(PSignalingClient pSignalingClient, BOOL awaitForResponse)
- 
-     MUTEX_LOCK(pSignalingClient->sendLock);
-     sendLocked = TRUE;
--    while (iterate) {
-+    while (iterate && retryCount < MAX_RETRY_COUNT) {
-         offset = ATOMIC_LOAD(&pSignalingClient->pOngoingCallInfo->sendOffset);
-         size = ATOMIC_LOAD(&pSignalingClient->pOngoingCallInfo->sendBufferSize);
- 
-@@ -2027,14 +2297,28 @@ STATUS writeLwsData(PSignalingClient pSignalingClient, BOOL awaitForResponse)
- 
-         if (offset != size && result == SERVICE_CALL_RESULT_NOT_SET) {
-             CHK_STATUS(CVAR_WAIT(pSignalingClient->sendCvar, pSignalingClient->sendLock, SIGNALING_SEND_TIMEOUT));
-+            retryCount++;
-+        } else if (result == SERVICE_CALL_UNKNOWN) {
-+            // Partial write occurred, continue waiting
-+            retryCount = 0;
-+            continue;
-         } else {
-             iterate = FALSE;
-         }
-+        if (iterate) {
-+            // Wake up the service event loop
-+            CHK_STATUS(wakeLwsServiceEventLoop(pSignalingClient, PROTOCOL_INDEX_WSS));
-+        }
-     }
--
-     MUTEX_UNLOCK(pSignalingClient->sendLock);
-     sendLocked = FALSE;
- 
-+    // Check if we timed out
-+    if (retryCount >= MAX_RETRY_COUNT) {
-+        DLOGW("Failed to send data after %d attempts", MAX_RETRY_COUNT);
-+        CHK(FALSE, STATUS_SIGNALING_MESSAGE_DELIVERY_FAILED);
-+    }
-+
-     // Do not await for the response in case of correlation id not specified
-     CHK(awaitForResponse, retStatus);
- 
-@@ -2073,6 +2357,25 @@ CleanUp:
+@@ -2073,6 +2291,25 @@ CleanUp:
      return retStatus;
  }
  
@@ -1049,7 +779,7 @@ index 687dc034c2..aa5de8a0c3 100644
  STATUS parseSignalingMessage(PCHAR pMessage, UINT32 messageLen, PReceivedSignalingMessage pReceivedSignalingMessage)
  {
      ENTERS();
-@@ -2112,7 +2415,12 @@ STATUS parseSignalingMessage(PCHAR pMessage, UINT32 messageLen, PReceivedSignali
+@@ -2112,7 +2349,12 @@ STATUS parseSignalingMessage(PCHAR pMessage, UINT32 messageLen, PReceivedSignali
          } else if (compareJsonString(pMessage, &tokens[i], JSMN_STRING, (PCHAR) "messagePayload")) {
              strLen = (UINT32) (tokens[i + 1].end - tokens[i + 1].start);
              CHK(strLen <= MAX_SIGNALING_MESSAGE_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
@@ -1063,7 +793,7 @@ index 687dc034c2..aa5de8a0c3 100644
              // Base64 method will set outLen <= original input outLen
              CHK_STATUS(base64Decode(pMessage + tokens[i + 1].start, strLen, (PBYTE) (pReceivedSignalingMessage->signalingMessage.payload), &outLen));
  
-@@ -2191,6 +2499,9 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
+@@ -2191,6 +2433,9 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
  
      // Parse the response
      CHK(NULL != (pSignalingMessageWrapper = (PSignalingMessageWrapper) MEMCALLOC(1, SIZEOF(SignalingMessageWrapper))), STATUS_NOT_ENOUGH_MEMORY);
@@ -1073,7 +803,7 @@ index 687dc034c2..aa5de8a0c3 100644
      pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage.version = SIGNALING_MESSAGE_CURRENT_VERSION;
      CHK_STATUS(parseSignalingMessage(pMessage, messageLen, &pSignalingMessageWrapper->receivedSignalingMessage));
  
-@@ -2215,6 +2526,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
+@@ -2215,6 +2460,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
              // Notify the awaiting send
              CVAR_BROADCAST(pSignalingClient->receiveCvar);
              // Delete the message wrapper and exit
@@ -1081,7 +811,7 @@ index 687dc034c2..aa5de8a0c3 100644
              SAFE_MEMFREE(pSignalingMessageWrapper);
              CHK(FALSE, retStatus);
              break;
-@@ -2224,6 +2536,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
+@@ -2224,6 +2470,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
              CHK_STATUS(terminateConnectionWithStatus(pSignalingClient, SERVICE_CALL_RESULT_SIGNALING_GO_AWAY));
  
              // Delete the message wrapper and exit
@@ -1089,7 +819,7 @@ index 687dc034c2..aa5de8a0c3 100644
              SAFE_MEMFREE(pSignalingMessageWrapper);
  
              // Iterate the state machinery
-@@ -2239,6 +2552,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
+@@ -2239,6 +2486,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
              CHK_STATUS(terminateConnectionWithStatus(pSignalingClient, SERVICE_CALL_RESULT_SIGNALING_RECONNECT_ICE));
  
              // Delete the message wrapper and exit
@@ -1097,7 +827,7 @@ index 687dc034c2..aa5de8a0c3 100644
              SAFE_MEMFREE(pSignalingMessageWrapper);
  
              // Iterate the state machinery
-@@ -2275,7 +2589,11 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
+@@ -2275,7 +2523,11 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
      CHK_STATUS(threadpoolContextPush(receiveLwsMessageWrapper, pSignalingMessageWrapper));
  #else
      // Issue the callback on a separate thread
@@ -1109,7 +839,7 @@ index 687dc034c2..aa5de8a0c3 100644
      CHK_STATUS(THREAD_DETACH(receivedTid));
  #endif
  
-@@ -2294,7 +2612,7 @@ CleanUp:
+@@ -2294,7 +2546,7 @@ CleanUp:
          if (IS_VALID_TID_VALUE(receivedTid)) {
              THREAD_CANCEL(receivedTid);
          }
@@ -1118,7 +848,7 @@ index 687dc034c2..aa5de8a0c3 100644
          SAFE_MEMFREE(pSignalingMessageWrapper);
      }
  
-@@ -2461,6 +2779,7 @@ PVOID receiveLwsMessageWrapper(PVOID args)
+@@ -2461,6 +2713,7 @@ PVOID receiveLwsMessageWrapper(PVOID args)
  CleanUp:
      CHK_LOG_ERR(retStatus);
  
@@ -1127,7 +857,7 @@ index 687dc034c2..aa5de8a0c3 100644
  
      return (PVOID) (ULONG_PTR) retStatus;
 diff --git a/src/source/Signaling/LwsApiCalls.h b/src/source/Signaling/LwsApiCalls.h
-index 0f0a88cc09..85fba6b3de 100644
+index 0f0a88cc09..ef044cc3cd 100644
 --- a/src/source/Signaling/LwsApiCalls.h
 +++ b/src/source/Signaling/LwsApiCalls.h
 @@ -11,13 +11,13 @@ extern "C" {
@@ -1148,16 +878,6 @@ index 0f0a88cc09..85fba6b3de 100644
 +#define SIGNALING_SERVICE_TCP_KEEPALIVE_PROBE_INTERVAL_IN_SECONDS 10
  #define SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS       10
  #define SIGNALING_SERVICE_WSS_HANGUP_IN_SECONDS                   7200
- 
-@@ -211,6 +211,9 @@ struct __LwsCallInfo {
-     // Service exit indicator;
-     volatile ATOMIC_BOOL cancelService;
- 
-+    // Message receiving indicator
-+    volatile ATOMIC_BOOL receiveMessage;
-+
-     // Protocol index
-     UINT32 protocolIndex;
  
 diff --git a/src/source/Srtp/SrtpSession.c b/src/source/Srtp/SrtpSession.c
 index 5c41b05a9d..5b32fffc70 100644
@@ -1221,5 +941,5 @@ index 5c41b05a9d..5b32fffc70 100644
  CleanUp:
      LEAVES();
 -- 
-2.39.5 (Apple Git-154)
+2.43.0
 

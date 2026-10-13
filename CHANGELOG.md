@@ -120,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SENT_ANSWER`, such as the power-save handler stopping its park timer, now see
   it only for an answer that goes out or will be re-sent. See `API_USAGE.md` for
   a buffered answer that never goes out.
+- Patch 0001 no longer carries the libwebsockets callback and send-path rewrite
+  from awslabs#2134. Only the ws-off (`CONFIG_USE_ESP_WEBSOCKET_CLIENT=n`) path
+  used it; see `patches/README.md` for what replaced each part.
 - esp_camera: `join-room` leaves the current room first instead of failing with
   "Already connected"; a separate `disconnect` is no longer needed.
 - **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under

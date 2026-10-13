@@ -61,7 +61,22 @@ two kinds of changes:
     When #2146 lands upstream, this portion is split out and removed.
   - **ESP-IDF-specific (stays):** ConnectionListener custom thread for
     constrained-stack platforms, mbedtls-3.x compatibility shims, robustness
-    fixes in `SocketConnection.c`, `Sctp.c` and `LwsApiCalls.c`.
+    fixes in `SocketConnection.c` and `Sctp.c`, and in `LwsApiCalls.c` the
+    reconnect/receive thread stacks and the longer API-call timeouts and TCP
+    keepalive.
+
+> **lws callback rewrite removed.** 0001 used to carry the libwebsockets callback
+> and send-path changes of awslabs#2134 (partial HTTP body writes, a ping timer,
+> close-status handling, fragment tracking, a WRITEABLE / `writeLwsData` rewrite,
+> forced ALPN). They are gone: ALPN `http/1.1` is upstream since v1.20.0, lws
+> buffers partial writes itself on http/1.1, and the send-path rewrite returned
+> from `awaitForResponse` before the response arrived. Checked end to end on the
+> ws-off path under ESP-EMU (`webrtc_classic`, P4 + C6): signaling, answer, ICE,
+> video and the data channel behave the same with and without them, and no short
+> write occurred on either. That run needed two ws-off fixes that are not part of
+> this patch set yet: waking the lws service loop with `lws_cancel_service()` after
+> queuing a send, and no file cache on ws-off (upstream `FileCache.c` puts 32
+> cache entries on the stack).
 
 > **SDP buffer cap.** 0001 also lowers `MAX_SESSION_DESCRIPTION_INIT_SDP_LEN`
 > 25000 → 12000 to shrink `sendLwsMessage`'s static `encodedMessage` buffer (~13 KB of
