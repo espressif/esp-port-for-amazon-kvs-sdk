@@ -16,6 +16,14 @@ default:
     - git submodule sync --recursive
     - git submodule update --init --recursive
 
+# The nightly lws canary schedule sets LWS_CANARY=1 and wants only build_lws_upstream.
+# Every other job opts out of it here. except (not rules) keeps their default of
+# branch and tag pipelines; a catch-all rule would also start merge-request pipelines.
+.not_in_lws_canary:
+  except:
+    variables:
+      - $LWS_CANARY
+
 .apply_sdk_patches: &apply_sdk_patches
   - echo "Applying SDK patches to WebRTC SDK submodule..."
   - cd $CI_PROJECT_DIR/amazon-kinesis-video-streams-webrtc-sdk-c
@@ -70,6 +78,7 @@ default:
 # Host unit tests (Unity) for the platform-agnostic helpers. Runs on the Linux
 # target — fast, no hardware — and fails the pipeline on any Unity failure.
 test_host:
+  extends: .not_in_lws_canary
   stage: test
   tags:
     - build
@@ -92,6 +101,7 @@ test_host:
 # Examples with a linux-target branch, built for the host so shared-code changes
 # cannot break the host build unnoticed.
 build_linux_examples:
+  extends: .not_in_lws_canary
   stage: build
   tags:
     - build
@@ -107,6 +117,7 @@ build_linux_examples:
     - idf.py build
 
 .build_template:
+  extends: .not_in_lws_canary
   stage: build
   tags:
     - build
@@ -162,6 +173,7 @@ build_idf_v6.1:
 # never exercises (it builds full-featured defaults only). One board is enough
 # — these guard against gating regressions, not board coverage.
 build_feature_combos:
+  extends: .not_in_lws_canary
   stage: build
   tags:
     - build
@@ -183,6 +195,7 @@ build_feature_combos:
 # tests themselves need hardware or esp-emu, and AWS. The credentials fragment holds
 # dummy values; the build needs only the symbols.
 build_e2e_configs:
+  extends: .not_in_lws_canary
   stage: build
   tags:
     - build
@@ -209,6 +222,7 @@ build_e2e_configs:
 # Collection only, with no device: every test skips without --e2e or --emu, but an
 # import error or a broken fixture still fails here instead of on the bench.
 test_e2e_collect:
+  extends: .not_in_lws_canary
   stage: test
   tags:
     - build
@@ -217,10 +231,37 @@ test_e2e_collect:
     - pip install -r test_e2e/requirements.txt
     - pytest --collect-only -q test_e2e
 
+# webrtc_classic on libwebsockets signaling, built from the pinned submodule. The
+# main matrix never links lws on a target (USE_ESP_WEBSOCKET_CLIENT defaults to y),
+# and build_feature_combos' lws combo runs on v5.5 only, so this is the blocking
+# check for the IDF v6 errno handling in components/libwebsockets/CMakeLists.txt.
+.webrtc_classic_lws: &webrtc_classic_lws
+  - cd $CI_PROJECT_DIR/examples/webrtc_classic
+  - DEFAULTS="sdkconfig.defaults"
+  - if [ -f sdkconfig.defaults.$TARGET ]; then DEFAULTS="$DEFAULTS;sdkconfig.defaults.$TARGET"; fi
+  - idf.py -B build_lws -D "SDKCONFIG_DEFAULTS=$DEFAULTS;sdkconfig.ci.lws" set-target $TARGET
+  - idf.py -B build_lws build
+
+build_lws_idf_v6:
+  extends: .not_in_lws_canary
+  stage: build
+  tags:
+    - build
+  parallel:
+    matrix:
+      - IDF_IMAGE: [release-v6.0, release-v6.1]
+        TARGET: esp32p4
+  image: espressif/idf:$IDF_IMAGE
+  script:
+    - apt-get update && apt-get install -y pkg-config
+    - *apply_sdk_patches
+    - *webrtc_classic_lws
+
 # Canary: webrtc_classic on libwebsockets signaling against warmcat/libwebsockets main
 # HEAD rather than the pinned submodule, so an upstream change that breaks this port's
 # lws configuration shows up before the pin is bumped. Schedules and manual runs only,
-# and never blocking: upstream main is not ours to keep green.
+# and never blocking: upstream main is not ours to keep green. Its nightly schedule
+# sets LWS_CANARY=1, so that pipeline runs this job alone.
 build_lws_upstream:
   stage: build
   tags:
@@ -244,13 +285,10 @@ build_lws_upstream:
     - git -C components/libwebsockets/libwebsockets fetch --depth 1 origin main
     - git -C components/libwebsockets/libwebsockets checkout --detach FETCH_HEAD
     - echo "libwebsockets main at $(git -C components/libwebsockets/libwebsockets log -1 --format='%h %cd %s' --date=short)"
-    - cd $CI_PROJECT_DIR/examples/webrtc_classic
-    - DEFAULTS="sdkconfig.defaults"
-    - if [ -f sdkconfig.defaults.$TARGET ]; then DEFAULTS="$DEFAULTS;sdkconfig.defaults.$TARGET"; fi
-    - idf.py -B build_lws -D "SDKCONFIG_DEFAULTS=$DEFAULTS;sdkconfig.ci.lws" set-target $TARGET
-    - idf.py -B build_lws build
+    - *webrtc_classic_lws
 
 build_docs:
+  extends: .not_in_lws_canary
   stage: docs
   image: python:3.11
   # The docs build needs no submodules; skip the default recursive checkout.
