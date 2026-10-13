@@ -29,3 +29,9 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # from the sample packs in the SPIFFS image instead. Without this the capture
 # interface returns nothing and the media path cannot be exercised at all.
 CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y
+
+# Nor does it model a display or an audio codec, and streaming_only picks its
+# players from these two capabilities. Left on, the video player's init blocks
+# after the MIPI DSI PHY powers on, and the audio player's after its I2S DMA setup.
+CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
+CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n

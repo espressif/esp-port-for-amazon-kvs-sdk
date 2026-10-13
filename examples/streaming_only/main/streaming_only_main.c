@@ -565,8 +565,13 @@ void app_main(void)
 #  endif
 #endif
 
-#ifndef CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD
+    /* The players follow the board's capabilities too, not its name: a board
+     * with no display turns MEDIA_STREAM_ENABLE_VIDEO_PLAYER off, one with no
+     * codec turns MEDIA_STREAM_HAS_AUDIO_CODEC off. */
+#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER
     video_player = media_stream_get_video_player_if();
+#endif
+#if CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC
     audio_player = media_stream_get_audio_player_if();
 #endif
 

@@ -295,22 +295,27 @@ void app_main(void)
     }
 
     // Get the media capture interfaces for sending audio/video
-#ifdef CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE
+    media_stream_video_capture_t *video_capture = NULL;
+#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_CAPTURE
+#  ifdef CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE
     /* No capture hardware (e.g. running under ESP-EMU, which models no MIPI-CSI or
      * H.264 peripheral): stream the sample frames from SPIFFS instead. Audio stays
      * on the real path -- the image ships video frames only. */
     ESP_LOGW(TAG, "Capturing video from sample files, not a camera");
-    media_stream_video_capture_t *video_capture = media_stream_get_file_video_capture_if();
-#else
-    media_stream_video_capture_t *video_capture = media_stream_get_video_capture_if();
+    video_capture = media_stream_get_file_video_capture_if();
+#  else
+    video_capture = media_stream_get_video_capture_if();
+#  endif
 #endif
     media_stream_audio_capture_t *audio_capture = media_stream_get_audio_capture_if();
     media_stream_video_player_t *video_player = media_stream_get_video_player_if();
     media_stream_audio_player_t *audio_player = media_stream_get_audio_player_if();
 
-#ifdef CONFIG_ESP_P4_CORE_BOARD
-    audio_capture = NULL;
-    audio_player = NULL;
+#if !CONFIG_MEDIA_STREAM_ENABLE_AUDIO_CAPTURE || !CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC
+    audio_capture = NULL;   /* no audio to send, or no codec to capture it with */
+#endif
+#if !CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC
+    audio_player = NULL;    /* no codec to play received audio on */
 #endif
 
 #ifndef CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER

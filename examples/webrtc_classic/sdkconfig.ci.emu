@@ -7,6 +7,12 @@
 # capture from. Stream the H.264 sample frames out of the SPIFFS image instead.
 CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y
 
+# ESP-EMU models no I2S either, so the emulated board has no audio codec. With one
+# configured, starting the microphone spins forever on the I2S "update" bit inside the
+# task that handles the viewer's offer (no answer is sent), and the speaker's codec init
+# asserts once media starts. Video only, in both directions.
+CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
+
 # The receive path needs a display the emulator does not model either.
 # CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
 
