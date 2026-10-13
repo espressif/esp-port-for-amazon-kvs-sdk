@@ -181,6 +181,91 @@ is queued while the P4 is not yet ready, and is flushed across the link —
 and the test asserts `Queue full, dropping newest message` **never** appears, because the
 adapter frees flushed messages with no retry — one drop loses a viewer's offer outright.
 
+## Emulator (no hardware)
+
+ESP-EMU models the P4↔C6 SDIO transport between two emulator processes, so the pair can
+run with no board attached. `run_emu.sh` brings both up.
+
+Verified working under emulation, with no board attached:
+
+- boot of both images, the C6 enumerating over SDIO and exchanging capabilities with the
+  P4 host
+- Wi-Fi via the emulated C6 and TLS out to AWS through `--net user`
+- the **full signaling walk** 1 → 9 to `Signaling Connected`
+- a viewer's offer arriving and the device creating a peer session for it
+- **file-based capture feeding the encoder** (`TX H.264 IDR accounting: total=1550`)
+
+**Not working: ICE, so no media.** The emulated device sits at `192.168.4.2` behind the
+emulator's user-mode NAT and no candidate pair forms, so the session never reaches
+CONNECTED and no answer is sent (`not_connected` climbs in the `DIAG frame_cb` line).
+Worth trying next: a routable address via `--net tap` (Linux) or `--net vmnet` (macOS),
+or forcing TURN relay. Until then the emulator covers the signaling and bridge half —
+which is the half that needs no camera, and the half an `esp_hosted` change is most
+likely to break.
+Other constraints:
+
+- **No camera or H.264 encoder** is modelled. `CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y`
+  streams the 60 H.264 sample frames already in the SPIFFS image instead. It swaps
+  video only; audio stays on the real microphone path.
+- **Use the plain `esp32p4` chain, not a board overlay.** The emulator's P4 boot stack
+  assumes the rev ≥ 3 layout (`CONFIG_ESP32P4_REV_MIN_FULL=301`), while `p4_eye` and
+  friends set `ESP32P4_REV_MIN_0` and will not boot there.
+
+### Build and run
+
+```bash
+# esp-emu itself (Rust; needs a toolchain new enough for lockfile v4, i.e. 1.78+)
+git clone <esp-emulator> && cd esp-emulator && cargo build --release
+
+# C6 co-processor
+cd examples/network_adapter
+idf.py -B build_emu set-target esp32c6 && idf.py -B build_emu build
+(cd build_emu && python -m esptool --chip esp32c6 merge_bin -o merged_flash.bin @flash_args)
+
+# P4 host
+cd ../webrtc_classic
+idf.py -B build_emu -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.emu;../../test_e2e/sdkconfig.creds" \
+       set-target esp32p4
+idf.py -B build_emu build
+(cd build_emu && python -m esptool --chip esp32p4 merge_bin -o merged_flash.bin @flash_args)
+
+# both, bridged
+cd ../..
+./test_e2e/run_emu.sh start     # logs in /tmp/kvs-emu/{c6,p4}.log
+./test_e2e/run_emu.sh logs
+./test_e2e/run_emu.sh stop
+```
+
+Point `ESP_EMU` at the binary if it is not at `~/work/esp-emulator/target/release/esp-emu`.
+
+### Use an esp-emu with the PSRAM mode-register model
+
+**Build the emulator from `master`, not `feat/hosted-emu-test-coverage`.** The older
+branch does not model PSRAM mode-register reads, and that one gap breaks WebRTC
+entirely:
+
+```
+emulator does not model PSRAM mode-register reads
+  -> esp_psram misidentifies the die (vendor UNKNOWN, gen 2, 128 Mbit, Variable latency)
+  -> the PSRAM heap is registered without MALLOC_CAP_DMA
+  -> esp_aes_dma_core.c's MALLOC_CAP_DMA|MALLOC_CAP_8BIT|MALLOC_CAP_SPIRAM finds no heap
+  -> "Failed to allocate memory for start alignment buffer"
+  -> libsrtp's AES self-test fails -> srtp_init() fails
+  -> initKvsWebRtc() returns 0x5b000005 (STATUS_SRTP_INIT_FAILED, PeerConnection.c:1941)
+```
+
+It looks like a crypto or memory-pressure problem and is neither — it fails with ~405 KB
+internal and 16 MB PSRAM free, because it is a capability mismatch, not capacity.
+Allocating that exact combination at boot returns PSRAM on hardware (`0x48016a40`) and on
+emu master (`0x48016200`), and NULL on the old branch. On master the emulator reports the
+die exactly as a P4-EYE does — vendor `0xd` (AP), generation 4, 256 Mbit, Fixed latency —
+and hardware AES runs clean, so `sdkconfig.ci.emu` leaves it enabled.
+
+Known remaining gap: on emu master the P4 currently stalls during ESP-Hosted SDIO
+bring-up (`H_SDIO_DRV: Write thread started`, no bridge traffic), so the full split-mode
+run is not yet reproducible there. The bridge worked on the older branch, so this looks
+like a regression or an interface change between the two.
+
 ## Debugging the viewer alone
 
 `kvs_viewer.py` runs standalone against any channel, which separates "the viewer is

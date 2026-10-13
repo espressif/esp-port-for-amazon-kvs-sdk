@@ -57,6 +57,22 @@ menu "Media Stream Configuration"
                 DEBUG statements are compiled out and this does nothing.
 
                 Verbose: leave off for normal builds.
+
+        config MEDIA_STREAM_CAPTURE_FROM_FILE
+            bool "Capture video from sample files instead of the camera"
+            default n
+            help
+                Stream the H.264 sample frames in the SPIFFS image instead of
+                capturing from a camera. Audio is unaffected and stays on the
+                real microphone path.
+
+                For environments with no capture hardware -- notably ESP-EMU,
+                which models no MIPI-CSI or H.264 peripheral -- and for a
+                bitstream-identical stream across runs.
+
+                Frames are read as /spiffs/samples/frame-%04d.h264, cycling
+                through the 60 the image ships.
+
     endmenu
 
     menu "Camera Configuration"
