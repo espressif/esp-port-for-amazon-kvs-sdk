@@ -1,0 +1,10 @@
+# Host-side dependencies for the end-to-end streaming tests.
+#   pip install -r requirements.txt
+pytest>=7.0
+pytest-embedded>=1.10
+pytest-embedded-serial-esp>=1.10
+pytest-embedded-idf>=1.10
+aiortc>=1.9
+av>=11.0
+websockets>=12.0
+boto3>=1.34

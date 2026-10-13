@@ -10,3 +10,12 @@ __pycache__/
 *.pem
 *.key
 !**/cacert.pem
+
+# Local AWS credentials for the end-to-end tests (never commit)
+test_e2e/sdkconfig.creds
+examples/*/sdkconfig.creds
+
+# Co-processor images staged for slave_flasher. These are built per-developer and,
+# for the e2e tests, contain the AWS credentials compiled into signaling_only --
+# never commit them. The directory's README.md is tracked.
+examples/*/target-firmware/*.bin

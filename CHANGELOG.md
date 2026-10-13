@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `KVS_SDK_PATH` pointing at a directory that does not exist (or one with no
+  `components/kvs_webrtc`) is now a configure-time `FATAL_ERROR` instead of a warning
+  that scrolled past while every `kvs_*` component silently resolved elsewhere.
+
 ### Repository structure
 
 - Migrated ESP-IDF port from the `beta-reference-esp-port` branch of
@@ -49,6 +55,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`media_stream_caps.h`** — capability macros (esp_video capture, hardware H.264,
   esp_image_effects, PPA) replacing raw `CONFIG_IDF_TARGET_*` tests at the capture
   pipeline's guard sites.
+- **End-to-end streaming test** (`test_e2e/`) — drives real hardware against a real KVS
+  channel with an aiortc viewer, asserting the full `SIGNALING_CLIENT_STATE` walk in
+  order, that video RTP reaches the viewer (and audio, where the board has a codec),
+  that the selected ICE candidate pair is peer-to-peer rather than TURN-relayed, and
+  that the data channel opens and echoes.
+  Complements `test_app/`, which only covers pure functions. Opt-in via `--e2e`; device
+  credentials come from a gitignored `test_e2e/sdkconfig.creds`. See its README for the
+  measured baseline and the issues it already surfaced.
+
+  Split mode (P4 + C6) is covered too, as a single-DUT test: the C6's log is read off
+  the P4's console via the `[SLAVE]` prefix and its console is driven through the P4's
+  `write_slave` command, so a one-USB-port kit needs no ESP-Prog. It additionally
+  asserts the bridge offer handoff and that the adapter never drops a queued message.
+
 - **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
   alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
   stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from

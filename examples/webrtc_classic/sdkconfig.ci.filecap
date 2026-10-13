@@ -1,0 +1,13 @@
+# Stream the H.264 sample frames from the SPIFFS image instead of the camera.
+# Chain after sdkconfig.ci.e2e when you want a reproducible bitstream:
+#
+#   ...;sdkconfig.ci.e2e;sdkconfig.ci.filecap;../../test_e2e/sdkconfig.creds
+#
+# Worth doing when the number you care about is packet loss across an esp_hosted
+# or IDF change: a live camera varies with scene and rate control, so run-to-run
+# comparisons carry that noise. The cost is that CSI capture and H.264 encode are
+# then not exercised at all -- keep the camera path for the runs where that
+# matters. sdkconfig.ci.emu sets this directly, since ESP-EMU models no camera.
+#
+# Video only: audio stays on the real microphone path.
+CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y

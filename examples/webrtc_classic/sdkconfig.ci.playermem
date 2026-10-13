@@ -1,0 +1,21 @@
+# Lets the video player and hardware AES coexist, by letting malloc() serve the
+# tinyh264 decoder's ~160 KB from PSRAM. Chain AFTER sdkconfig.ci.e2e.
+#
+# Do NOT chain ci.memdebug to reproduce the numbers below: heap tracing and
+# COMPILER_OPTIMIZATION_DEBUG change the very thing being measured.
+#
+#                          CAPS_ALLOC   USE_MALLOC
+#   min-ever internal free    12.4 KB      46.6 KB
+#   worst contiguous block    13.3 KB        31 KB
+#   esp-aes failures               26            0
+
+# Put the player back, so the decoder is actually created.
+CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=y
+
+# tinyh264 ships prebuilt and allocates with libc malloc, and it exposes no allocator
+# hook. Under SPIRAM_USE_CAPS_ALLOC (what sdkconfig.defaults picks) malloc() never
+# returns PSRAM, so all of it lands in internal RAM. SPIRAM_USE_MALLOC -- which is
+# IDF's own default for this choice -- lets allocations above the threshold below go
+# to PSRAM instead, without touching the prebuilt library.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
