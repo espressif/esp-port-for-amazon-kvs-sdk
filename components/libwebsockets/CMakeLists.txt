@@ -98,9 +98,11 @@ endif()
 # top of its CMakeLists, before its own mbedtls probe runs, whether to force
 # LWIP_PROVIDE_ERRNO; with LWS_HAVE_MBEDTLS_V4 unset it does, lwIP then declares a
 # non-TLS `extern int errno`, and the link fails ("TLS definition ... mismatches
-# non-TLS reference"). Set the probe result up front; it also lands in lws_config.h.
+# non-TLS reference"). Set the probe result up front. lws's own probe then skips, and
+# the value reaches lws_config.h (#define LWS_HAVE_MBEDTLS_V4), which is how both the
+# lws sources and consumers of libwebsockets.h see it; nothing passes it as a -D.
 if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
-    set(LWS_HAVE_MBEDTLS_V4 1 CACHE INTERNAL "ESP: IDF v6 ships mbedTLS 4" FORCE)
+    set(LWS_HAVE_MBEDTLS_V4 1)
 endif()
 
 # Add libwebsockets as a subdirectory
@@ -171,16 +173,6 @@ if(IDF_TARGET STREQUAL "linux")
     endif()
 else()
     target_link_libraries(websockets PRIVATE idf::mbedtls)
-endif()
-
-# add_subdirectory bypasses the mbedtls-version probe of older lws; set
-# LWS_HAVE_MBEDTLS_V4 so libwebsockets.h uses the v4 include paths (lws sources +
-# public consumers of the header). Not where lws defines it itself, since a second
-# definition is a -Werror redefinition: newer lws probes it into lws_config.h, and
-# on linux we pin LWS_MBEDTLS_INCLUDE_DIRS, so lws's own v4 probe runs there too.
-if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux" AND NOT LWS_HAVE_MBEDTLS_V4)
-    target_compile_definitions(websockets PUBLIC LWS_HAVE_MBEDTLS_V4=1)
-    target_compile_definitions(${COMPONENT_LIB} INTERFACE LWS_HAVE_MBEDTLS_V4=1)
 endif()
 
 # Same reason for spi_flash: lws romfs.c includes esp_flash.h, whose v6 header
