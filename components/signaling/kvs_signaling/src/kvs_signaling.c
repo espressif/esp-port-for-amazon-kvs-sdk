@@ -458,6 +458,12 @@ static bool kvsResendPendingMessage(void *ctx, kvs_pending_msg_type_t type, cons
 {
     KvsSignalingClientData *pClientData = (KvsSignalingClientData *) ctx;
 
+    /* Teardown started: fail the rest unsent, so the flush gets back to the work
+     * queue after at most the send already in progress. */
+    if (!kvsSignalingClientIsLive(pClientData)) {
+        return false;
+    }
+
     /* The batch is drained outside the send lock, so the buffer can move meanwhile.
      * A peer purged since the batch was taken has left: drop its messages. An
      * answer queued since then for the same peer is newer: drop the batch's answer,
@@ -534,6 +540,10 @@ static void kvsFlushPendingSignaling(KvsSignalingClientData *pClientData)
     }
 
     for (UINT32 round = 0; round < KVS_PENDING_FLUSH_MAX_ROUNDS; round++) {
+        /* Teardown started: stop between rounds so its work-queue sync returns. */
+        if (!kvsSignalingClientIsLive(pClientData)) {
+            return;
+        }
         /* Take ownership of the buffer under the lock, then re-send OUTSIDE it:
          * each send can block on the websocket, and holding
          * signalingSendMessageLock across up to KVS_PENDING_ICE_MAX +
