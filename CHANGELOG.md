@@ -69,6 +69,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `write_slave` command, so a one-USB-port kit needs no ESP-Prog. It additionally
   asserts the bridge offer handoff and that the adapter never drops a queued message.
 
+  The split pair also runs under ESP-EMU with no hardware (`--emu`): the full KVS path
+  from bring-up to a viewer's answer, and the capture path alone through
+  `streaming_only`'s `media-selftest` command. `apprtc_viewer.py` checks media without
+  AWS against `esp_camera` in a fixed AppRTC room. CI builds the e2e and emulator
+  overlay chains and collects the suite; it runs no test that needs hardware or AWS.
+
+- **File capture feeds WebRTC again.** The file source publishes to the sink registry,
+  paced to the frame interval, and reads one packed file per medium
+  (`samples/video.pack`, `audio.pack`; `tools/pack_samples.py`) instead of one file per
+  frame. `streaming_only` selects audio and video sources independently.
+
 - **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
   alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
   stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from

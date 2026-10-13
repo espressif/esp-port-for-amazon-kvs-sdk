@@ -6,7 +6,9 @@ actually flows peer-to-peer. They exist to answer one question quickly — *did 
 break streaming?* — which is what you want when bumping `esp_hosted`, mbedTLS, or IDF.
 
 Covers `webrtc_classic` single-chip and split mode (`streaming_only` on the P4 +
-`signaling_only` on the C6). The viewer is shared by both.
+`signaling_only` on the C6). The viewer is shared by both. The split pair also runs under
+ESP-EMU with no hardware (`--emu`), and `apprtc_viewer.py` checks the media path without
+AWS.
 
 ## What it checks
 
@@ -102,11 +104,16 @@ only describes the last configure. The channel check reads the same file, from
 `signaling_only/<same build-dir name>` in split mode, so build both halves into
 directories of the same name.
 
-Without `--e2e` every test skips, so this directory is inert in normal collection and in
-the existing `test_host` CI job.
+Without `--e2e` the hardware tests skip, and without `--emu` the emulator tests do, so
+this directory is inert in normal collection and in the existing `test_host` CI job.
+Tests marked `manual` need a person or an instrument and run only with `--manual`, never
+in automation.
 
-Options: `--kvs-channel`, `--kvs-region`, `--media-timeout`, `--connect-timeout`,
-`--allow-relay`, `--max-video-loss`.
+Options: `--e2e`, `--emu`, `--manual`, `--kvs-channel`, `--kvs-region`,
+`--media-timeout`, `--connect-timeout`, `--allow-relay`, `--max-video-loss`, `--cp-port`.
+
+A finished run always logs `result: ...`, even when the peer has vanished: each viewer
+teardown step is bounded (10 s), and a step that times out is listed in `errors=`.
 
 If components resolve from another checkout you have a stale `KVS_SDK_PATH` exported —
 `unset KVS_SDK_PATH`. A path that no longer exists now fails configure outright instead
@@ -130,6 +137,22 @@ has:
 
 Boards with a separate C6 UART (`p4_function_ev_board_*`) could run this as a two-DUT
 test instead; the single-port path is the more constrained one, so it is what this covers.
+
+### Co-processor console: `--cp-port`
+
+Where the C6's log comes from is read from the P4 build's config. With
+`CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR=y` (the default) the P4 re-prints it behind
+`[SLAVE]` and the test reads the P4's port only. A P4 built without it does not forward
+the C6 log, so pass the C6's own UART:
+
+```bash
+pytest pytest_split_mode.py --e2e --target esp32p4 --port /dev/ttyACM0 \
+       --cp-port /dev/ttyUSB1 --build-dir build_e2e -s
+```
+
+The port is opened with DTR and RTS deasserted and the C6 is not reset, so an esp-prog
+on that port does not drop it into download mode mid-session. `--cp-port` also wins over
+forwarding when both are available.
 
 ### Build both halves
 
@@ -183,40 +206,82 @@ adapter frees flushed messages with no retry — one drop loses a viewer's offer
 
 ## Emulator (no hardware)
 
-ESP-EMU models the P4↔C6 SDIO transport between two emulator processes, so the pair can
-run with no board attached. `run_emu.sh` brings both up.
+ESP-EMU models the P4↔C6 SDIO transport between two emulator processes, so the pair runs
+with no board attached. Two ways in:
 
-Verified working under emulation, with no board attached:
+- **`--emu` tests** (`pytest_e2e_emu.py`, `pytest_media_emu.py`) drive the split pair —
+  `streaming_only` on the P4, `signaling_only` on the C6 — through `emu_pair.py`, which
+  builds both images, starts a fresh pair for every run and asserts no `EMU-FAULT` line.
+- **`run_emu.sh`** brings up the single-chip pair by hand — `webrtc_classic` on the P4,
+  `network_adapter` on the C6 — for a viewer run from `kvs_viewer.py`.
 
-- boot of both images, the C6 enumerating over SDIO and exchanging capabilities with the
-  P4 host
-- Wi-Fi via the emulated C6 and TLS out to AWS through `--net user`
-- the **full signaling walk** 1 → 9 to `Signaling Connected`
-- a viewer's offer arriving and the device creating a peer session for it
-- **file-based capture feeding the encoder** (`TX H.264 IDR accounting: total=1550`)
+### What runs, and on which esp-emu
 
-**Not working: ICE, so no media.** The emulated device sits at `192.168.4.2` behind the
-emulator's user-mode NAT and no candidate pair forms, so the session never reaches
-CONNECTED and no answer is sent (`not_connected` climbs in the `DIAG frame_cb` line).
-Worth trying next: a routable address via `--net tap` (Linux) or `--net vmnet` (macOS),
-or forcing TURN relay. Until then the emulator covers the signaling and bridge half —
-which is the half that needs no camera, and the half an `esp_hosted` change is most
-likely to break.
+With an esp-emu that carries `security/esp-emulator!211` (merged: the DAT1 interrupt and
+GPIO pad-sensing fix) and `security/esp-emulator!214` (the C6 SLC FIFO and RX DMA
+restart fix), the `webrtc_classic` + `network_adapter` pair:
+
+- bridges: the C6 enumerates over SDIO and RPCs round-trip in both directions
+- joins Wi-Fi through the emulated C6 and reaches AWS through `--net user`, the
+  emulator's user-mode NAT; SNTP sets the clock, so SigV4 signing works
+- completes the **full KVS signaling walk** 1 → 9 to `Signaling Connected`
+- answers a viewer's offer; ICE and DTLS connect behind `--net user`
+- delivers video to the viewer with `CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y`: the first
+  decoded frame arrives about 12 s after the viewer starts
+
+Without `security/esp-emulator!214`, host→slave data over the bridge stalls after 20
+packets (the C6's RX queue depth): the host runs out of credits and drops every later
+packet as `no SDIO write buffers on slave device`, so signaling stops part-way. Use an
+esp-emu that has both MRs.
+
+`pytest_e2e_emu.py` asserts each stage up to the device answering the offer, one test per
+stage, so a failure names the stage that broke. Media is reported, not asserted: with no
+video the last test skips with the viewer's summary.
+
+**ESP32-S3 standalone** (`webrtc_classic` on one emulated S3) is not covered: esp-emu has
+no I2S model, so audio must be compiled out, and behind its user-mode NAT the viewer's
+ICE does not connect.
+
 Other constraints:
 
 - **No camera or H.264 encoder** is modelled. `CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y`
-  streams the 60 H.264 sample frames already in the SPIFFS image instead. It swaps
-  video only; audio stays on the real microphone path.
+  (in every `sdkconfig.ci.emu`) streams the sample packs in the SPIFFS image instead (see
+  [Sample packs](#sample-packs)). `streaming_only` takes audio from file too.
+- **No I2S** is modelled, on the P4 or the S3, so `webrtc_classic/sdkconfig.ci.emu`
+  sets `CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n`: no microphone and no speaker. With a
+  codec configured, starting the microphone spins forever on the I2S "update" bit in
+  the task handling the viewer's offer (no answer is sent), and the speaker's codec
+  init asserts once media starts.
 - **Use the plain `esp32p4` chain, not a board overlay.** The emulator's P4 boot stack
   assumes the rev ≥ 3 layout (`CONFIG_ESP32P4_REV_MIN_FULL=301`), while `p4_eye` and
   friends set `ESP32P4_REV_MIN_0` and will not boot there.
+- **PSRAM mode registers.** An esp-emu without the PSRAM mode-register model
+  misidentifies the die, registers the PSRAM heap without `MALLOC_CAP_DMA`, and hardware
+  AES then fails `srtp_init()` with `0x5b000005`. Current esp-emu models them and reports
+  the die exactly as a P4-EYE does, so `sdkconfig.ci.emu` leaves hardware AES enabled.
 
-### Build and run
+### esp-emu and ESP-IDF
+
+Both scripts find the emulator as `$ESP_EMU`, or else `esp-emu` on `PATH`.
+`emu_pair.py` builds with the ESP-IDF in `$IDF_PATH`, so source its `export.sh` first.
+
+### `--emu` tests
 
 ```bash
-# esp-emu itself (Rust; needs a toolchain new enough for lockfile v4, i.e. 1.78+)
-git clone <esp-emulator> && cd esp-emulator && cargo build --release
+. $IDF_PATH/export.sh
+cd test_e2e
+pytest pytest_media_emu.py --emu -s     # capture path only: no network, no AWS
+pytest pytest_e2e_emu.py --emu -s       # full path: needs sdkconfig.creds and AWS
+```
 
+`emu_pair.py` builds each half into `build_emu/` with its sdkconfig kept in that build
+dir, so the example's own `sdkconfig` — the one hardware builds use — is never touched.
+The CP chain gets `test_e2e/sdkconfig.creds` appended when it exists. Logs of every run
+are kept under `$KVS_EMU_LOGS/kvs_emu/` (default: the system temp dir).
+
+### `run_emu.sh` by hand
+
+```bash
 # C6 co-processor
 cd examples/network_adapter
 idf.py -B build_emu set-target esp32c6 && idf.py -B build_emu build
@@ -224,7 +289,7 @@ idf.py -B build_emu set-target esp32c6 && idf.py -B build_emu build
 
 # P4 host
 cd ../webrtc_classic
-idf.py -B build_emu -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.emu;../../test_e2e/sdkconfig.creds" \
+idf.py -B build_emu -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.e2e;sdkconfig.ci.emu;../../test_e2e/sdkconfig.creds" \
        set-target esp32p4
 idf.py -B build_emu build
 (cd build_emu && python -m esptool --chip esp32p4 merge_bin -o merged_flash.bin @flash_args)
@@ -233,38 +298,47 @@ idf.py -B build_emu build
 cd ../..
 ./test_e2e/run_emu.sh start     # logs in /tmp/kvs-emu/{c6,p4}.log
 ./test_e2e/run_emu.sh logs
+python test_e2e/kvs_viewer.py --channel ESP32Channel --duration 20
 ./test_e2e/run_emu.sh stop
 ```
 
-Point `ESP_EMU` at the binary if it is not at `~/work/esp-emulator/target/release/esp-emu`.
+## AppRTC viewer (no AWS)
 
-### Use an esp-emu with the PSRAM mode-register model
+`apprtc_viewer.py` is `KvsViewer` signed into an AppRTC room instead of a KVS channel: same
+peer connection, same `ViewerResult`, so its numbers compare with a KVS run. It needs no
+AWS account and no session token, which makes it the viewer to use when the question is
+the media path rather than KVS signaling. It cannot check the KVS signaling state walk.
 
-**Build the emulator from `master`, not `feat/hosted-emu-test-coverage`.** The older
-branch does not model PSRAM mode-register reads, and that one gap breaks WebRTC
-entirely:
+The device is `examples/esp_camera` built with a fixed room:
 
 ```
-emulator does not model PSRAM mode-register reads
-  -> esp_psram misidentifies the die (vendor UNKNOWN, gen 2, 128 Mbit, Variable latency)
-  -> the PSRAM heap is registered without MALLOC_CAP_DMA
-  -> esp_aes_dma_core.c's MALLOC_CAP_DMA|MALLOC_CAP_8BIT|MALLOC_CAP_SPIRAM finds no heap
-  -> "Failed to allocate memory for start alignment buffer"
-  -> libsrtp's AES self-test fails -> srtp_init() fails
-  -> initKvsWebRtc() returns 0x5b000005 (STATUS_SRTP_INIT_FAILED, PeerConnection.c:1941)
+CONFIG_APPRTC_USE_FIXED_ROOM=y
+CONFIG_APPRTC_ROOM_ID="esp32kvse2e"
 ```
 
-It looks like a crypto or memory-pressure problem and is neither — it fails with ~405 KB
-internal and 16 MB PSRAM free, because it is a capability mismatch, not capacity.
-Allocating that exact combination at boot returns PSRAM on hardware (`0x48016a40`) and on
-emu master (`0x48016200`), and NULL on the old branch. On master the emulator reports the
-die exactly as a P4-EYE does — vendor `0xd` (AP), generation 4, 256 Mbit, Fixed latency —
-and hardware AES runs clean, so `sdkconfig.ci.emu` leaves it enabled.
+`CONFIG_APPRTC_SERVER_URL` and `CONFIG_APPRTC_ICE_SERVER_URL` (in the `apprtc_signaling`
+component) point both ends at a local AppRTC and coturn deployment when the session
+should stay on the local network.
 
-Known remaining gap: on emu master the P4 currently stalls during ESP-Hosted SDIO
-bring-up (`H_SDIO_DRV: Write thread started`, no bridge traffic), so the full split-mode
-run is not yet reproducible there. The bridge worked on the older branch, so this looks
-like a regression or an interface change between the two.
+```bash
+python apprtc_viewer.py --room esp32kvse2e --duration 20 --data-channel -v
+```
+
+Exits non-zero unless an answer arrived and video RTP flowed.
+
+## Sample packs
+
+File capture (`CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE`) reads
+`examples/common_components/app_common/spiffs_image/samples/video.pack` (60 H.264 frames)
+and `audio.pack` (618 Opus frames), one indexed file per medium, paced to each medium's
+frame interval. `tools/pack_samples.py <dir>` rebuilds both from per-frame `frame-*.h264`
+and `sample-*.opus` files; the format is described in that directory's `README.md`. Rebuild
+the SPIFFS image after changing them.
+
+`streaming_only`'s `media-selftest [N]` console command pulls N frames from the capture
+interfaces with no peer and prints `MEDIA-SELFTEST video|audio frames=... bytes=...`;
+`pytest_media_emu.py` asserts on it. Run it with no viewer connected: it shares the
+sample index with the stream.
 
 ## Debugging the viewer alone
 
