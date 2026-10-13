@@ -12,6 +12,25 @@ else()
     # warn on the mismatch. Skipped when the example is vendored into another
     # project (rainmaker etc.), where pointing elsewhere is by design.
     get_filename_component(_kvs_sdk_env "$ENV{KVS_SDK_PATH}" REALPATH)
+
+    # A KVS_SDK_PATH left over from a checkout that has since been deleted or
+    # renamed is never intentional, and letting it through produces a baffling
+    # failure much later (a component manifest complaining about its "path"
+    # field, or a build against a half-present tree). Fail here instead, where
+    # the cause is obvious.
+    if(NOT IS_DIRECTORY "${_kvs_sdk_env}")
+        message(FATAL_ERROR
+            "KVS_SDK_PATH is set to '$ENV{KVS_SDK_PATH}', which does not exist. "
+            "This is usually a stale `export` from a deleted checkout. Run "
+            "`unset KVS_SDK_PATH` to consume components from this repo "
+            "('${_kvs_sdk_this_repo}'), or point it at a tree that exists.")
+    elseif(NOT EXISTS "${_kvs_sdk_env}/components/kvs_webrtc")
+        message(FATAL_ERROR
+            "KVS_SDK_PATH is set to '${_kvs_sdk_env}', which is not a KVS port "
+            "checkout -- it has no components/kvs_webrtc. Run "
+            "`unset KVS_SDK_PATH` to use this repo ('${_kvs_sdk_this_repo}').")
+    endif()
+
     if(EXISTS "${_kvs_sdk_this_repo}/components/kvs_webrtc"
        AND NOT _kvs_sdk_env STREQUAL _kvs_sdk_this_repo)
         message(WARNING
