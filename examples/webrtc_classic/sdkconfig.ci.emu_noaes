@@ -1,0 +1,7 @@
+# Chain after sdkconfig.ci.emu for the emulator e2e tests that talk to KVS.
+# Under esp-emu, the TLS handshake to KVS hangs with hardware AES on, with no
+# log at the default level: the host gets its IP and signaling never connects.
+# Seen with an esp-emu that already models the PSRAM mode registers, so the
+# cause is not the PSRAM heap described in sdkconfig.ci.emu. Software AES
+# avoids it. Silicon keeps hardware AES.
+CONFIG_MBEDTLS_HARDWARE_AES=n

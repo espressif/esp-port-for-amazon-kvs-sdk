@@ -259,6 +259,7 @@ Other constraints:
   misidentifies the die, registers the PSRAM heap without `MALLOC_CAP_DMA`, and hardware
   AES then fails `srtp_init()` with `0x5b000005`. Current esp-emu models them and reports
   the die exactly as a P4-EYE does, so `sdkconfig.ci.emu` leaves hardware AES enabled.
+  The TLS handshake to KVS is a separate case: see the link-drop tests below.
 
 ### esp-emu and ESP-IDF
 
@@ -272,11 +273,30 @@ Both scripts find the emulator as `$ESP_EMU`, or else `esp-emu` on `PATH`.
 cd test_e2e
 pytest pytest_media_emu.py --emu -s     # capture path only: no network, no AWS
 pytest pytest_e2e_emu.py --emu -s       # full path: needs sdkconfig.creds and AWS
+pytest pytest_runtime_link_drop_emu.py --emu -s  # split pair: Wi-Fi drop at runtime, no AWS
+pytest pytest_classic_link_drop_emu.py --emu -s  # webrtc_classic: same, then a viewer; AWS
 ```
+
+The two link-drop tests drop the station once the device is up and check that it
+comes back with the same lease. In split mode the C6 drops it (`wifi-set` on the C6
+console), and the host app must see `GOT_IP` again. In `webrtc_classic` the P4 drops
+it itself (`wifi-set` on the P4 console), and signaling and a new viewer session
+must work afterwards. Both need esp_hosted 3.0.10 or later: 3.0.9 posts no `GOT_IP`
+after a same-lease reconnect in split mode, and rejects `esp_wifi_set_config()` after
+`esp_wifi_stop()`, which leaves the `webrtc_classic` station stopped.
+The `webrtc_classic` pair (`emu_pair.CLASSIC` + `emu_pair.ADAPTER`) builds the P4 with
+the credentials, like the split pair's C6.
+
+The `webrtc_classic` link-drop test chains `webrtc_classic/sdkconfig.ci.emu_noaes`,
+which turns the P4's hardware AES off. With it on, the TLS handshake to KVS hangs under
+esp-emu with no log at the default level: the host gets its IP, then signaling never
+connects. This happens with an esp-emu that already models the PSRAM mode registers, so
+it is a separate problem from the `srtp_init()` failure in the bullet above.
 
 `emu_pair.py` builds each half into `build_emu/` with its sdkconfig kept in that build
 dir, so the example's own `sdkconfig` — the one hardware builds use — is never touched.
-The CP chain gets `test_e2e/sdkconfig.creds` appended when it exists. Logs of every run
+The chain of the image that signs KVS requests (the split pair's C6, or `webrtc_classic`)
+gets `test_e2e/sdkconfig.creds` appended when it exists. Logs of every run
 are kept under `$KVS_EMU_LOGS/kvs_emu/` (default: the system temp dir).
 
 ### `run_emu.sh` by hand
