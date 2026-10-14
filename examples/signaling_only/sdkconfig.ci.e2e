@@ -1,0 +1,12 @@
+# C6-side overlay for the split-mode end-to-end test (test_e2e/pytest_split_mode.py).
+# Committed on purpose: carries no secrets. AWS credentials come from the
+# gitignored test_e2e/sdkconfig.creds, which is appended after this fragment.
+
+# The test drives Wi-Fi with `wifi-set` over the C6 console (reached through the
+# P4's `write_slave` command), so BLE provisioning must not park the boot waiting
+# for a phone. signaling_only's own defaults enable it.
+# CONFIG_APP_NETWORK_PROV_BLE is not set
+
+# The oracle reads the signaling state walk off the C6's ESP_LOGI output, which the
+# P4 re-prints with a [SLAVE] prefix.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

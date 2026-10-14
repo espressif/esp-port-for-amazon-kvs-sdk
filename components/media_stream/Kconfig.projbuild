@@ -57,6 +57,28 @@ menu "Media Stream Configuration"
                 DEBUG statements are compiled out and this does nothing.
 
                 Verbose: leave off for normal builds.
+
+        config MEDIA_STREAM_CAPTURE_FROM_FILE
+            bool "Capture from sample files instead of camera/mic"
+            default n
+            help
+                Stream the sample frames in the SPIFFS image instead of capturing
+                from hardware: video.pack (60 H.264 frames) and audio.pack (618
+                Opus frames), each paced to its frame interval. Which media are
+                swapped is up to the example -- streaming_only swaps both,
+                webrtc_classic swaps video only.
+
+                For environments with no capture hardware -- notably ESP-EMU,
+                which models no MIPI-CSI or H.264 peripheral -- and for a
+                bitstream-identical stream across runs.
+
+        config MEDIA_STREAM_ENABLE_VIDEO_CAPTURE
+            bool "Send video"
+            default y
+            help
+                Whether this build captures and sends video. Independent of audio:
+                video only, audio only, both and neither are all valid.
+
     endmenu
 
     menu "Camera Configuration"
@@ -244,6 +266,28 @@ menu "Media Stream Configuration"
             default 64000
             help
                 Audio bitrate in bits per second.
+        config MEDIA_STREAM_ENABLE_AUDIO_CAPTURE
+            bool "Send audio"
+            default y
+            help
+                Whether this build captures and sends audio. Independent of video.
+
+                This is what the product wants to send. Whether the board can do it
+                in hardware is MEDIA_STREAM_HAS_AUDIO_CODEC, and neither applies when
+                capturing from sample files.
+
+        config MEDIA_STREAM_HAS_AUDIO_CODEC
+            bool "Board has an audio codec"
+            default y
+            help
+                Whether this board can capture audio from hardware. It is a
+                property of the board, not of any one board name, so a board
+                without a codec sets this to n rather than being special-cased
+                in application code.
+
+                Only affects the hardware path: MEDIA_STREAM_CAPTURE_FROM_FILE
+                needs no codec and works regardless.
+
     endmenu
 
     menu "Buffer and Tasks Configuration"

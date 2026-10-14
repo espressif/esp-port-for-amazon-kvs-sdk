@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
@@ -14,6 +15,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "media_stream.h"
+#include "video_sink_priv.h"
 /* bsp_selector is gated to `target not in [esp32c5, esp32c6]` in
  * idf_component.yml — the header is missing on c-series builds. The
  * sole use of a BSP symbol (bsp_i2c_init at l.680) is already inside
@@ -25,9 +27,7 @@
 
 static const char *TAG = "media_stream";
 
-#define NUMBER_OF_H264_FRAME_FILES               60 //1500
 #define NUMBER_OF_H265_FRAME_FILES               1500
-#define NUMBER_OF_OPUS_FRAME_FILES               618
 
 #define DEFAULT_FPS_VALUE                        25
 #define DEFAULT_VIDEO_HEIGHT_PIXELS              720
@@ -63,6 +63,126 @@ static char s_audio_file_prefix[64] = "samples/sample";
 static char s_video_file_extension[16] = ".h264";
 static char s_audio_file_extension[16] = ".opus";
 
+/* One file per medium plus an index, opened once. Per-frame files cost two
+ * fopen() per frame, which SPIFFS makes worse as the file count grows. */
+#define SAMPLE_PACK_MAGIC 0x31464B50u   /* "PKF1" */
+
+typedef struct {
+    FILE     *fp;
+    uint32_t  count;
+    uint32_t *offset;
+    uint32_t *length;
+    bool      failure_logged;
+} sample_pack_t;
+
+static sample_pack_t s_video_pack;
+static sample_pack_t s_audio_pack;
+
+static void pack_path(char *out, size_t out_len, const char *prefix, const char *name)
+{
+    const char *slash = strrchr(prefix, '/');
+    int dir_len = slash ? (int)(slash - prefix) : 0;
+    if (dir_len > 0) {
+        snprintf(out, out_len, "%s/%.*s/%s", s_mount_point, dir_len, prefix, name);
+    } else {
+        snprintf(out, out_len, "%s/%s", s_mount_point, name);
+    }
+}
+
+/* The file source reads only from the pack. An open that fails is retried on the
+ * next read, since the pack may not be mounted yet, and the failure is logged once
+ * rather than on every frame. */
+static esp_err_t pack_open(sample_pack_t *p, const char *prefix, const char *name)
+{
+    if (p->fp) {
+        return ESP_OK;
+    }
+
+    char path[160];
+    pack_path(path, sizeof(path), prefix, name);
+
+    esp_err_t err;
+    const char *why;
+    uint32_t *off = NULL;
+    uint32_t *len = NULL;
+    uint32_t hdr[2];
+    uint32_t n = 0;
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        err = ESP_ERR_NOT_FOUND;
+        why = "not found";
+        goto fail;
+    }
+    if (fread(hdr, sizeof(hdr), 1, fp) != 1 || hdr[0] != SAMPLE_PACK_MAGIC || hdr[1] == 0) {
+        err = ESP_ERR_INVALID_STATE;
+        why = "not a sample pack";
+        goto fail;
+    }
+    n = hdr[1];
+    off = calloc(n, sizeof(uint32_t));
+    len = calloc(n, sizeof(uint32_t));
+    if (!off || !len) {
+        err = ESP_ERR_NO_MEM;
+        why = "no memory for its index";
+        goto fail;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t entry[2];
+        if (fread(entry, sizeof(entry), 1, fp) != 1) {
+            err = ESP_FAIL;
+            why = "its index is truncated";
+            goto fail;
+        }
+        off[i] = entry[0];
+        len[i] = entry[1];
+    }
+
+    p->fp = fp;
+    p->count = n;
+    p->offset = off;
+    p->length = len;
+    p->failure_logged = false;
+    ESP_LOGI(TAG, "Opened %s: %" PRIu32 " frames", path, n);
+    return ESP_OK;
+
+fail:
+    free(off);
+    free(len);
+    if (fp) {
+        fclose(fp);
+    }
+    if (!p->failure_logged) {
+        ESP_LOGW(TAG, "Cannot use %s: %s; the file source sends nothing until it can", path, why);
+        p->failure_logged = true;
+    }
+    return err;
+}
+
+static esp_err_t pack_read(sample_pack_t *p, uint32_t idx, uint8_t *buf, uint32_t *size)
+{
+    if (!p->fp || idx >= p->count || size == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint32_t len = p->length[idx];
+    if (buf == NULL) {
+        *size = len;
+        return ESP_OK;
+    }
+    if (*size < len) {
+        *size = len;
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (fseek(p->fp, (long)p->offset[idx], SEEK_SET) != 0) {
+        return ESP_FAIL;
+    }
+    if (fread(buf, 1, len, p->fp) != len) {
+        return ESP_FAIL;
+    }
+    *size = len;
+    return ESP_OK;
+}
+
 // File-based capture state structures
 typedef struct {
     bool started;
@@ -71,6 +191,14 @@ typedef struct {
     uint32_t frame_buffer_size;
     uint32_t current_bitrate_kbps;
     uint64_t start_time;
+    uint32_t period_us;
+    int64_t next_due_us;
+    uint32_t index;               /* get_frame()'s read position (1-based, 0 = before the first) */
+    TaskHandle_t pump;            /* publishes to the sink registry while this source owns it */
+    volatile bool pump_done;
+    uint8_t *pump_buffer;         /* the pump's own frame, so get_frame() never shares a buffer with it */
+    uint32_t pump_buffer_size;
+    uint32_t pump_index;          /* the pump's read position */
 } file_video_capture_state_t;
 
 typedef struct {
@@ -79,6 +207,9 @@ typedef struct {
     uint8_t *frame_buffer;
     uint32_t frame_buffer_size;
     uint64_t start_time;
+    uint32_t period_us;
+    int64_t next_due_us;
+    uint32_t index;               /* this source's read position in the pack */
 } file_audio_capture_state_t;
 
 // Default audio capture implementation
@@ -247,6 +378,40 @@ static media_stream_video_player_t s_video_player_if = {
 // File-based Video Capture Interface Implementation
 // =============================================================================
 
+/* Sample files carry no clock. Unpaced, the faster medium starves the other on
+ * the shared transport. Release each frame on its own period. */
+static void file_capture_pace(int64_t *next_due_us, uint32_t period_us)
+{
+    int64_t now = esp_timer_get_time();
+    int64_t wait_us = *next_due_us - now;
+    if (wait_us > 0) {
+        vTaskDelay(pdMS_TO_TICKS((wait_us + 999) / 1000));
+    }
+    /* A late reader restarts from now, so one slow frame does not bunch the rest. */
+    *next_due_us = (wait_us > -(int64_t)period_us) ? *next_due_us + period_us
+                                                   : esp_timer_get_time() + period_us;
+}
+
+static esp_err_t sample_video_read(uint32_t *index, uint8_t *frame_data, size_t max_size,
+                                   size_t *actual_size);
+static esp_err_t sample_audio_read(uint32_t *index, uint8_t *frame_data, size_t max_size,
+                                   size_t *actual_size);
+static bool h264_has_idr(const uint8_t *buf, uint32_t len);
+
+/* Grow *buf to at least need bytes (SPIRAM preferred). Contents are not kept. */
+static esp_err_t sample_buffer_reserve(uint8_t **buf, uint32_t *size, uint32_t need)
+{
+    if (*buf != NULL && *size >= need) {
+        return ESP_OK;
+    }
+    heap_caps_free(*buf);
+    *buf = (uint8_t *) heap_caps_malloc_prefer(need, 2,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                               MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
+    *size = *buf ? need : 0;
+    return *buf ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 static esp_err_t file_video_capture_init_impl(video_capture_config_t *config, video_capture_handle_t *handle)
 {
     file_video_capture_state_t *state = NULL;
@@ -265,26 +430,144 @@ static esp_err_t file_video_capture_init_impl(video_capture_config_t *config, vi
     state->frame_buffer = NULL;
     state->frame_buffer_size = 0;
     state->start_time = 0;
+    state->period_us = 1000000u / (config->resolution.fps ? config->resolution.fps : DEFAULT_FPS_VALUE);
 
     *handle = (video_capture_handle_t)state;
     ESP_LOGI(TAG, "File-based video capture initialized");
     return ESP_OK;
 }
 
+static esp_err_t file_video_capture_get_frame_impl(video_capture_handle_t handle, video_frame_t **frame, uint32_t timeout_ms);
+
+/* Consumers take encoded video from the sink registry (the WebRTC sender registers
+ * a sink), not through get_frame(), so the file source publishes there itself.
+ * One pump at a time: every source reads the same sample pack, and two pumps would
+ * send each frame twice. The pump belongs to one started source; when that one
+ * stops, another still-started source takes the pump over, so a viewer
+ * keeps its video when streaming_only's media-selftest ends. get_frame() (the
+ * selftest) and the pump each keep their own buffer and read position. */
+#define FILE_VIDEO_MAX_SOURCES 4
+
+static pthread_mutex_t s_file_video_lock = PTHREAD_MUTEX_INITIALIZER;
+static file_video_capture_state_t *s_file_video_started[FILE_VIDEO_MAX_SOURCES];
+static file_video_capture_state_t *s_file_video_pump_owner = NULL;
+/* Timestamp origin of the published frames, in 100 ns units. Set when a source
+ * takes a free pump and kept across a handover, so a viewer sees no jump. */
+static uint64_t s_file_video_pump_epoch;
+
+/* Frames are read only while a sink is enabled: with nobody listening the
+ * position stays put. */
+static void file_video_pump(void *arg)
+{
+    file_video_capture_state_t *state = (file_video_capture_state_t *) arg;
+    TickType_t interval = pdMS_TO_TICKS(state->period_us / 1000);
+    TickType_t last = xTaskGetTickCount();
+
+    if (interval == 0) {
+        interval = 1;
+    }
+    while (state->started) {
+        vTaskDelayUntil(&last, interval);
+        if (!state->started || !video_sink_any_enabled()) {
+            continue;
+        }
+        /* A failed grow leaves no buffer; get one before reading again. */
+        if (sample_buffer_reserve(&state->pump_buffer, &state->pump_buffer_size,
+                                  state->pump_buffer ? 0 : 256 * 1024) != ESP_OK) {
+            continue;
+        }
+        size_t len = 0;
+        esp_err_t ret = sample_video_read(&state->pump_index, state->pump_buffer,
+                                          state->pump_buffer_size, &len);
+        if (ret == ESP_ERR_INVALID_SIZE &&
+            sample_buffer_reserve(&state->pump_buffer, &state->pump_buffer_size, len) == ESP_OK) {
+            ret = sample_video_read(&state->pump_index, state->pump_buffer,
+                                    state->pump_buffer_size, &len);
+        }
+        if (ret != ESP_OK) {
+            continue;
+        }
+        video_frame_t frame = {
+            .buffer    = state->pump_buffer,
+            .len       = len,
+            .timestamp = esp_timer_get_time() * 10 - s_file_video_pump_epoch,
+            .type      = h264_has_idr(state->pump_buffer, len) ? VIDEO_FRAME_TYPE_I
+                                                               : VIDEO_FRAME_TYPE_P,
+        };
+        video_sink_dispatch(&frame);   /* sinks copy what they keep */
+    }
+    state->pump_done = true;
+    vTaskDelete(NULL);
+}
+
+/* Called with s_file_video_lock held. handover: the pump passes from a source that
+ * stopped, so the stream keeps its timestamp origin. */
+static esp_err_t file_video_take_pump(file_video_capture_state_t *state, bool handover)
+{
+    if (sample_buffer_reserve(&state->pump_buffer, &state->pump_buffer_size, 256 * 1024) != ESP_OK) {
+        return ESP_ERR_NO_MEM;
+    }
+    state->pump_index = 0;
+    state->pump_done = false;
+    if (!handover) {
+        s_file_video_pump_epoch = state->start_time;
+        s_video_ref_time = state->start_time;
+    }
+    if (xTaskCreate(file_video_pump, "file_vpump", 4096, state, 5, &state->pump) != pdPASS) {
+        state->pump = NULL;
+        return ESP_FAIL;
+    }
+    s_file_video_pump_owner = state;
+    return ESP_OK;
+}
+
 static esp_err_t file_video_capture_start_impl(video_capture_handle_t handle)
 {
     file_video_capture_state_t *state = (file_video_capture_state_t *)handle;
+    esp_err_t ret = ESP_OK;
 
     if (state == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (state->started) {
+        return ESP_OK;
+    }
+
+    pthread_mutex_lock(&s_file_video_lock);
+    int slot = -1;
+    for (int i = 0; i < FILE_VIDEO_MAX_SOURCES; i++) {
+        if (s_file_video_started[i] == NULL) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        pthread_mutex_unlock(&s_file_video_lock);
+        return ESP_ERR_NO_MEM;
+    }
 
     state->started = true;
     state->start_time = esp_timer_get_time() * 10; // Convert to 100ns units
-    s_video_ref_time = state->start_time;
-    s_video_file_index = 0;
-    ESP_LOGI(TAG, "File-based video capture started");
-    return ESP_OK;
+    state->next_due_us = esp_timer_get_time();
+    state->index = 0;
+    s_file_video_started[slot] = state;
+
+    if (s_file_video_pump_owner == NULL) {
+        ret = file_video_take_pump(state, false);
+        if (ret != ESP_OK) {
+            state->started = false;
+            s_file_video_started[slot] = NULL;
+        }
+    } else {
+        ESP_LOGI(TAG, "Another file video source owns the sink pump; this one serves get_frame() "
+                 "and takes the pump over if that one stops first");
+    }
+    pthread_mutex_unlock(&s_file_video_lock);
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "File-based video capture started");
+    }
+    return ret;
 }
 
 static esp_err_t file_video_capture_stop_impl(video_capture_handle_t handle)
@@ -294,8 +577,38 @@ static esp_err_t file_video_capture_stop_impl(video_capture_handle_t handle)
     if (state == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (!state->started) {
+        return ESP_OK;
+    }
 
+    pthread_mutex_lock(&s_file_video_lock);
     state->started = false;
+    for (int i = 0; i < FILE_VIDEO_MAX_SOURCES; i++) {
+        if (s_file_video_started[i] == state) {
+            s_file_video_started[i] = NULL;
+        }
+    }
+    bool was_owner = (s_file_video_pump_owner == state);
+    pthread_mutex_unlock(&s_file_video_lock);
+
+    if (was_owner) {
+        /* The pump may be inside a read; wait for it rather than free its state. */
+        while (state->pump != NULL && !state->pump_done) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        state->pump = NULL;
+
+        pthread_mutex_lock(&s_file_video_lock);
+        s_file_video_pump_owner = NULL;
+        for (int i = 0; i < FILE_VIDEO_MAX_SOURCES; i++) {
+            file_video_capture_state_t *next = s_file_video_started[i];
+            if (next != NULL && file_video_take_pump(next, true) == ESP_OK) {
+                ESP_LOGI(TAG, "File video sink pump handed over to the remaining source");
+                break;
+            }
+        }
+        pthread_mutex_unlock(&s_file_video_lock);
+    }
     ESP_LOGI(TAG, "File-based video capture stopped");
     return ESP_OK;
 }
@@ -315,45 +628,36 @@ static esp_err_t file_video_capture_get_frame_impl(video_capture_handle_t handle
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Allocate buffer if needed (start with 256KB, will grow if needed)
-    // Prefer SPIRAM, fallback to internal memory
-    if (state->frame_buffer == NULL) {
-        state->frame_buffer_size = 256 * 1024;
-        state->frame_buffer = (uint8_t *) heap_caps_malloc_prefer(state->frame_buffer_size, 2,
-                                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                                                  MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
-        if (state->frame_buffer == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
+    // Start with 256KB (SPIRAM preferred); grown below when a frame needs more.
+    ret = sample_buffer_reserve(&state->frame_buffer, &state->frame_buffer_size, 256 * 1024);
+    if (ret != ESP_OK) {
+        return ret;
     }
 
-    // Get frame from file
-    ret = media_stream_get_sample_video_frame(state->frame_buffer, state->frame_buffer_size,
-                                              &actual_size, &timestamp);
-    if (ret != ESP_OK) {
-        if (ret == ESP_ERR_INVALID_SIZE) {
-            // Buffer too small, reallocate - prefer SPIRAM, fallback to internal memory
-            heap_caps_free(state->frame_buffer);
-            state->frame_buffer_size = actual_size;
-            state->frame_buffer = (uint8_t *) heap_caps_malloc_prefer(state->frame_buffer_size, 2,
-                                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                                                      MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
-            if (state->frame_buffer == NULL) {
-                return ESP_ERR_NO_MEM;
-            }
-            ret = media_stream_get_sample_video_frame(state->frame_buffer, state->frame_buffer_size,
-                                                      &actual_size, &timestamp);
-        }
-        if (ret != ESP_OK) {
-            return ret;
+    file_capture_pace(&state->next_due_us, state->period_us);
+
+    ret = sample_video_read(&state->index, state->frame_buffer, state->frame_buffer_size, &actual_size);
+    if (ret == ESP_ERR_INVALID_SIZE) {
+        /* actual_size holds the size needed; the read position did not move. */
+        ret = sample_buffer_reserve(&state->frame_buffer, &state->frame_buffer_size, actual_size);
+        if (ret == ESP_OK) {
+            ret = sample_video_read(&state->index, state->frame_buffer, state->frame_buffer_size,
+                                    &actual_size);
         }
     }
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    timestamp = esp_timer_get_time() * 10 - state->start_time; // 100ns units, like start_time
 
     // Fill frame structure
     state->current_frame.buffer = state->frame_buffer;
     state->current_frame.len = actual_size;
     state->current_frame.timestamp = timestamp;
-    state->current_frame.type = VIDEO_FRAME_TYPE_I; // Sample frames are treated as I-frames
+    /* Typed from the content: the sample pack has one IDR per loop, and taking a
+     * P-frame for a keyframe opens a sink's start gate on an undecodable frame. */
+    state->current_frame.type = h264_has_idr(state->frame_buffer, actual_size) ? VIDEO_FRAME_TYPE_I
+                                                                               : VIDEO_FRAME_TYPE_P;
 
     *frame = &state->current_frame;
     return ESP_OK;
@@ -375,10 +679,15 @@ static esp_err_t file_video_capture_deinit_impl(video_capture_handle_t handle)
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* The pump reads this state; it has to be gone before the state is freed. */
+    file_video_capture_stop_impl(handle);
+
     if (state->frame_buffer != NULL) {
         heap_caps_free(state->frame_buffer);
         state->frame_buffer = NULL;
     }
+    heap_caps_free(state->pump_buffer);
+    state->pump_buffer = NULL;
 
     free(state);
     ESP_LOGI(TAG, "File-based video capture deinitialized");
@@ -443,6 +752,7 @@ static esp_err_t file_audio_capture_init_impl(audio_capture_config_t *config, au
     state->frame_buffer = NULL;
     state->frame_buffer_size = 0;
     state->start_time = 0;
+    state->period_us = 1000u * (config->frame_duration_ms ? config->frame_duration_ms : 20);
 
     *handle = (audio_capture_handle_t)state;
     ESP_LOGI(TAG, "File-based audio capture initialized");
@@ -459,8 +769,8 @@ static esp_err_t file_audio_capture_start_impl(audio_capture_handle_t handle)
 
     state->started = true;
     state->start_time = esp_timer_get_time() * 10; // Convert to 100ns units
-    s_audio_ref_time = state->start_time;
-    s_audio_file_index = 0;
+    state->index = 0;
+    state->next_due_us = esp_timer_get_time();
     ESP_LOGI(TAG, "File-based audio capture started");
     return ESP_OK;
 }
@@ -493,39 +803,27 @@ static esp_err_t file_audio_capture_get_frame_impl(audio_capture_handle_t handle
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Allocate buffer if needed (start with 4KB, will grow if needed)
-    // Prefer SPIRAM, fallback to internal memory
-    if (state->frame_buffer == NULL) {
-        state->frame_buffer_size = 4 * 1024;
-        state->frame_buffer = (uint8_t *) heap_caps_malloc_prefer(state->frame_buffer_size, 2,
-                                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                                                  MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
-        if (state->frame_buffer == NULL) {
-            return ESP_ERR_NO_MEM;
-        }
+    // Start with 4 KB; grown below when a frame needs more.
+    ret = sample_buffer_reserve(&state->frame_buffer, &state->frame_buffer_size, 4 * 1024);
+    if (ret != ESP_OK) {
+        return ret;
     }
 
-    // Get frame from file
-    ret = media_stream_get_sample_audio_frame(state->frame_buffer, state->frame_buffer_size,
-                                              &actual_size, &timestamp);
-    if (ret != ESP_OK) {
-        if (ret == ESP_ERR_INVALID_SIZE) {
-            // Buffer too small, reallocate - prefer SPIRAM, fallback to internal memory
-            heap_caps_free(state->frame_buffer);
-            state->frame_buffer_size = actual_size;
-            state->frame_buffer = (uint8_t *) heap_caps_malloc_prefer(state->frame_buffer_size, 2,
-                                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                                                      MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL);
-            if (state->frame_buffer == NULL) {
-                return ESP_ERR_NO_MEM;
-            }
-            ret = media_stream_get_sample_audio_frame(state->frame_buffer, state->frame_buffer_size,
-                                                      &actual_size, &timestamp);
-        }
-        if (ret != ESP_OK) {
-            return ret;
+    file_capture_pace(&state->next_due_us, state->period_us);
+
+    // Own read position: another file source (media-selftest) does not move it.
+    ret = sample_audio_read(&state->index, state->frame_buffer, state->frame_buffer_size, &actual_size);
+    if (ret == ESP_ERR_INVALID_SIZE) {
+        ret = sample_buffer_reserve(&state->frame_buffer, &state->frame_buffer_size, actual_size);
+        if (ret == ESP_OK) {
+            ret = sample_audio_read(&state->index, state->frame_buffer, state->frame_buffer_size,
+                                    &actual_size);
         }
     }
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    timestamp = esp_timer_get_time() * 10 - state->start_time; // 100ns units, like start_time
 
     // Fill frame structure
     state->current_frame.buffer = state->frame_buffer;
@@ -1035,6 +1333,67 @@ esp_err_t media_stream_read_frame_from_disk(uint8_t *frame_data, uint32_t *size,
     return ESP_OK;
 }
 
+/* Reads the sample after *index (1-based, wrapping) from a medium's pack into
+ * frame_data. *index moves only on success, so a caller that grows its buffer after
+ * ESP_ERR_INVALID_SIZE (*actual_size then holds the size needed) reads the same
+ * frame again. Reads are serialised: every file source shares the open packs. */
+static pthread_mutex_t s_sample_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static esp_err_t sample_read(sample_pack_t *p, const char *prefix, const char *name,
+                             uint32_t *index, uint8_t *frame_data, size_t max_size,
+                             size_t *actual_size)
+{
+    if (frame_data == NULL) {
+        return ESP_ERR_INVALID_ARG;   /* pack_read() takes a NULL buffer as a size probe */
+    }
+
+    pthread_mutex_lock(&s_sample_lock);
+    esp_err_t ret = pack_open(p, prefix, name);
+    if (ret == ESP_OK) {
+        uint32_t next = *index % p->count + 1;
+        uint32_t size = (uint32_t) max_size;
+        ret = pack_read(p, next - 1, frame_data, &size);
+        if (ret == ESP_OK || ret == ESP_ERR_INVALID_SIZE) {
+            *actual_size = size;
+        }
+        if (ret == ESP_OK) {
+            *index = next;
+        }
+    }
+    pthread_mutex_unlock(&s_sample_lock);
+    return ret;
+}
+
+static esp_err_t sample_video_read(uint32_t *index, uint8_t *frame_data, size_t max_size,
+                                   size_t *actual_size)
+{
+    return sample_read(&s_video_pack, s_video_file_prefix, "video.pack",
+                       index, frame_data, max_size, actual_size);
+}
+
+static esp_err_t sample_audio_read(uint32_t *index, uint8_t *frame_data, size_t max_size,
+                                   size_t *actual_size)
+{
+    return sample_read(&s_audio_pack, s_audio_file_prefix, "audio.pack",
+                       index, frame_data, max_size, actual_size);
+}
+
+/* An access unit with an IDR slice or an SPS starts a decodable stream. The sample
+ * pack holds one IDR per loop; every other frame is a P-slice. */
+static bool h264_has_idr(const uint8_t *buf, uint32_t len)
+{
+    for (uint32_t i = 0; i + 3 < len; i++) {
+        if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1) {
+            uint8_t nal = buf[i + 3] & 0x1f;
+            if (nal == 5 || nal == 7) {
+                return true;
+            }
+            i += 2;
+        }
+    }
+    return false;
+}
+
 esp_err_t media_stream_get_sample_video_frame(uint8_t *frame_data, size_t max_size,
                                               size_t *actual_size, uint64_t *timestamp)
 {
@@ -1042,40 +1401,10 @@ esp_err_t media_stream_get_sample_video_frame(uint8_t *frame_data, size_t max_si
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Update file index and get next frame
-    s_video_file_index = s_video_file_index % NUMBER_OF_H264_FRAME_FILES + 1;
-    ESP_LOGD(TAG, "Getting H264 Sample: %" PRIu32, s_video_file_index);
-
-    char filePath[256];
-    int needed_size = snprintf(filePath, sizeof(filePath), "%s/%s-%04" PRIu32 "%s",
-                               s_mount_point, s_video_file_prefix, s_video_file_index, s_video_file_extension);
-
-    if (needed_size < 0) {
-        ESP_LOGE(TAG, "Failed to format file path: %s", filePath);
-        return ESP_FAIL;
-    } else if (needed_size >= sizeof(filePath)) {
-        ESP_LOGE(TAG, "File path too long: %s", filePath);
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Get frame size first
-    uint32_t frameSize = max_size;
-    esp_err_t ret = media_stream_read_frame_from_disk(NULL, &frameSize, filePath);
+    esp_err_t ret = sample_video_read(&s_video_file_index, frame_data, max_size, actual_size);
     if (ret != ESP_OK) {
         return ret;
     }
-
-    if (frameSize > max_size) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    // Read the actual frame
-    ret = media_stream_read_frame_from_disk(frame_data, &frameSize, filePath);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    *actual_size = frameSize;
     // TODO: is this good way for reference time?
     *timestamp = esp_timer_get_time() * 10 - s_video_ref_time; // Convert to 100ns units
 
@@ -1086,7 +1415,7 @@ esp_err_t media_stream_get_sample_video_frame(uint8_t *frame_data, size_t max_si
             frame_data,
             *actual_size,
             *timestamp,
-            true, // Assume sample frames are key frames
+            h264_has_idr(frame_data, *actual_size),
             s_frame_ready_user_data
         );
     }
@@ -1101,40 +1430,10 @@ esp_err_t media_stream_get_sample_audio_frame(uint8_t *frame_data, size_t max_si
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Update file index and get next frame
-    s_audio_file_index = s_audio_file_index % NUMBER_OF_OPUS_FRAME_FILES + 1;
-    ESP_LOGD(TAG, "Getting Opus Sample: %" PRIu32, s_audio_file_index);
-
-    char filePath[256];
-    int needed_size = snprintf(filePath, sizeof(filePath), "%s/%s-%04" PRIu32 "%s",
-                               s_mount_point, s_audio_file_prefix, s_audio_file_index, s_audio_file_extension);
-    if (needed_size < 0) {
-        ESP_LOGE(TAG, "Failed to format file path: %s", filePath);
-        return ESP_FAIL;
-    } else if (needed_size >= sizeof(filePath)) {
-        ESP_LOGE(TAG, "File path too long: %s", filePath);
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Get frame size first
-    uint32_t frameSize = max_size;
-    esp_err_t ret = media_stream_read_frame_from_disk(NULL, &frameSize, filePath);
+    esp_err_t ret = sample_audio_read(&s_audio_file_index, frame_data, max_size, actual_size);
     if (ret != ESP_OK) {
         return ret;
     }
-
-    if (frameSize > max_size) {
-        *actual_size = frameSize;
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    // Read the actual frame
-    ret = media_stream_read_frame_from_disk(frame_data, &frameSize, filePath);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    *actual_size = frameSize;
     // TODO: is this good way for reference time?
     *timestamp = esp_timer_get_time() * 10 - s_audio_ref_time; // Convert to 100ns units
 

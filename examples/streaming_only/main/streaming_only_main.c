@@ -21,7 +21,9 @@
 #include "app_storage.h"
 
 #include "media_stream.h"
+#include "esp_console.h"
 #include "video_capture.h"
+#include "audio_capture.h"
 #include "signaling_serializer.h"
 #include "webrtc_bridge.h"
 #include "webrtc_bridge_signaling.h"
@@ -397,6 +399,91 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
     }
 }
 
+/* Pull frames from the capture interfaces with no peer and no network. Covers
+ * SPIFFS, the packs and both capture paths, stopping short of the transport. */
+static int media_selftest_cmd(int argc, char **argv)
+{
+    int want = (argc > 1) ? atoi(argv[1]) : 30;
+    if (want <= 0) {
+        want = 30;
+    }
+
+#ifdef CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE
+    media_stream_video_capture_t *vc = media_stream_get_file_video_capture_if();
+    media_stream_audio_capture_t *ac = media_stream_get_file_audio_capture_if();
+#else
+    media_stream_video_capture_t *vc = media_stream_get_video_capture_if();
+    media_stream_audio_capture_t *ac = NULL;
+#endif
+
+    if (vc && vc->init && vc->start && vc->get_frame) {
+        video_capture_config_t cfg = { .codec = VIDEO_CODEC_H264, .quality = 80, .bitrate = 1000 };
+        video_capture_handle_t h = NULL;
+        if (vc->init(&cfg, &h) == ESP_OK && vc->start(h) == ESP_OK) {
+            uint32_t n = 0, bytes = 0, lo = UINT32_MAX, hi = 0;
+            for (int i = 0; i < want; i++) {
+                video_frame_t *f = NULL;
+                if (vc->get_frame(h, &f, 1000) != ESP_OK || !f) {
+                    break;
+                }
+                n++;
+                bytes += f->len;
+                lo = (f->len < lo) ? f->len : lo;
+                hi = (f->len > hi) ? f->len : hi;
+                vc->release_frame(h, f);
+            }
+            printf("MEDIA-SELFTEST video frames=%" PRIu32 " bytes=%" PRIu32 " min=%" PRIu32 " max=%" PRIu32 "\n",
+                   n, bytes, (n ? lo : 0), hi);
+            if (vc->stop) { vc->stop(h); }
+            if (vc->deinit) { vc->deinit(h); }
+        } else {
+            printf("MEDIA-SELFTEST video frames=0 bytes=0 min=0 max=0\n");
+        }
+    } else {
+        printf("MEDIA-SELFTEST video unavailable\n");
+    }
+
+    if (ac && ac->init && ac->start && ac->get_frame) {
+        audio_capture_config_t cfg = { .codec = AUDIO_CODEC_OPUS, .bitrate = CONFIG_AUDIO_BITRATE,
+                                       .frame_duration_ms = 20 };
+        audio_capture_handle_t h = NULL;
+        if (ac->init(&cfg, &h) == ESP_OK && ac->start(h) == ESP_OK) {
+            uint32_t n = 0, bytes = 0, lo = UINT32_MAX, hi = 0;
+            for (int i = 0; i < want; i++) {
+                audio_frame_t *f = NULL;
+                if (ac->get_frame(h, &f, 1000) != ESP_OK || !f) {
+                    break;
+                }
+                n++;
+                bytes += f->len;
+                lo = (f->len < lo) ? f->len : lo;
+                hi = (f->len > hi) ? f->len : hi;
+                ac->release_frame(h, f);
+            }
+            printf("MEDIA-SELFTEST audio frames=%" PRIu32 " bytes=%" PRIu32 " min=%" PRIu32 " max=%" PRIu32 "\n",
+                   n, bytes, (n ? lo : 0), hi);
+            if (ac->stop) { ac->stop(h); }
+            if (ac->deinit) { ac->deinit(h); }
+        } else {
+            printf("MEDIA-SELFTEST audio frames=0 bytes=0 min=0 max=0\n");
+        }
+    } else {
+        printf("MEDIA-SELFTEST audio unavailable\n");
+    }
+    return 0;
+}
+
+static void register_media_selftest(void)
+{
+    const esp_console_cmd_t cmd = {
+        .command = "media-selftest",
+        .help    = "Pull N frames from the capture interfaces (default 30)",
+        .func    = media_selftest_cmd,
+    };
+    esp_console_cmd_register(&cmd);
+}
+
+
 void app_main(void)
 {
     esp_err_t ret;
@@ -424,6 +511,8 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP32 WebRTC Streaming Example");
 
     esp_cli_start();
+    /* After esp_cli_start(): it creates the console the command lands in. */
+    register_media_selftest();
 
     /* Register deep sleep command */
     power_save_cli_register();
@@ -451,26 +540,39 @@ void app_main(void)
     }
 
     // Get media interfaces for streaming (capture for sending, player for receiving)
-    // Optionally use file-based capture instead of camera/microphone
-    // Set USE_FILE_STREAM to 1 to use file-based streaming, 0 for hardware capture
-#define USE_FILE_STREAM 0
-
     media_stream_video_capture_t *video_capture = NULL;
     media_stream_audio_capture_t *audio_capture = NULL;
     media_stream_video_player_t *video_player = NULL;
     media_stream_audio_player_t *audio_player = NULL;
 
-#if USE_FILE_STREAM
+    /* Video and audio are chosen independently. File capture needs no codec,
+     * so the board capability applies only to the hardware path. */
+#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_CAPTURE
+#  ifdef CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE
+    ESP_LOGW(TAG, "Capturing video from sample files, not a camera");
     video_capture = media_stream_get_file_video_capture_if();
-#else
-#ifdef CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD
+#  else
     video_capture = media_stream_get_video_capture_if();
-#else
-    video_capture = media_stream_get_video_capture_if();
-    audio_capture = media_stream_get_audio_capture_if();
-    video_player = media_stream_get_video_player_if();
-    audio_player = media_stream_get_audio_player_if();
+#  endif
 #endif
+
+#if CONFIG_MEDIA_STREAM_ENABLE_AUDIO_CAPTURE
+#  ifdef CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE
+    ESP_LOGW(TAG, "Capturing audio from sample files, not a microphone");
+    audio_capture = media_stream_get_file_audio_capture_if();
+#  elif CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC
+    audio_capture = media_stream_get_audio_capture_if();
+#  endif
+#endif
+
+    /* The players follow the board's capabilities too, not its name: a board
+     * with no display turns MEDIA_STREAM_ENABLE_VIDEO_PLAYER off, one with no
+     * codec turns MEDIA_STREAM_HAS_AUDIO_CODEC off. */
+#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER
+    video_player = media_stream_get_video_player_if();
+#endif
+#if CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC
+    audio_player = media_stream_get_audio_player_if();
 #endif
 
     if (video_capture == NULL) {

@@ -1,0 +1,37 @@
+# P4-side overlay for running the split pair under ESP-EMU (no hardware).
+# Layer after sdkconfig.ci.e2e. Companion: examples/signaling_only/sdkconfig.ci.emu.
+#
+# Use the plain esp32p4 chain, NOT a board overlay: the emulator's P4 boot stack
+# assumes the rev >= 3 layout, while the core-board and p4_eye overlays select
+# rev < 3 and will not boot there.
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+CONFIG_ESP32P4_REV_MIN_301=y
+
+# The emulator presents UART0 as its stdio and models no USB-Serial/JTAG. With a
+# USB-JTAG-only console the ROM output appears and then everything after the
+# scheduler blocks in newlib's stdio lock -- alive, but silent.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Under emulation the "C6" is a second esp-emu process that already holds its own
+# firmware; there is nothing to flash in-system, and the attempt would reset a
+# co-processor that is not there.
+# CONFIG_SLAVE_FLASHER_ENABLE is not set
+
+# esp-emu never raises the AXI-DMA completion interrupt the P4 crypto accelerator
+# signals on, so esp_crypto_shared_gdma_done() polls forever and every hardware
+# mbedTLS operation hangs. Same stopgap as sdkconfig.ci.e2e.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
+# CONFIG_MBEDTLS_HARDWARE_SHA is not set
+# CONFIG_MBEDTLS_HARDWARE_MPI is not set
+
+# The emulator models no MIPI-CSI camera and no H.264 encoder, so capture comes
+# from the sample packs in the SPIFFS image instead. Without this the capture
+# interface returns nothing and the media path cannot be exercised at all.
+CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y
+
+# Nor does it model a display or an audio codec, and streaming_only picks its
+# players from these two capabilities. Left on, the video player's init blocks
+# after the MIPI DSI PHY powers on, and the audio player's after its I2S DMA setup.
+CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
+CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n

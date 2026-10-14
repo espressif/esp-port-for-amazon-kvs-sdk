@@ -1,0 +1,26 @@
+# Instrumentation overlay for chasing internal-RAM exhaustion.
+# Chain AFTER sdkconfig.ci.e2e, which it deliberately overrides.
+#
+# Symptom being chased: internal DMA-capable free heap falls from ~276 KB to ~21 KB
+# during a session (largest free block 13 KB), at which point esp-aes cannot allocate
+# its DMA descriptor array and the TLS write carrying the SDP answer fails.
+
+# task-dump: task names, priorities and stack high-water marks. Task stacks are the
+# first suspect, since plain xTaskCreate() takes them from internal RAM.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+
+# heap-trace start/stop: HEAP_TRACE_LEAKS, so `stop` dumps every still-outstanding
+# allocation with the caller address -- which is what actually names the consumer.
+CONFIG_HEAP_TRACING_STANDALONE=y
+CONFIG_HEAP_TRACING=y
+CONFIG_HEAP_TRACE_HASH_MAP=y
+
+# Without this the dump has no callers at all and is useless for attribution: on
+# RISC-V, heap/Kconfig pins HEAP_TRACING_STACK_DEPTH to `range 0 0` unless frame
+# pointers are compiled in. Costs a register and some code size.
+CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
+CONFIG_HEAP_TRACING_STACK_DEPTH=8
+
+# Attribute allocations to callers properly.
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y

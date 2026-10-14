@@ -1,0 +1,14 @@
+# P4-side overlay for the split-mode end-to-end test (test_e2e/pytest_split_mode.py).
+# The C6 half is examples/signaling_only/sdkconfig.ci.e2e.
+
+# The test asserts on `DIAG frame_cb: send_v_fps=` to confirm the P4 is pushing
+# frames to the viewer directly, rather than merely holding a session.
+CONFIG_KVS_WEBRTC_MEDIA_DIAG_LOG=y
+
+# Keep the P4's slave monitor task on: it forwards the C6's UART to the single USB
+# console with a [SLAVE] prefix, which is how the test sees the signaling walk at
+# all on a one-port kit like P4-EYE. Default is y; pinned here because the whole
+# C6-side oracle depends on it.
+CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR=y
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

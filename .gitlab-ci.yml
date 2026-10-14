@@ -178,6 +178,45 @@ build_feature_combos:
     -   rm -rf build_combo sdkconfig dependencies.lock
     - done
 
+# The e2e and emulator overlay chains (test_e2e/README.md) are otherwise built only
+# by hand on a bench, so a Kconfig rename could break them unnoticed. Build-only: the
+# tests themselves need hardware or esp-emu, and AWS. The credentials fragment holds
+# dummy values; the build needs only the symbols.
+build_e2e_configs:
+  stage: build
+  tags:
+    - build
+  image: espressif/idf:release-v5.5
+  script:
+    - apt-get update && apt-get install -y pkg-config
+    - *apply_sdk_patches
+    - printf '%s\n' 'CONFIG_IOT_CORE_ENABLE_CREDENTIALS=n' 'CONFIG_AWS_ACCESS_KEY_ID="ci-dummy"' 'CONFIG_AWS_SECRET_ACCESS_KEY="ci-dummy"' > /tmp/ci_dummy.creds
+    # example:target:overlays -- overlays are sdkconfig.ci.<name>, comma-separated,
+    # appended to the per-target defaults in the order the README gives.
+    - |
+      set -e
+      for SPEC in webrtc_classic:esp32p4:e2e webrtc_classic:esp32p4:e2e,emu streaming_only:esp32p4:e2e,emu signaling_only:esp32c6:e2e,emu; do
+        IFS=: read EXAMPLE TARGET OVERLAYS <<< "$SPEC"
+        DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.$TARGET"
+        for O in ${OVERLAYS//,/ }; do DEFAULTS="$DEFAULTS;sdkconfig.ci.$O"; done
+        cd $CI_PROJECT_DIR/examples/$EXAMPLE
+        echo "Building $EXAMPLE for $TARGET with $DEFAULTS"
+        idf.py -B build_e2e -D "SDKCONFIG_DEFAULTS=$DEFAULTS;/tmp/ci_dummy.creds" set-target $TARGET
+        idf.py -B build_e2e build
+        rm -rf build_e2e sdkconfig dependencies.lock
+      done
+
+# Collection only, with no device: every test skips without --e2e or --emu, but an
+# import error or a broken fixture still fails here instead of on the bench.
+test_e2e_collect:
+  stage: test
+  tags:
+    - build
+  image: python:3.11
+  script:
+    - pip install -r test_e2e/requirements.txt
+    - pytest --collect-only -q test_e2e
+
 build_docs:
   stage: docs
   image: python:3.11

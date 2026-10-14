@@ -1,0 +1,41 @@
+# Overlay for running webrtc_classic under ESP-EMU (no hardware).
+# Use with the plain esp32p4 chain -- NOT a board overlay: the emulator's P4 boot
+# stack assumes the rev >= 3 layout (__stack = 0x4FFBCFC0, CONFIG_ESP32P4_REV_MIN_FULL
+# 301), while p4_eye and friends set ESP32P4_REV_MIN_0 and will not boot there.
+
+# ESP-EMU models no MIPI-CSI controller and no H.264 encoder, so there is nothing to
+# capture from. Stream the H.264 sample frames out of the SPIFFS image instead.
+CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y
+
+# ESP-EMU models no I2S either, so the emulated board has no audio codec. With one
+# configured, starting the microphone spins forever on the I2S "update" bit inside the
+# task that handles the viewer's offer (no answer is sent), and the speaker's codec init
+# asserts once media starts. Video only, in both directions.
+CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
+
+# The receive path needs a display the emulator does not model either.
+# CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
+
+# The emulator presents UART0 as its stdio; there is no USB-Serial/JTAG model.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# The emulated C6 advertises this SoftAP. Override with esp-emu --wifi-ssid if you
+# change it; the password is fixed in the emulator.
+CONFIG_ESP_WIFI_SSID="myssid"
+CONFIG_ESP_WIFI_PASSWORD="mypassword"
+
+# Nothing is present to provision from, and it would park an unattended boot.
+# CONFIG_APP_NETWORK_PROV_BLE is not set
+
+# The P4 image must not try to reflash a co-processor: under emulation the "C6" is a
+# second esp-emu process started separately, already holding its own firmware.
+# CONFIG_SLAVE_FLASHER_ENABLE is not set
+
+CONFIG_KVS_WEBRTC_MEDIA_DIAG_LOG=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Hardware AES stays enabled, as on silicon. It only fails under an esp-emu that
+# lacks the PSRAM mode-register model (pre-master): the die is misidentified, the
+# PSRAM heap loses MALLOC_CAP_DMA, and srtp_init() fails with 0x5b000005. Build
+# esp-emu from master; the full chain is in test_e2e/README.md, "Emulator".
