@@ -171,7 +171,15 @@ esp_err_t app_wifi_prov_init(const app_wifi_prov_config_t *config)
     s_wifi_event_group = xEventGroupCreate();
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "Failed to init netif");
-    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "Failed to create event loop");
+    /* The application may create the default event loop itself before calling
+     * this; ESP_ERR_INVALID_STATE means it exists, so reuse it. */
+    esp_err_t loop_err = esp_event_loop_create_default();
+    if (loop_err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Default event loop already exists, using it");
+    } else if (loop_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create event loop: %s", esp_err_to_name(loop_err));
+        return loop_err;
+    }
 
     /* Call pre-WiFi init callback (e.g. for coprocessor or custom netif setup) */
     if (cfg.pre_wifi_init_cb) {
