@@ -10,6 +10,7 @@
  * board configs in esp_video_if_cam_sel.h. Compiles to empty on targets without
  * MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE, where callers do not use esp_video_if_* either. */
 #include "media_stream_caps.h"
+#include "media_stream.h"
 #if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
 
 #if !CONFIG_MEDIA_STREAM_NO_BSP
@@ -1108,7 +1109,10 @@ esp_err_t esp_video_if_start(void)
 #if !CONFIG_MEDIA_STREAM_NO_BSP
 #define SCCB_I2C_HANDLE()   bsp_i2c_get_handle()
 #else
+/* Opened below from the pins the board header exports — or handed in first by
+ * media_stream_set_sccb_i2c_bus(), when the application already owns the bus. */
 static i2c_master_bus_handle_t s_sccb_i2c_handle;
+static bool s_sccb_i2c_opened;
 #define SCCB_I2C_HANDLE()   s_sccb_i2c_handle
 #endif
 
@@ -1140,11 +1144,30 @@ static esp_err_t sccb_i2c_bus_init(void)
     esp_err_t ret = i2c_new_master_bus(&bus_config, &s_sccb_i2c_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "failed to open the SCCB I2C bus: %s", esp_err_to_name(ret));
+    } else {
+        s_sccb_i2c_opened = true;
     }
     return ret;
 #endif
 }
 #endif /* CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP */
+
+esp_err_t media_stream_set_sccb_i2c_bus(void *i2c_master_bus)
+{
+#if CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP && CONFIG_MEDIA_STREAM_NO_BSP
+    if (i2c_master_bus == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_sccb_i2c_opened) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_sccb_i2c_handle = (i2c_master_bus_handle_t)i2c_master_bus;
+    return ESP_OK;
+#else
+    (void)i2c_master_bus;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
 
 #if defined(MEDIA_STREAM_MIPI_CSI_XCLK_PIN) && MEDIA_STREAM_MIPI_CSI_XCLK_PIN > 0
 #if !CONFIG_CAMERA_XCLK_USE_ESP_CLOCK_ROUTER
@@ -1650,3 +1673,11 @@ esp_err_t esp_video_if_cleanup(void)
 }
 
 #endif /* MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE */
+
+#if !MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
+esp_err_t media_stream_set_sccb_i2c_bus(void *i2c_master_bus)
+{
+    (void)i2c_master_bus;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+#endif
