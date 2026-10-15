@@ -24,6 +24,9 @@ A WebRTC camera that streams video and audio to web browsers using AWS KVS (Kine
 
 Optional: I2S microphone/speaker for bidirectional audio; external antenna for better Wi-Fi range.
 
+**Other ESP32-S3 boards:** the S3 defaults select the ESP32-S3-EYE BSP, and there is no `CAMERA_MODULE_*` pinout choice on the S3 any more. For a different S3 board, set `CONFIG_BSP_SELECT_ESP_BSP_DEVKIT=y` and the DVP sensor, SCCB and XCLK pins under Media Stream Configuration; see
+[A board esp-bsp does not carry](../../components/media_stream/README.md#a-board-esp-bsp-does-not-carry).
+
 ## Build & Flash
 
 ```bash

@@ -6,7 +6,7 @@
  * reset/pwdn/xclk/power). Only the no-BSP case needs a static pin table, which
  * lives in the customized board header — edit it for a bare/custom board. The
  * interface-common macros below (device path, SCCB freq) are board-agnostic. */
-#if CONFIG_BSP_SELECT_NONE
+#if CONFIG_MEDIA_STREAM_NO_BSP
 #include "boards/customized/example_video_common_board.h"
 #endif
 

@@ -12,7 +12,7 @@
 #include "media_stream_caps.h"
 #if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
 
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
 #include "bsp/esp-bsp.h"
 #endif
 #include <assert.h>
@@ -1105,7 +1105,7 @@ esp_err_t esp_video_if_start(void)
  * also sits on, so esp_video must not own it. Without a BSP there is nobody
  * else to open it, so we do, from the pins the board header exports. */
 #if CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
 #define SCCB_I2C_HANDLE()   bsp_i2c_get_handle()
 #else
 static i2c_master_bus_handle_t s_sccb_i2c_handle;
@@ -1114,7 +1114,7 @@ static i2c_master_bus_handle_t s_sccb_i2c_handle;
 
 static esp_err_t sccb_i2c_bus_init(void)
 {
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
     /* media_stream_init() already brought the BSP I2C bus up; bsp_i2c_init()
      * itself is idempotent, so call it again defensively in case this path
      * is reached without media_stream_init() running first. */
@@ -1209,10 +1209,10 @@ static esp_err_t esp_video_hw_init(void)
 #endif
 
 /* The pin-based CSI config only compiles when Kconfig defines the pins, which it does
- * only under BSP_SELECT_NONE (Kconfig.projbuild: `if BSP_SELECT_NONE`). With a BSP
+ * only without a BSP (Kconfig.projbuild: `if MEDIA_STREAM_NO_BSP`). With a BSP
  * selected the board owns power, reset, XCLK and SCCB, and bsp_camera_start() below
  * performs the bring-up instead. */
-#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
     const esp_video_init_csi_config_t csi_config = {
         .sccb_config = {
 #if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
@@ -1258,7 +1258,7 @@ static esp_err_t esp_video_hw_init(void)
 #endif /* MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR */
 #endif /* MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR */
 
-#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
     /* Pins exist only without a BSP; with one, bsp_camera_start() brings the sensor up. */
     const esp_video_init_dvp_config_t dvp_config = {
         .sccb_config = {
@@ -1404,13 +1404,13 @@ enumeration fails with \"Configuration descriptor larger than control transfer m
 #endif /* MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR */
 
     const esp_video_init_config_t cam_config = {
-#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
         .csi = &csi_config,
 #if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR
         .cam_motor = &cam_motor_config,
 #endif
 #endif
-#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
         .dvp = &dvp_config,
 #endif
 #if MEDIA_STREAM_ENABLE_SPI_CAM_SENSOR
@@ -1433,7 +1433,7 @@ enumeration fails with \"Configuration descriptor larger than control transfer m
      * be undone — so a retry must never call it again. */
     s_esp_video_registered = true;
 
-#if !CONFIG_BSP_SELECT_NONE && !MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+#if !CONFIG_MEDIA_STREAM_NO_BSP && !MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
     /* BSP path: the selected board's BSP owns the camera pins, power and XCLK and
      * registers the CSI sensor with esp_video itself. Boards whose camera enable sits
      * behind an I2C IO expander (M5Stack Tab5) or a power switch (P4-EYE) only come up
@@ -1446,11 +1446,12 @@ enumeration fails with \"Configuration descriptor larger than control transfer m
     esp_err_t ret = bsp_camera_start(NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "bsp_camera_start failed: %s", esp_err_to_name(ret));
+        return ret;
     }
 #else
     ESP_LOGE(TAG, "The selected BSP has no camera; select a board with one "
-                  "(e.g. BSP_SELECT_ESP32_S3_EYE) or BSP_SELECT_NONE with the camera pins");
-    esp_err_t ret = ESP_ERR_NOT_SUPPORTED;
+                  "(e.g. BSP_SELECT_ESP32_S3_EYE), or BSP_SELECT_ESP_BSP_DEVKIT with the camera pins");
+    return ESP_ERR_NOT_SUPPORTED;
 #endif
 #else
     esp_err_t ret = esp_video_init(&cam_config);

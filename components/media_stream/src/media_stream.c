@@ -18,8 +18,8 @@
 #include "video_sink_priv.h"
 /* bsp_selector is gated to `target not in [esp32c5, esp32c6]` in
  * idf_component.yml — the header is missing on c-series builds. The
- * sole use of a BSP symbol (bsp_i2c_init at l.680) is already inside
- * a `#if CONFIG_IDF_TARGET_ESP32P4 && !CONFIG_BSP_SELECT_NONE` gate. */
+ * sole use of a BSP symbol (bsp_i2c_init in media_stream_init) is inside
+ * a `#if CONFIG_IDF_TARGET_ESP32P4 && !CONFIG_MEDIA_STREAM_NO_BSP` gate. */
 #if !CONFIG_IDF_TARGET_ESP32C5 && !CONFIG_IDF_TARGET_ESP32C6
 #include "bsp/esp-bsp.h"
 #endif
@@ -974,8 +974,10 @@ esp_err_t media_stream_init(video_capture_handle_t *video_handle, audio_capture_
         .codec_specific = NULL
     };
 
-#if CONFIG_IDF_TARGET_ESP32P4 && !CONFIG_BSP_SELECT_NONE
-    /* Bring the BSP I2C bus up once, here. Camera SCCB (via
+#if CONFIG_IDF_TARGET_ESP32P4 && !CONFIG_MEDIA_STREAM_NO_BSP
+    /* Bring the BSP I2C bus up once, here. Without a board BSP (esp_bsp_devkit) there is
+     * no BSP bus: the camera's SCCB bus comes from this component's pins or from the
+     * application (media_stream_set_sccb_i2c_bus()). Camera SCCB (via
      * bsp_i2c_get_handle()) and the ES8311 codec init both share this bus,
      * and the BSP's own bsp_i2c_init() is idempotent — letting the BSP own
      * the bus avoids the previous wrapper, which tried to second-guess

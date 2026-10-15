@@ -45,12 +45,21 @@ dependencies:
   # 1.6.1 and silently walk the BSP down to 4.0.1 (the first version with no
   # codec_dev dep) — which predates bsp_audio_codec_microphone_init and the
   # hw_cfg-based display config this component uses. Keep in lockstep with the BSP.
+  # Without a board BSP (MEDIA_STREAM_NO_BSP: esp_bsp_devkit or none) no codec is
+  # brought up here at all, so the pin does not apply — a board manager driving
+  # the board's codec needs 2.x.
   espressif/esp_codec_dev:
-    version: "~1.5"
+    version: "*"
+    matches:
+      - if: "$CONFIG{MEDIA_STREAM_NO_BSP_SEL} == 0"
+        version: "~1.5"
+      - if: "$CONFIG{MEDIA_STREAM_NO_BSP_SEL} == 1"
     rules:
       - if: "target != linux"
 
-  # BSP component from component manager
+  # BSP component from component manager. It refuses to configure with no board
+  # selected, so a board esp-bsp does not carry selects esp_bsp_devkit and sets
+  # the camera pins (MEDIA_STREAM_NO_BSP).
   espressif/bsp_selector:
     version: "^1.0.0"
     rules:

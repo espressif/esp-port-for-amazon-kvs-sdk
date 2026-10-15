@@ -359,6 +359,26 @@ webrtc_config.video_capture = my_custom_camera_if_get();
 - **ESP32** with external camera/audio via I2S/SPI
 - **Custom hardware** via interface implementation
 
+### A board esp-bsp does not carry
+
+`bsp_selector` is a dependency on every target but the C5, C6 and linux, and it refuses to
+configure with `BSP_SELECT_NONE`. A board it has no entry for selects `esp_bsp_devkit`, the one
+entry with no target dependency: `CONFIG_BSP_SELECT_ESP_BSP_DEVKIT=y`, with
+`CONFIG_BSP_SELECT_GLIB=n` and `CONFIG_BSP_ERROR_CHECK=n`. The devkit describes no camera, codec or
+display, so `MEDIA_STREAM_NO_BSP` is set and the camera comes up from this component's own pins:
+
+- **MIPI-CSI, DVP or SPI sensor:** set the sensor, SCCB, XCLK and reset/power-down pins under
+  Media Stream Configuration.
+- **A shared I2C bus:** with `MEDIA_STREAM_SCCB_I2C_INIT_BY_APP` (off by default here), hand the
+  camera a bus the application already opened with `media_stream_set_sccb_i2c_bus()`, so a codec,
+  touch panel or IO expander on the same bus keeps one master.
+- **USB-UVC camera:** needs no pins and no SCCB bus.
+- **Audio on the ESP32-P4:** the microphone and speaker come from a board BSP's codec, so a
+  board on this route sends and plays no audio.
+
+`esp_codec_dev` is not pinned to the BSPs' `~1.5` then, so a board manager can drive the board's
+codec with 2.x.
+
 ## Video Player (receive path)
 
 The receive path lets the device decode an inbound H.264 video stream from a

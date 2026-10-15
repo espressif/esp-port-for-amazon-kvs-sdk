@@ -51,7 +51,7 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #include "video_rate_ctrl_priv.h"
 #include "esp_video_if_cam_sel.h"   /* MEDIA_STREAM_ENABLE_*_CAM_SENSOR selection */
 
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
 #include "bsp/esp-bsp.h"
 #endif
 #if !USE_ESP_VIDEO_IF
