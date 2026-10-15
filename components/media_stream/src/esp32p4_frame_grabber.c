@@ -605,16 +605,28 @@ static _Atomic uint32_t s_live_cap_fps;
 static _Atomic uint32_t s_live_enc_fps;
 static _Atomic uint32_t s_live_enc_kbps;
 static _Atomic uint32_t s_live_enc_max_len;
+/* When the encoder's window last closed (ms). Nothing closes it while nothing is encoded,
+ * so the reader judges staleness rather than the encoder zeroing values on its way out. */
+static _Atomic uint32_t s_live_enc_at_ms;
+#define LIVE_STATS_STALE_MS  2000
 
 esp_err_t video_capture_get_live_stats(video_capture_live_stats_t *out)
 {
     if (out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    out->cap_fps             = atomic_load(&s_live_cap_fps);
-    out->enc_fps             = atomic_load(&s_live_enc_fps);
-    out->enc_kbps            = atomic_load(&s_live_enc_kbps);
-    out->enc_max_frame_bytes = atomic_load(&s_live_enc_max_len);
+    out->cap_fps = atomic_load(&s_live_cap_fps);
+    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (now_ms - atomic_load(&s_live_enc_at_ms) > LIVE_STATS_STALE_MS) {
+        /* The encoder is idle (no encoded sink) or stalled: it is producing nothing. */
+        out->enc_fps             = 0;
+        out->enc_kbps            = 0;
+        out->enc_max_frame_bytes = 0;
+    } else {
+        out->enc_fps             = atomic_load(&s_live_enc_fps);
+        out->enc_kbps            = atomic_load(&s_live_enc_kbps);
+        out->enc_max_frame_bytes = atomic_load(&s_live_enc_max_len);
+    }
     return ESP_OK;
 }
 
@@ -635,18 +647,27 @@ static void publish_encoded_frame(uint8_t *buffer, uint32_t len, esp_h264_frame_
 
     static uint64_t enc_fps_window_start_us;
     static uint32_t enc_fps_window_out;
-    /* Counted here rather than in video_sink_dispatch(): that returns early when
-     * no sink is enabled, so the achieved bitrate would read zero exactly when
-     * the camera is running with no consumer attached - which is the baseline
-     * measurement. This is encoder output, not dispatch. */
+    /* Counted here rather than in video_sink_dispatch(), so the numbers are what the
+     * encoder produced, whatever the sinks then did with it. */
     static uint64_t enc_window_bytes;
     static uint32_t enc_window_max_len;
+    static uint64_t enc_last_us;
+    uint64_t enc_now_us = esp_timer_get_time();
+    /* A gap the readers already treat as idle - the encoder sink was off while nothing took
+     * the stream - starts a fresh window; otherwise the first reading after it averages over
+     * the gap. */
+    if (enc_last_us != 0 && enc_now_us - enc_last_us >= LIVE_STATS_STALE_MS * 1000ULL) {
+        enc_fps_window_start_us = 0;
+        enc_fps_window_out = 0;
+        enc_window_bytes = 0;
+        enc_window_max_len = 0;
+    }
+    enc_last_us = enc_now_us;
     enc_fps_window_out++;
     enc_window_bytes += len;
     if (len > enc_window_max_len) {
         enc_window_max_len = len;
     }
-    uint64_t enc_now_us = esp_timer_get_time();
     if (enc_fps_window_start_us == 0) {
         enc_fps_window_start_us = enc_now_us;
     } else if (enc_now_us - enc_fps_window_start_us >= 1000000ULL) {
@@ -667,6 +688,7 @@ static void publish_encoded_frame(uint8_t *buffer, uint32_t len, esp_h264_frame_
         atomic_store(&s_live_enc_fps, enc_fps);
         atomic_store(&s_live_enc_kbps, kbps);
         atomic_store(&s_live_enc_max_len, enc_window_max_len);
+        atomic_store(&s_live_enc_at_ms, (uint32_t)(enc_now_us / 1000));
         enc_fps_window_start_us = enc_now_us;
         enc_fps_window_out = 0;
         enc_window_bytes = 0;
@@ -865,6 +887,8 @@ static uint32_t                s_enc_sink_fourcc;
 /* Last fps limit pushed into the sink above. Pump task only; kept so the common case is a
  * compare rather than a call into the bus. */
 static uint32_t                s_enc_fps_limit;
+/* Whether the pump last left the encoder sink enabled; see the idle gate in the pump. */
+static bool                    s_enc_sink_on;
 
 /* Name what the camera is actually producing, for the pump's label and for the choice of
  * encoder sink - both have to agree, so both come through here.
@@ -1080,6 +1104,7 @@ static esp_err_t register_raw_sink(void)
     }
     s_enc_sink_fourcc = want_fourcc;
     video_raw_sink_set_enabled(s_enc_sink, true);
+    s_enc_sink_on = true;
     return ESP_OK;
 }
 #endif /* USE_ESP_VIDEO_IF */
@@ -1235,6 +1260,21 @@ static void video_pump_task(void *arg)
                     enc_fps = cap_res.fps;
                 }
                 (void)h264_enc_set_fps(enc_fps);
+            }
+
+            /* Nothing takes the encoded stream right now - the camera is up for a raw
+             * consumer alone (a detector, a preview). Encoding would spend the S3's CPU or the
+             * P4's encoder on frames every sink drops, so the encoder sink is switched off:
+             * the bus then neither offers it frames nor converts them for it. A sink that is
+             * enabled waits for a keyframe, so on the way back one is asked for at once,
+             * rather than at the end of the GOP or after the PLI cooldown. */
+            const bool want_enc = video_sink_any_enabled();
+            if (want_enc != s_enc_sink_on) {
+                video_raw_sink_set_enabled(s_enc_sink, want_enc);
+                s_enc_sink_on = want_enc;
+                if (want_enc) {
+                    (void)h264_enc_request_idr_now();
+                }
             }
         }
 

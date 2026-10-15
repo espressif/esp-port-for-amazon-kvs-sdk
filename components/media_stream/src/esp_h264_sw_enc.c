@@ -53,6 +53,7 @@ static struct {
     _Atomic uint32_t pending_bitrate;   /* 0 = nothing pending */
     _Atomic uint32_t pending_fps;       /* 0 = nothing pending */
     atomic_bool      idr_requested;
+    atomic_bool      idr_now;           /* unthrottled: a sink has just started */
     bool             gop_overridden;
     uint8_t          frames_since_force;
     int64_t          last_force_us;
@@ -181,6 +182,15 @@ esp_err_t h264_enc_request_idr(void)
     return ESP_OK;
 }
 
+esp_err_t h264_enc_request_idr_now(void)
+{
+    if (s_enc.out_frame.raw_data.buffer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    atomic_store(&s_enc.idr_now, true);
+    return ESP_OK;
+}
+
 static void apply_pending(void)
 {
     const uint32_t bitrate = atomic_exchange(&s_enc.pending_bitrate, 0);
@@ -198,14 +208,17 @@ static void apply_pending(void)
 
     /* esp_h264 has no force-IDR for the software encoder, so the GOP is dropped to 1 for
      * as long as it takes an IDR to come out, the same trick the hardware wrapper uses. */
-    if (atomic_exchange(&s_enc.idr_requested, false) && !s_enc.gop_overridden) {
-        const int64_t now = esp_timer_get_time();
-        if (now - s_enc.last_force_us >= IDR_FORCE_MIN_INTERVAL_US &&
+    const bool pli = atomic_exchange(&s_enc.idr_requested, false);
+    const bool now = atomic_exchange(&s_enc.idr_now, false);
+    if ((pli || now) && !s_enc.gop_overridden) {
+        const int64_t t = esp_timer_get_time();
+        if ((now || t - s_enc.last_force_us >= IDR_FORCE_MIN_INTERVAL_US) &&
             esp_h264_enc_set_gop(s_enc.param, 1) == ESP_H264_ERR_OK) {
-            s_enc.last_force_us = now;
+            s_enc.last_force_us = t;
             s_enc.gop_overridden = true;
             s_enc.frames_since_force = 0;
-            ESP_LOGW(TAG, "PLI: forcing keyframe (GOP=1 until IDR emitted)");
+            ESP_LOGW(TAG, "%s: forcing keyframe (GOP=1 until IDR emitted)",
+                     now ? "sink started" : "PLI");
         }
     }
 }

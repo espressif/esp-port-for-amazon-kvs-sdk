@@ -36,7 +36,10 @@ esp_err_t h264_enc_set_bitrate(uint32_t bitrate);
 /** @brief The frame rate the encoder is offered; its per-frame bit budget follows it. */
 esp_err_t h264_enc_set_fps(uint32_t fps);
 uint32_t  h264_enc_get_bitrate(void);
+/** @brief A keyframe for a PLI; at most one a second, as a recent one already serves it. */
 esp_err_t h264_enc_request_idr(void);
+/** @brief A keyframe on the next frame, unthrottled, for a stream that has just started. */
+esp_err_t h264_enc_request_idr_now(void);
 void      h264_enc_destroy(void);
 
 /**
@@ -90,6 +93,11 @@ static inline esp_err_t h264_enc_set_fps(uint32_t fps)
 static inline esp_err_t h264_enc_request_idr(void)
 {
     return esp_h264_hw_enc_request_idr();
+}
+
+static inline esp_err_t h264_enc_request_idr_now(void)
+{
+    return esp_h264_hw_enc_request_idr_now();
 }
 
 static inline void h264_enc_destroy(void)

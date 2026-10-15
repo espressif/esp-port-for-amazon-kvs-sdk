@@ -116,6 +116,8 @@ esp_err_t esp_h264_hw_enc_set_bitrate(uint32_t bitrate);
 uint32_t esp_h264_hw_enc_get_bitrate(void);
 /* Request the next emitted frame be an IDR keyframe (PLI response). */
 esp_err_t esp_h264_hw_enc_request_idr(void);
+/* The same, bypassing the PLI throttle: a sink has just started taking the stream. */
+esp_err_t esp_h264_hw_enc_request_idr_now(void);
 void esp_h264_destroy_encoder();
 
 #else /* !MEDIA_STREAM_HAS_HW_H264_ENC */
@@ -157,6 +159,11 @@ static inline uint32_t esp_h264_hw_enc_get_bitrate(void)
 }
 
 static inline esp_err_t esp_h264_hw_enc_request_idr(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+static inline esp_err_t esp_h264_hw_enc_request_idr_now(void)
 {
     return ESP_ERR_NOT_SUPPORTED;
 }
