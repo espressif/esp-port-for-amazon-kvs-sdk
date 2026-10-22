@@ -108,8 +108,10 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # them, so the example turns it off and lets the application own the order.
 CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS_AUTO_INIT=n
 
-# Under network split the host drives association; the co-processor must not
-# start its own connect attempt when the STA interface comes up.
+# Under network split the host connects on STA_START (it usually starts Wi-Fi
+# before this app is up). app_wifi_prov here connects after applying its config
+# and reconnects on disconnect. esp_hosted's own connect on STA_START would race
+# them.
 CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT_WIFI_AUTO_CONNECT_ON_STA_START=n
 
 # Wi-Fi init config. The host sends its own on every boot and deep-sleep wake,

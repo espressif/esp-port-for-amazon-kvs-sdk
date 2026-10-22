@@ -165,6 +165,11 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        /* With network split too: the host starts Wi-Fi over RPC, usually before
+         * the co-processor's app is up, so this is the first connect on a
+         * provisioned co-processor. The co-processor also connects once it has
+         * applied its own config, and it owns reconnects (see STA_DISCONNECTED
+         * below). */
         if (!s_wifi_held) {
             esp_wifi_connect();
         }
@@ -172,14 +177,20 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     }
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        /* The host drives the connection, so nothing retries unless it does. */
         const wifi_event_sta_disconnected_t *d = event_data;
         xEventGroupClearBits(s_wifi_event_group, GOT_IP_BIT);
         if (s_wifi_held) {
             return;
         }
+#if !HOST_USES_STATIC_NETIF && CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT_NETIF_INTERNAL_STATIC
+        /* With network split the co-processor owns the link and reconnects on
+         * its own; a host esp_wifi_connect() here only races it. */
+        ESP_LOGW(TAG, "WiFi disconnected (reason %u), co-processor reconnects", d->reason);
+#else
+        /* The host drives the connection, so nothing retries unless it does. */
         ESP_LOGW(TAG, "WiFi disconnected (reason %u), reconnecting", d->reason);
         esp_wifi_connect();
+#endif
         return;
     }
 
