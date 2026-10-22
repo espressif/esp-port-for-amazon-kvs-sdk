@@ -1,4 +1,4 @@
-From 5e29f5f6d833fdd4b1ccdbcb5c551380cd5f0f78 Mon Sep 17 00:00:00 2001
+From cfe88b04de05178d49de84d70c679e5bc017ae45 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 4 Aug 2026 15:42:52 +0530
 Subject: [PATCH 3/3] Ice: accept already-connected TCP in
@@ -38,5 +38,5 @@ index a8b5939040..7818baeb5b 100644
      return FALSE;
  }
 -- 
-2.39.5 (Apple Git-154)
+2.43.0
 

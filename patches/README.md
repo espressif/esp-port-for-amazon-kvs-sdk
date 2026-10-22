@@ -26,9 +26,19 @@ cd ..
 
 ## Patch ledger
 
-Base: upstream `develop` at **`efdec3bf`** (1.20.0 plus ten upstream commits, ending with
-awslabs#2415). All three patches apply cleanly against this base (`git am`, no
-fuzz). The SDP-renegotiation patches were dropped earlier (that flow is upstream
+Base: upstream `develop` at **awslabs#2429** (docs). Since 1.20.0 it adds, among
+others:
+
+- awslabs#2399: negotiated data channels with an explicit stream id;
+- #2400: `iceServersFinal`;
+- #2401: freeing the signaling client during a reconnect;
+- #2417: the lws service-loop wake after a send;
+- #2425: fetch, disconnect and delete refused while a free runs, and messages received
+  during a free dropped.
+
+All three patches apply cleanly against this base (`git am`, no fuzz). 0001's
+`LwsApiCalls.c` part sits on top of #2401's reconnect and receive-worker code and #2425's
+message drop. The SDP-renegotiation patches were dropped earlier (that flow is upstream
 as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392, 0004 as
 awslabs#2385 and 0006 as awslabs#2415, so all three are dropped; the numbers of
 the remaining patches are unchanged.
@@ -62,8 +72,9 @@ two kinds of changes:
   - **ESP-IDF-specific (stays):** ConnectionListener custom thread for
     constrained-stack platforms, mbedtls-3.x compatibility shims, robustness
     fixes in `SocketConnection.c` and `Sctp.c`, and in `LwsApiCalls.c` the
-    reconnect/receive thread stacks and the longer API-call timeouts and TCP
-    keepalive.
+    reconnect/receive thread stacks (on top of #2401's `startReconnectHandler()`
+    and counted receive workers), the payload free on every receive-wrapper
+    free, and the longer API-call timeouts and TCP keepalive.
 
 > **lws callback rewrite removed.** 0001 used to carry the libwebsockets callback
 > and send-path changes of awslabs#2134 (partial HTTP body writes, a ping timer,
@@ -73,10 +84,11 @@ two kinds of changes:
 > from `awaitForResponse` before the response arrived. Checked end to end on the
 > ws-off path under ESP-EMU (`webrtc_classic`, P4 + C6): signaling, answer, ICE,
 > video and the data channel behave the same with and without them, and no short
-> write occurred on either. That run needed two ws-off fixes that are not part of
-> this patch set yet: waking the lws service loop with `lws_cancel_service()` after
-> queuing a send, and no file cache on ws-off (upstream `FileCache.c` puts 32
-> cache entries on the stack).
+> write occurred on either. That run needed two ws-off fixes:
+> - waking the lws service loop with `lws_cancel_service()` after queuing a send,
+>   upstream as awslabs#2417 and in the pinned base;
+> - no file cache on ws-off (upstream `FileCache.c` puts 32 cache entries on the
+>   stack), not part of this patch set yet.
 
 > **SDP buffer cap.** 0001 also lowers `MAX_SESSION_DESCRIPTION_INIT_SDP_LEN`
 > 25000 → 12000 to shrink `sendLwsMessage`'s static `encodedMessage` buffer (~13 KB of
