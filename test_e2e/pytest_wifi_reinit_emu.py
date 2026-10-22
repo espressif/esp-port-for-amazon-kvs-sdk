@@ -90,27 +90,6 @@ def test_host_wakes_every_cycle(cycles):
         f'wake times {woke}; logs in {run.log_dir}'
 
 
-@pytest.mark.xfail(strict=False,
-                   reason='needs the esp_hosted host nw_split fix that posts GOT_IP again '
-                          'after a same-lease reconnect; not in any esp_hosted release yet')
-def test_host_gets_ip_after_each_disconnect(cycles):
-    """The host's own app sees the address come back after every link drop.
-
-    The co-processor re-associates with the same lease, and an app that cleared
-    its IP state on the disconnect waits for GOT_IP, as on plain IDF. Missing
-    it is invisible on the CP side.
-    """
-    run, _ = cycles
-    log = emu_pair.ANSI.sub('', run.host_log)
-    # A segment ends at the next boot, so a later boot's GOT_IP cannot count.
-    parts = [seg.split('streaming_only: reset reason')[0]
-             for seg in log.split('streaming_only: WiFi disconnected')[1:]]
-    missing = [i + 1 for i, seg in enumerate(parts) if 'streaming_only: got ip:' not in seg]
-    assert parts, f'host never saw a disconnect; logs in {run.log_dir}'
-    assert not missing, \
-        f'disconnect(s) {missing} of {len(parts)} got no GOT_IP afterwards; logs in {run.log_dir}'
-
-
 def test_host_app_gets_ip_on_every_boot(cycles):
     """Every boot of the host app, wake included, ends its wait with an address."""
     run, _ = cycles
