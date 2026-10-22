@@ -215,6 +215,18 @@ esp_err_t app_wifi_prov_init(const app_wifi_prov_config_t *config)
         return start_ret;
     }
 
+#if CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT
+    /* Under network split the host may start Wi-Fi over RPC before this point.
+     * Its STA_START came before the station config above, and before the handler
+     * was registered, so nothing has connected with that config. Connect here
+     * unless already associated. If a connect is in flight, the driver rejects
+     * this one and that one carries on. */
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+        esp_wifi_connect();
+    }
+#endif
+
     if (cfg.wifi_connect_timeout_ms > 0) {
         return app_wifi_prov_wait_for_connection(cfg.wifi_connect_timeout_ms);
     }

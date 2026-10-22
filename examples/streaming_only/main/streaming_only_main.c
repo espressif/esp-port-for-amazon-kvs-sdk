@@ -286,23 +286,13 @@ static void wifi_init_sta(void)
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    /* Set the mode before any config. A device with no mode in its Wi-Fi NVS
+     * comes up in softAP after esp_wifi_init(), whatever esp_wifi.h says, and
+     * then rejects a station config with ESP_ERR_WIFI_MODE. */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
-    {
-        wifi_config_t sta = {0};
-        /* Provisioning wins: `wifi-set` stores credentials the co-processor
-         * keeps in its own NVS, and those must survive a reflash. The Kconfig
-         * pair is only a fallback for a board that has never been provisioned. */
-        if (esp_wifi_get_config(WIFI_IF_STA, &sta) == ESP_OK &&
-            sta.sta.ssid[0] == '\0' && CONFIG_ESP_WIFI_SSID[0] != '\0') {
-            strlcpy((char *)sta.sta.ssid, CONFIG_ESP_WIFI_SSID, sizeof(sta.sta.ssid));
-            strlcpy((char *)sta.sta.password, CONFIG_ESP_WIFI_PASSWORD,
-                    sizeof(sta.sta.password));
-            ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-            ESP_LOGI(TAG, "not provisioned; using Kconfig SSID '%s'",
-                     CONFIG_ESP_WIFI_SSID);
-        }
-    }
-
+    /* The co-processor owns the Wi-Fi credentials: it provisions them and
+     * connects. The host sets no station config, so it cannot overwrite them. */
     ESP_ERROR_CHECK(esp_wifi_start());
 
     /* The address can predate the handler: hosted brings the transport up in
