@@ -299,21 +299,27 @@ STATUS checkAndStoreClockSkew(PSignalingClient pSignalingClient, PCHAR dateHeade
                 }
             }
 
-            // Store the clockSkew in the hash table if we detected skew
-            if (clockSkew != 0 && pSignalingClient->pStateMachine != NULL &&
+            // Keep the stored skew in step with the clock: replace it when the
+            // skew changes and drop it once there is none. A skew stored before
+            // SNTP set the clock would otherwise be added to the corrected
+            // time, and every signed request after that is rejected as
+            // "Signature not yet current".
+            if (pSignalingClient->pStateMachine != NULL &&
                 pSignalingClient->diagnostics.pEndpointToClockSkewHashMap != NULL) {
+                BOOL stored = FALSE;
 
                 CHK_STATUS(getStateMachineCurrentState(pSignalingClient->pStateMachine, &pStateMachineState));
                 pClockSkewMap = pSignalingClient->diagnostics.pEndpointToClockSkewHashMap;
 
-                // Update the global time
-                gServerTime = serverTime;
-
-                // Store the skew in the hash table
-                CHK_STATUS(hashTablePut(pClockSkewMap, pStateMachineState->state, clockSkew));
-                ESP_LOGI(TAG, "Stored clock skew in hash table for state 0x%" PRIx64, pStateMachineState->state);
-            } else {
-                ESP_LOGD(TAG, "Time skew is within threshold, not fixing");
+                if (clockSkew != 0) {
+                    // Update the global time
+                    gServerTime = serverTime;
+                    CHK_STATUS(hashTableUpsert(pClockSkewMap, pStateMachineState->state, clockSkew));
+                    ESP_LOGI(TAG, "Stored clock skew in hash table for state 0x%" PRIx64, pStateMachineState->state);
+                } else if (STATUS_SUCCEEDED(hashTableContains(pClockSkewMap, pStateMachineState->state, &stored)) && stored) {
+                    CHK_STATUS(hashTableRemove(pClockSkewMap, pStateMachineState->state));
+                    ESP_LOGI(TAG, "Clock skew gone, cleared it for state 0x%" PRIx64, pStateMachineState->state);
+                }
             }
         }
     } else {
