@@ -700,6 +700,7 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
     PStateMachineState pState = NULL;
+    BOOL wasConnected = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
@@ -710,7 +711,8 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
                                                     SIGNALING_STATE_JOIN_SESSION_CONNECTED));
 
     // Check if we are already connected
-    CHK(!ATOMIC_LOAD_BOOL(&pSignalingClient->connected) || pSignalingClient->mediaStorageConfig.storageStatus, retStatus);
+    wasConnected = ATOMIC_LOAD_BOOL(&pSignalingClient->connected);
+    CHK(!wasConnected || pSignalingClient->mediaStorageConfig.storageStatus, retStatus);
 
     // Store the signaling state in case we error/timeout so we can re-set it on exit
     CHK_STATUS(getStateMachineCurrentState(pSignalingClient->pStateMachine, &pState));
@@ -726,6 +728,16 @@ CleanUp:
 
     // Re-set the state if we failed
     if (STATUS_FAILED(retStatus) && (pState != NULL)) {
+        /* A WebSocket can still connect after the deadline. Close it, or
+         * pSignalingClient->connected stays set while the state machine is
+         * back where it started, and every later connect returns at once.
+         * Clear the result too: whatever the late connection stored would
+         * otherwise keep the restored state (READY on OK) where it is. A
+         * media-storage join that started connected keeps its WebSocket. */
+        if (!wasConnected) {
+            terminateLwsListenerLoop(pSignalingClient);
+            ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_NOT_SET);
+        }
         resetStateMachineRetryCount(pSignalingClient->pStateMachine);
         setStateMachineCurrentState(pSignalingClient->pStateMachine, pState->state);
     }
@@ -961,6 +973,7 @@ STATUS refresh_ice_configuration(PSignalingClient pSignalingClient)
     UINT32 iceRefreshErrLen;
     UINT64 curTime;
     BOOL locked = FALSE;
+    BOOL resultChanged = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
@@ -984,6 +997,7 @@ STATUS refresh_ice_configuration(PSignalingClient pSignalingClient)
     // Force the state machine to revert back to get ICE configuration without re-connection
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_SIGNALING_RECONNECT_ICE);
     ATOMIC_STORE(&pSignalingClient->refreshIceConfig, TRUE);
+    resultChanged = TRUE;
     DLOGI("Retrieving ICE config through getIceServerConfig call again");
     // Iterate the state machinery in steady states only - ready / connected / join session connected
     if (pStateMachineState->state == SIGNALING_STATE_READY || pStateMachineState->state == SIGNALING_STATE_CONNECTED ||
@@ -1009,11 +1023,19 @@ CleanUp:
             setStateMachineCurrentState(pSignalingClient->pStateMachine, pStateMachineState->state);
         }
 
-        /* Reset the result to OK to prevent further state transitions.
-         * This is critical to avoid infinite loops where the state machine
-         * continuously tries to transition based on stale error results.
-         */
-        ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
+        /* Undo our forced RECONNECT_ICE, or the restored state keeps
+         * transitioning on it. The replacement has to suit that state:
+         * connected stays connected on OK, but ready only moves on to connect
+         * with no result set - ready with OK stays ready, and signaling never
+         * reconnects. If we failed before forcing anything, the result belongs
+         * to whatever call is in flight and is left alone. */
+        if (resultChanged) {
+            BOOL wasConnected = pStateMachineState != NULL &&
+                                (pStateMachineState->state == SIGNALING_STATE_CONNECTED ||
+                                 pStateMachineState->state == SIGNALING_STATE_JOIN_SESSION_CONNECTED);
+            ATOMIC_STORE(&pSignalingClient->result,
+                         (SIZE_T) (wasConnected ? SERVICE_CALL_RESULT_OK : SERVICE_CALL_RESULT_NOT_SET));
+        }
 
         // Need to invoke the error handler callback
         if (pSignalingClient->signalingClientCallbacks.errorReportFn != NULL) {

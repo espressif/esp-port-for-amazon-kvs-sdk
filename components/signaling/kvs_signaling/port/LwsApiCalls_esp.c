@@ -2753,7 +2753,10 @@ STATUS terminateLwsListenerLoop(PSignalingClient pSignalingClient)
     STATUS retStatus = STATUS_SUCCESS;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
-    // Nothing to do here
+    /* As upstream: close the connection. A disconnect that leaves the
+     * WebSocket up also leaves pSignalingClient->connected set, and the next
+     * connect then returns at once without connecting. */
+    terminateEspSignalingClient(pSignalingClient);
 
 CleanUp:
 
