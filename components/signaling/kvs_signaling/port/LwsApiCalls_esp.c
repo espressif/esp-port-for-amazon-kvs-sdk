@@ -50,8 +50,10 @@
 #define HTTP_REQUEST_BUFFER_SIZE (4 * 1024) // Request buffer for http client
 #define HTTP_REQUEST_TIMEOUT_MS   5000 // 5 seconds
 
-// Default connection timeout increased for ESP (since connections can take longer)
-#define ESP_SIGNALING_DEFAULT_CONNECT_TIMEOUT (10 * HUNDREDS_OF_NANOS_IN_A_SECOND) // 10 seconds
+/* WebSocket connect timeout. On an ESP32-C6 the TLS handshake plus the upgrade
+ * takes about 9 s, so 10 s gave up on connects that were about to complete.
+ * The whole connect has 30 s (ESP_SIGNALING_CONNECT_SYNC_TIMEOUT). */
+#define ESP_SIGNALING_DEFAULT_CONNECT_TIMEOUT (20 * HUNDREDS_OF_NANOS_IN_A_SECOND)
 
 // Additional status codes
 // Create our own status code definitions since these don't exist in the original code

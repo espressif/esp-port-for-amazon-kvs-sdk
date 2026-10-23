@@ -19,6 +19,12 @@
 #define SIGNALING_CACHE_VERSION      "v1"   // 2 chars for future compatibility
 #define MAX_NVS_KEY_LEN              16     // NVS key limit: 15 chars + NULL terminator
 
+/* Deadline for a whole fetch or connect, from the current state up to READY or
+ * CONNECTED. The SDK's 15 s fits a desktop; on an ESP32-C6 each HTTPS call
+ * takes 3-7 s, so endpoint + ICE config + WebSocket after a reconnect often
+ * runs past it. */
+#define ESP_SIGNALING_CONNECT_SYNC_TIMEOUT (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+
 /**
  * @brief Generate NVS key for signaling cache entry
  *
@@ -682,7 +688,7 @@ STATUS signalingFetchSync(PSignalingClient pSignalingClient)
     if (result != SERVICE_CALL_NOT_AUTHORIZED) {
         ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
     }
-    CHK_STATUS(signalingStateMachineIterator(pSignalingClient, SIGNALING_GET_CURRENT_TIME(pSignalingClient) + SIGNALING_CONNECT_STATE_TIMEOUT,
+    CHK_STATUS(signalingStateMachineIterator(pSignalingClient, SIGNALING_GET_CURRENT_TIME(pSignalingClient) + ESP_SIGNALING_CONNECT_SYNC_TIMEOUT,
                                              SIGNALING_STATE_READY));
 
 CleanUp:
@@ -718,7 +724,7 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
     CHK_STATUS(getStateMachineCurrentState(pSignalingClient->pStateMachine, &pState));
 
     // If media storage is enabled we keep going until join session connected, otherwise stop at connected.
-    CHK_STATUS(signalingStateMachineIterator(pSignalingClient, SIGNALING_GET_CURRENT_TIME(pSignalingClient) + SIGNALING_CONNECT_STATE_TIMEOUT,
+    CHK_STATUS(signalingStateMachineIterator(pSignalingClient, SIGNALING_GET_CURRENT_TIME(pSignalingClient) + ESP_SIGNALING_CONNECT_SYNC_TIMEOUT,
                                              pSignalingClient->mediaStorageConfig.storageStatus ? SIGNALING_STATE_JOIN_SESSION_CONNECTED
                                                                                                 : SIGNALING_STATE_CONNECTED));
 
