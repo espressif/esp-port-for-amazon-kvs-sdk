@@ -28,6 +28,18 @@
 // How long a free waits for queued message jobs, as kvs_signaling's own drain does
 #define ESP_SIGNALING_FREE_DRAIN_TIMEOUT_MS 2000
 
+/* THREAD_SLEEP_UNTIL() that ends early once the client is shutting down. A
+ * state's retry backoff can reach 10 s, and a terminate during an outage
+ * should not sit it out. */
+VOID signalingSleepUntilUnlessShutdown(PSignalingClient pSignalingClient, UINT64 time)
+{
+    UINT64 now;
+
+    while (!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown) && (now = GETTIME()) < time) {
+        THREAD_SLEEP(MIN(time - now, 100 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
+    }
+}
+
 /**
  * @brief Generate NVS key for signaling cache entry
  *
@@ -731,6 +743,12 @@ STATUS signalingFetchSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
+    /* A terminate stopped the client mid-fetch (see abortKvsSignalingClient()).
+     * The iterator then returns whatever its last step did, so report the
+     * shutdown instead: Client.c stops retrying on it, without a backoff. */
+    if (pSignalingClient != NULL && ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        retStatus = STATUS_SIGNALING_FREE_IN_PROGRESS;
+    }
     // An expected outcome during freeSignalingClient(), already logged at WARN above. The state
     // machine belongs to freeSignaling() by then, so leave it alone.
     if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
@@ -751,6 +769,8 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
     BOOL wasConnected = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+    CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SIGNALING_FREE_IN_PROGRESS,
+             "signalingClientConnectSync() refused: the client is shutting down");
 
     // Validate the state
     CHK_STATUS(acceptSignalingStateMachineState(pSignalingClient,
@@ -772,6 +792,10 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
+    // As in signalingFetchSync(): a shutdown during the connect ends it
+    if (pSignalingClient != NULL && ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        retStatus = STATUS_SIGNALING_FREE_IN_PROGRESS;
+    }
     // Re-set the state if we failed, unless a free is under way: the state machine belongs to
     // freeSignaling() then (the network wait returns FREE_IN_PROGRESS from inside it)
     if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
@@ -1302,7 +1326,7 @@ STATUS describeChannel(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
     CHECK_SIGNALING_CREDENTIALS_EXPIRATION(pSignalingClient);
@@ -1369,7 +1393,7 @@ STATUS createChannel(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -1415,7 +1439,7 @@ STATUS getChannelEndpoint(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -1527,7 +1551,7 @@ STATUS getIceConfig(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -1570,7 +1594,7 @@ STATUS deleteChannel(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -1614,7 +1638,7 @@ STATUS connectSignalingChannel(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -1661,7 +1685,7 @@ STATUS joinStorageSession(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     CHK(pSignalingClient->mediaStorageConfig.storageStatus == TRUE, STATUS_SIGNALING_MEDIA_STORAGE_DISABLED);
     // Check for the stale credentials
@@ -1709,7 +1733,7 @@ STATUS describeMediaStorageConf(PSignalingClient pSignalingClient, UINT64 time)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
     CHECK_SIGNALING_CREDENTIALS_EXPIRATION(pSignalingClient);

@@ -24,6 +24,10 @@ STATUS refresh_ice_configuration(PSignalingClient pSignalingClient);
 
 // True on one of the tasks the client's callbacks run on (esp_websocket's, the work queue's)
 BOOL isEspSignalingTask(PSignalingClient pSignalingClient);
+// Wake a signaling call waiting for the network, so it re-checks the client's shutdown flag
+VOID wakeEspSignalingWaits(VOID);
+// A state's backoff sleep, cut short once the client is shutting down
+VOID signalingSleepUntilUnlessShutdown(PSignalingClient pSignalingClient, UINT64 time);
 
 #ifdef __cplusplus
 }

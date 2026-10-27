@@ -2229,6 +2229,14 @@ WEBRTC_STATUS app_webrtc_terminate(void)
         if (!gRunTaskTearingDown && gSampleConfiguration != NULL) {
             ATOMIC_STORE_BOOL(&gSampleConfiguration->appTerminateFlag, TRUE);
             CVAR_BROADCAST(gSampleConfiguration->cvar);
+            /* The run task may be inside a signaling connect, which only checks
+             * the flag when it returns: minutes, during an outage. Cut it short.
+             * Safe here: the run task frees the client only after setting
+             * gRunTaskTearingDown under this lock. */
+            if (gSignalingClientData != NULL && gWebRtcAppConfig.signaling_client_if != NULL &&
+                gWebRtcAppConfig.signaling_client_if->abort != NULL) {
+                gWebRtcAppConfig.signaling_client_if->abort(gSignalingClientData);
+            }
         }
         pthread_mutex_unlock(&gRunTaskLock);
         if (xTaskGetCurrentTaskHandle() == gWebRtcRunTaskHandle) {

@@ -1494,6 +1494,12 @@ STATUS connectEspSignalingClient(PSignalingClient pSignalingClient)
             break;
         }
 
+        // A terminate stopped the client; don't wait out the connect timeout
+        if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+            retStatus = STATUS_SIGNALING_FREE_IN_PROGRESS;
+            break;
+        }
+
         // Check for error conditions that should cause immediate exit
         if (callResult != SERVICE_CALL_RESULT_NOT_SET && callResult != SERVICE_CALL_RESULT_OK) {
             ESP_LOGW(TAG, "WebSocket connection failed with call result: %d, exiting wait loop", callResult);
@@ -1579,7 +1585,7 @@ STATUS connectSignalingChannelEsp(PSignalingClient pSignalingClient, UINT64 time
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -2309,7 +2315,7 @@ STATUS deleteChannelEsp(PSignalingClient pSignalingClient, UINT64 time)
     body = (PCHAR) MEMCALLOC(1, SIGNALING_HTTP_BODY_LEN);
     CHK(body != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -2366,7 +2372,7 @@ STATUS joinStorageSessionEsp(PSignalingClient pSignalingClient, UINT64 time)
     body = (PCHAR) MEMCALLOC(1, SIGNALING_HTTP_BODY_LEN);
     CHK(body != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -2427,7 +2433,7 @@ STATUS describeMediaStorageConfEsp(PSignalingClient pSignalingClient, UINT64 tim
     body = (PCHAR) MEMCALLOC(1, SIGNALING_HTTP_BODY_LEN);
     CHK(body != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
-    THREAD_SLEEP_UNTIL(time);
+    signalingSleepUntilUnlessShutdown(pSignalingClient, time);
 
     // Check for the stale credentials
     CHK(pSignalingClient->pAwsCredentials != NULL, STATUS_NULL_ARG);
@@ -2941,6 +2947,16 @@ CleanUp:
     }
 
     return retStatus;
+}
+
+VOID wakeEspSignalingWaits(VOID)
+{
+#ifdef ESP_SIGNALING_FOLLOWS_WIFI
+    // Created once and never freed, so this is safe from any task
+    if (s_networkEvents != NULL) {
+        xEventGroupSetBits(s_networkEvents, NETWORK_WAKE_BIT);
+    }
+#endif
 }
 
 // Implement the terminateLwsListenerLoop function

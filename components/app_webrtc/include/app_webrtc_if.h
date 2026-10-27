@@ -268,6 +268,11 @@ typedef struct {
     // NULL) so the re-send buffer frees its slots at teardown, not at the retry cap
     // or age bound.
     WEBRTC_STATUS (*purge_peer_candidates)(void *pSignalingClient, const char *peer_id);
+
+    // Make a connect running on another task give up soon, without blocking
+    // (optional; may be NULL). app_webrtc_terminate() calls it so a terminate
+    // during an outage need not wait out the reconnect; free follows.
+    WEBRTC_STATUS (*abort)(void *pSignalingClient);
 } webrtc_signaling_client_if_t;
 
 /**
