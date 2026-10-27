@@ -114,6 +114,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`APP_WEBRTC_EVENT_SENT_ANSWER`** is raised once signaling has sent or
+  buffered the answer, not before the send. A failed answer raises
+  `APP_WEBRTC_EVENT_SIGNALING_ERROR` with the peer id instead. Apps that act on
+  `SENT_ANSWER`, such as the power-save handler stopping its park timer, now see
+  it only for an answer that goes out or will be re-sent. See `API_USAGE.md` for
+  a buffered answer that never goes out.
 - esp_camera: `join-room` leaves the current room first instead of failing with
   "Already connected"; a separate `disconnect` is no longer needed.
 - **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under
@@ -128,6 +134,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   camera falls back to defaults.
 
 ### Fixed
+
+- **KVS signaling:** an SDP answer sent while the signaling WebSocket was
+  reconnecting was lost, and the viewer never connected. This happens when a
+  viewer offer wakes a parked host and the link drops before the answer goes out
+  (Wi-Fi re-init, AP drop, AWS FIN).
+  - A failed answer is now buffered, one per peer, and re-sent on reconnect
+    ahead of that peer's candidates. An answer more than 30 s old is dropped,
+    since its session has timed out by then.
+  - The client counts as disconnected from the moment it leaves CONNECTED, so
+    the re-send buffer is used during a WebSocket-error reconnect too, which
+    never passes DISCONNECTED.
 
 - **AppRTC:** a WebSocket frame larger than one read (typically an SDP offer or
   answer) arrives as several events; each was parsed on its own and failed, so the
