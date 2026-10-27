@@ -949,11 +949,6 @@ static WEBRTC_STATUS kvs_pc_free(void *pPeerConnectionClient)
     // Stop and cleanup ICE stats timer properly
     kvs_stopIceStats(client_data);  // This handles the timer cancellation safely
 
-    // Cleanup stats lock
-    if (IS_VALID_MUTEX_VALUE(client_data->statsLock)) {
-        MUTEX_FREE(client_data->statsLock);
-    }
-
     // Cleanup timer queue
     if (IS_VALID_TIMER_QUEUE_HANDLE(client_data->timer_queue)) {
         timerQueueFree(&client_data->timer_queue);
@@ -974,6 +969,12 @@ static WEBRTC_STATUS kvs_pc_free(void *pPeerConnectionClient)
             hashTableFree(client_data->activeSessions);
             client_data->activeSessions = NULL;
         }
+    }
+
+    // Free the stats lock only now: the session table cleanup above still takes it
+    if (IS_VALID_MUTEX_VALUE(client_data->statsLock)) {
+        MUTEX_FREE(client_data->statsLock);
+        client_data->statsLock = INVALID_MUTEX_VALUE;
     }
 
     // Free ICE servers (always heap-allocated or NULL)
