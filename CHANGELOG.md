@@ -197,6 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moved KVS threads to SPIRAM, fixed thread-naming collision with lwIP.
 - SCTP init stalling 1 s on every boot. usrsctp handed its lwIP calls to the
   tcpip thread even when already on it, then waited for itself (esp_usrsctp bump).
+- `app_webrtc_terminate()` never finished on ESP and gave up after 45 s.
+  - usrsctp's two rwlocks were never created: ESP-IDF rejects the attribute
+    object they were initialised with. SCTP teardown then waited forever for a
+    try-lock that could not succeed (esp_usrsctp bump). The locks also never
+    locked anything until now.
+  - The peer connection client's free then took the stats lock after freeing it.
+
+  Terminate now completes in under a second.
 
 ### CI and testing
 
