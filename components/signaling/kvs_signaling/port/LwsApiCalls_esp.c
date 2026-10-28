@@ -8,6 +8,7 @@
  * Implementation of a API calls based on LibWebSocket
  */
 #define LOG_CLASS "LwsApiCallsESP"
+#include <errno.h>
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 #include "Signaling_esp.h"
 #include "Signaling/LwsApiCalls.h"
@@ -17,11 +18,20 @@
 // ESP-specific includes
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_crt_bundle.h"
 #include "esp_websocket_client.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
+/* Signaling calls follow the station only where there is Wi-Fi, local or over
+ * esp_wifi_remote (a P4 with a C6 sets ESP_WIFI_REMOTE_ENABLED); elsewhere
+ * esp_wifi is headers only. */
+#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_HOST_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
+#define ESP_SIGNALING_FOLLOWS_WIFI 1
+#include "esp_wifi.h"
+#endif
 #include "esp_work_queue.h"
 
 #include "DataBuffer.h"
@@ -50,8 +60,16 @@
 #define HTTP_REQUEST_BUFFER_SIZE (4 * 1024) // Request buffer for http client
 #define HTTP_REQUEST_TIMEOUT_MS   5000 // 5 seconds
 
-// Default connection timeout increased for ESP (since connections can take longer)
-#define ESP_SIGNALING_DEFAULT_CONNECT_TIMEOUT (10 * HUNDREDS_OF_NANOS_IN_A_SECOND) // 10 seconds
+/* WebSocket connect timeout. On an ESP32-C6 the TLS handshake plus the upgrade
+ * takes about 9 s, so 10 s gave up on connects that were about to complete.
+ * The whole connect has 30 s (ESP_SIGNALING_CONNECT_SYNC_TIMEOUT). */
+#define ESP_SIGNALING_DEFAULT_CONNECT_TIMEOUT (20 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+
+/* How long signaling calls wait, together, for the station to have an address
+ * again. GOT_IP comes 4-7 s after a drop on a P4 + C6; with this budget, a
+ * fetch and a connect during an outage take about 24 s, inside app_webrtc's
+ * 30 s reconnect drain. */
+#define ESP_SIGNALING_NETWORK_WAIT_MS 10000
 
 // Additional status codes
 // Create our own status code definitions since these don't exist in the original code
@@ -244,6 +262,165 @@ static time_t utc_tm_to_epoch(struct tm *tm)
     return (time_t)seconds;
 }
 
+/* Whether the station can carry traffic. It loses that on a disconnect and
+ * gets it back with GOT_IP. Neither the netif nor the association says so:
+ * across a drop the netif stays up with the same lease, and the station
+ * re-associates a few seconds before traffic flows again ("Host is
+ * unreachable" in between). */
+#ifdef ESP_SIGNALING_FOLLOWS_WIFI
+#define NETWORK_READY_BIT BIT0
+// Set by terminateLwsListenerLoop(), so a waiting call notices a free at once
+#define NETWORK_WAKE_BIT  BIT1
+
+static EventGroupHandle_t s_networkEvents = NULL;
+static portMUX_TYPE s_networkLock = portMUX_INITIALIZER_UNLOCKED;
+/* When the current outage's wait runs out, 0 before the first wait. One wait
+ * per outage: the calls of a fetch and a connect would otherwise each wait,
+ * and together outlast app_webrtc's reconnect drain. */
+static UINT64 s_outageWaitEndMs = 0;
+static BOOL s_networkFollowFailed = FALSE;
+
+static UINT64 nowMs(VOID)
+{
+    return (UINT64) (esp_timer_get_time() / 1000);
+}
+
+static VOID markNetworkDown(VOID)
+{
+    /* Only the transition starts an outage: a station that cannot find its AP
+     * disconnects again every few seconds. The budget is reset before READY
+     * clears, so a call that sees READY clear also sees the new outage. */
+    if (xEventGroupGetBits(s_networkEvents) & NETWORK_READY_BIT) {
+        portENTER_CRITICAL(&s_networkLock);
+        s_outageWaitEndMs = 0;
+        portEXIT_CRITICAL(&s_networkLock);
+        xEventGroupClearBits(s_networkEvents, NETWORK_READY_BIT);
+    }
+}
+
+static VOID onNetworkEvent(PVOID arg, esp_event_base_t base, INT32 id, PVOID data)
+{
+    UNUSED_PARAM(arg);
+    UNUSED_PARAM(data);
+    if (s_networkEvents == NULL) {
+        return;
+    }
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        markNetworkDown();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(s_networkEvents, NETWORK_READY_BIT);
+    }
+}
+#endif
+
+/* A call can fail on the drop before WIFI_EVENT_STA_DISCONNECTED reaches
+ * onNetworkEvent(): handlers registered earlier run first, and an application
+ * handler that reconnects blocks the loop (on esp_hosted, esp_wifi_connect() is
+ * an RPC). An unreachable host with the station not associated is the same
+ * drop, so the retry waits too. Only a station that reports itself not
+ * connected loses readiness: any other answer (associated, Wi-Fi not started,
+ * an RPC that failed) says nothing about the link. */
+static VOID noteNetworkError(INT32 err)
+{
+#ifdef ESP_SIGNALING_FOLLOWS_WIFI
+    wifi_ap_record_t ap;
+
+    if (s_networkEvents == NULL || (err != EHOSTUNREACH && err != ENETUNREACH)) {
+        return;
+    }
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_ERR_WIFI_NOT_CONNECT) {
+        ESP_LOGI(TAG, "Network unreachable and station not associated; next signaling call waits");
+        markNetworkDown();
+    }
+#else
+    UNUSED_PARAM(err);
+#endif
+}
+
+/* Signaling reconnects as soon as the WebSocket drops, while Wi-Fi is still
+ * recovering. A call made then fails, and the retry goes the long way round
+ * (a new endpoint lookup, then ICE config, then the WebSocket), each a slow
+ * TLS handshake on a small co-processor. Wait for the station's address
+ * instead: up to ESP_SIGNALING_NETWORK_WAIT_MS per outage, shared by all calls
+ * in it, so a lost network still fails them. Fails at once when the client is
+ * shutting down. Runs inside the state machine, under the client's stateLock. */
+static STATUS waitForNetwork(PSignalingClient pSignalingClient)
+{
+#ifdef ESP_SIGNALING_FOLLOWS_WIFI
+    UINT64 now, end;
+    EventBits_t bits;
+
+    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        return STATUS_INVALID_OPERATION;
+    }
+    /* The first signaling call runs with the network up, so registering then
+     * starts from the right state. */
+    if (s_networkEvents == NULL) {
+        EventGroupHandle_t events;
+
+        if (s_networkFollowFailed) {
+            return STATUS_SUCCESS;
+        }
+        // Both handlers or neither: one without the other would leave READY clear for good
+        events = xEventGroupCreate();
+        if (events == NULL ||
+            esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, onNetworkEvent, NULL) != ESP_OK) {
+            goto followFailed;
+        }
+        if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, onNetworkEvent, NULL) != ESP_OK) {
+            esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, onNetworkEvent);
+            goto followFailed;
+        }
+        xEventGroupSetBits(events, NETWORK_READY_BIT);
+        s_networkEvents = events;
+        return STATUS_SUCCESS;
+
+    followFailed:
+        if (events != NULL) {
+            vEventGroupDelete(events);
+        }
+        s_networkFollowFailed = TRUE;
+        ESP_LOGW(TAG, "Cannot follow network events; signaling calls will not wait for the network");
+        return STATUS_SUCCESS;
+    }
+    if (xEventGroupGetBits(s_networkEvents) & NETWORK_READY_BIT) {
+        return STATUS_SUCCESS;
+    }
+
+    now = nowMs();
+    portENTER_CRITICAL(&s_networkLock);
+    if (s_outageWaitEndMs == 0) {
+        s_outageWaitEndMs = now + ESP_SIGNALING_NETWORK_WAIT_MS;
+    }
+    end = s_outageWaitEndMs;
+    portEXIT_CRITICAL(&s_networkLock);
+    if (now >= end) {
+        return STATUS_SUCCESS;  // this outage's wait is spent; try the call
+    }
+
+    ESP_LOGI(TAG, "Network down; waiting up to %" PRIu64 " ms before signaling", end - now);
+    // Clear, then re-check: a terminate that set the bit before the clear has already set shutdown
+    xEventGroupClearBits(s_networkEvents, NETWORK_WAKE_BIT);
+    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        return STATUS_INVALID_OPERATION;
+    }
+    bits = xEventGroupWaitBits(s_networkEvents, NETWORK_READY_BIT | NETWORK_WAKE_BIT, pdFALSE, pdFALSE,
+                               pdMS_TO_TICKS(end - now));
+    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        ESP_LOGI(TAG, "Signaling client shutting down; not waiting for the network");
+        return STATUS_INVALID_OPERATION;
+    }
+    if (bits & NETWORK_READY_BIT) {
+        ESP_LOGI(TAG, "Network back after %" PRIu64 " ms", nowMs() - now);
+    } else if (!(bits & NETWORK_WAKE_BIT)) {
+        ESP_LOGW(TAG, "Network still down; trying anyway");
+    }
+#else
+    UNUSED_PARAM(pSignalingClient);
+#endif
+    return STATUS_SUCCESS;
+}
+
 // Function to check for clock skew from the given time, updates the clock skew in the hash table if detected
 STATUS checkAndStoreClockSkew(PSignalingClient pSignalingClient, PCHAR dateHeaderValue)
 {
@@ -299,21 +476,27 @@ STATUS checkAndStoreClockSkew(PSignalingClient pSignalingClient, PCHAR dateHeade
                 }
             }
 
-            // Store the clockSkew in the hash table if we detected skew
-            if (clockSkew != 0 && pSignalingClient->pStateMachine != NULL &&
+            // Keep the stored skew in step with the clock: replace it when the
+            // skew changes and drop it once there is none. A skew stored before
+            // SNTP set the clock would otherwise be added to the corrected
+            // time, and every signed request after that is rejected as
+            // "Signature not yet current".
+            if (pSignalingClient->pStateMachine != NULL &&
                 pSignalingClient->diagnostics.pEndpointToClockSkewHashMap != NULL) {
+                BOOL stored = FALSE;
 
                 CHK_STATUS(getStateMachineCurrentState(pSignalingClient->pStateMachine, &pStateMachineState));
                 pClockSkewMap = pSignalingClient->diagnostics.pEndpointToClockSkewHashMap;
 
-                // Update the global time
-                gServerTime = serverTime;
-
-                // Store the skew in the hash table
-                CHK_STATUS(hashTablePut(pClockSkewMap, pStateMachineState->state, clockSkew));
-                ESP_LOGI(TAG, "Stored clock skew in hash table for state 0x%" PRIx64, pStateMachineState->state);
-            } else {
-                ESP_LOGD(TAG, "Time skew is within threshold, not fixing");
+                if (clockSkew != 0) {
+                    // Update the global time
+                    gServerTime = serverTime;
+                    CHK_STATUS(hashTableUpsert(pClockSkewMap, pStateMachineState->state, clockSkew));
+                    ESP_LOGI(TAG, "Stored clock skew in hash table for state 0x%" PRIx64, pStateMachineState->state);
+                } else if (STATUS_SUCCEEDED(hashTableContains(pClockSkewMap, pStateMachineState->state, &stored)) && stored) {
+                    CHK_STATUS(hashTableRemove(pClockSkewMap, pStateMachineState->state));
+                    ESP_LOGI(TAG, "Clock skew gone, cleared it for state 0x%" PRIx64, pStateMachineState->state);
+                }
             }
         }
     } else {
@@ -578,6 +761,11 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
                              data->data_len > 100 ? 100 : data->data_len,  // Limit to 100 chars
                              data->data_ptr);
                 }
+            }
+
+            // The socket errno is only filled in for a transport error
+            if (data != NULL && data->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT) {
+                noteNetworkError(data->error_handle.esp_transport_sock_errno);
             }
 
             if (pSignalingClient != NULL) {
@@ -1075,6 +1263,8 @@ STATUS connectEspSignalingClient(PSignalingClient pSignalingClient)
 
     // Log ESP-IDF version for debugging
     ESP_LOGI(TAG, "ESP-IDF Version: %s", esp_get_idf_version());
+
+    CHK_STATUS(waitForNetwork(pSignalingClient));
 
     // Initialize the global CA store
     CHK_STATUS(initializeGlobalCaStore());
@@ -2462,6 +2652,8 @@ STATUS performEspHttpRequest(PSignalingClient pSignalingClient, PCHAR url,
 
     CHK(pSignalingClient != NULL && url != NULL, STATUS_NULL_ARG);
 
+    CHK_STATUS(waitForNetwork(pSignalingClient));
+
     // Initialize the global CA store
     CHK_STATUS(initializeGlobalCaStore());
 
@@ -2592,6 +2784,7 @@ STATUS performEspHttpRequest(PSignalingClient pSignalingClient, PCHAR url,
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "HTTP request failed with error 0x%x: %s", err, esp_err_to_name(err));
+        noteNetworkError(esp_http_client_get_errno(client));
         // Store network connection timeout as the result
         if (pSignalingClient != NULL) {
             ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_NETWORK_CONNECTION_TIMEOUT);
@@ -2747,7 +2940,16 @@ STATUS terminateLwsListenerLoop(PSignalingClient pSignalingClient)
     STATUS retStatus = STATUS_SUCCESS;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
-    // Nothing to do here
+    /* As upstream: close the connection. A disconnect that leaves the
+     * WebSocket up also leaves pSignalingClient->connected set, and the next
+     * connect then returns at once without connecting. */
+    terminateEspSignalingClient(pSignalingClient);
+#ifdef ESP_SIGNALING_FOLLOWS_WIFI
+    // A call waiting for the network notices a free now, not when its wait runs out
+    if (s_networkEvents != NULL) {
+        xEventGroupSetBits(s_networkEvents, NETWORK_WAKE_BIT);
+    }
+#endif
 
 CleanUp:
 
