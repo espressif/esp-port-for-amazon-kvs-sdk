@@ -1368,7 +1368,13 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
 
     // Free the signaling client if initialized
     if (pClientData->signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
-        freeSignalingClient(&pClientData->signalingClientHandle);
+        STATUS freeStatus = freeSignalingClient(&pClientData->signalingClientHandle);
+        if (STATUS_FAILED(freeStatus)) {
+            // Refused (called from one of the client's own threads) or not drained in time:
+            // the client still runs and uses everything freed below, so leak it all instead
+            ESP_LOGE(TAG, "freeSignalingClient failed (0x%08" PRIx32 "); leaking the signaling client", freeStatus);
+            CHK(FALSE, freeStatus);
+        }
     }
 
     // Free the credential provider
