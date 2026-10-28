@@ -233,7 +233,7 @@ onConnectionStateChange(): New connection state 4  # CONNECTED
 **Solutions**:
 1. Verify ICE servers contain TURN URLs (starts with `turns:`)
 2. Check TURN credentials are not expired
-3. Ensure ESP-TLS is configured if using `turns:` over TCP
+3. For `turns:` (TURN over TLS), keep `CONFIG_USE_ESP_TLS_FOR_KVS=y` and `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y`
 
 ### Issue: Timing issues
 **Symptoms**: Credentials expired before use
@@ -259,7 +259,7 @@ onConnectionStateChange(): New connection state 4  # CONNECTED
 - `examples/signaling_only/main/signaling_only_main.c` - Sender logic
 - `examples/streaming_only/components/bridge_signaling/` - Receiver logic
 - `components/app_webrtc/src/app_webrtc.c` - ICE server retrieval
-- `components/kvs_webrtc/port/Tls_esp.c` - ESP-TLS for TURN over TCP
+- `components/kvs_webrtc/port/Tls_esp.c` - TLS for TURN over TLS (mbedTLS with the ESP-IDF certificate bundle)
 
 ## Performance Impact
 

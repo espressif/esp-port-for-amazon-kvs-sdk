@@ -97,17 +97,18 @@ list(APPEND kvs_webrtc_srcs
     "${CMAKE_CURRENT_SOURCE_DIR}/src/kvs_liveness.c"
 )
 
-# Conditionally add TLS implementation
+# port/Tls_esp.c is upstream Tls_mbedtls.c that trusts the ESP-IDF certificate
+# bundle; upstream reads a CA file from KVS_CA_CERT_PATH.
 if(CONFIG_USE_ESP_TLS_FOR_KVS)
     list(APPEND kvs_webrtc_srcs
         "${CMAKE_CURRENT_SOURCE_DIR}/port/Tls_esp.c"
     )
-    message(STATUS "Using ESP-TLS for KVS TLS sessions")
+    message(STATUS "KVS TLS: mbedTLS with the ESP-IDF certificate bundle")
 else()
     list(APPEND kvs_webrtc_srcs
         "${KVS_WEBRTC_ROOT}/src/source/Crypto/Tls_mbedtls.c"
     )
-    message(STATUS "Using direct mbedTLS for KVS TLS sessions")
+    message(STATUS "KVS TLS: upstream Tls_mbedtls.c (CA file at KVS_CA_CERT_PATH)")
 endif()
 
 # Network layer. ESP targets use port/Network_esp.c because ESP-IDF doesn't
@@ -128,11 +129,6 @@ set(requires "mbedtls" "lwip" "esp_timer" "nvs_flash" "freertos" "esp_system" "h
 # driver/spi_flash/esp_wifi exist as components only on real ESP targets.
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND requires "esp_wifi" "driver" "spi_flash")
-endif()
-
-# Add ESP-TLS dependency if using ESP-TLS implementation
-if(CONFIG_USE_ESP_TLS_FOR_KVS)
-    list(APPEND requires esp-tls)
 endif()
 
 idf_component_register(

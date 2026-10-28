@@ -167,6 +167,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **TURN over TLS (`turns:` servers) never worked on ESP.**
+  - The ESP TLS layer (`port/Tls_esp.c`) was a stub. It never started a
+    handshake, and it would have sent data in plaintext, so every TLS TURN
+    allocation timed out.
+  - Normal networks hid this because ICE used UDP or host candidates. Behind a
+    UDP-blocking firewall, viewers got the answer but no media.
+  - It is now the SDK's mbedTLS code, verifying the server against the ESP-IDF
+    certificate bundle, so TURN over TLS needs no CA file on the device.
 - **KVS signaling:** an SDP answer sent while the signaling WebSocket was
   reconnecting was lost, and the viewer never connected. This happens when a
   viewer offer wakes a parked host and the link drops before the answer goes out
