@@ -66,9 +66,10 @@ typedef enum {
 #define APP_WEBRTC_MAX_CORRELATION_ID_LEN          256
 
 // Upper bound on a (peer-controlled) signaling message payload — the SDP/ICE blob.
-// Double the ESP port's 12 KB SDP cap (patch 0003 lowers the SDK's
-// MAX_SESSION_DESCRIPTION_INIT_SDP_LEN to 12000), yet far below any size that could
-// wrap payload_len + 1; used to reject malformed/hostile lengths before allocation.
+// About twice the ESP port's SDP cap (KVS_SIGNALING_MESSAGE_LEN = 18432 in
+// kvs_webrtc's CMakeLists.txt makes the SDK's MAX_SESSION_DESCRIPTION_INIT_SDP_LEN
+// 13056), yet far below any size that could wrap payload_len + 1; used to reject
+// malformed/hostile lengths before allocation.
 #define APP_WEBRTC_MAX_MESSAGE_PAYLOAD_LEN         (24 * 1024)
 
 // ICE Server configuration limits (matching main SDK)
