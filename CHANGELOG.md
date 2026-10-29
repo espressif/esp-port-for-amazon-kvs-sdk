@@ -33,7 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - signaling: `freeSignalingClient()` during a reconnect (#2401), the lws
     service-loop wake after a send (#2417), and fetch, disconnect and delete
     refused during a free (#2425). The ESP signaling port (`Signaling_esp.c`,
-    `LwsApiCalls_esp.c`) follows #2425.
+    `LwsApiCalls_esp.c`) follows #2401 and #2425: it refuses a free from its own
+    tasks (the esp_websocket task, the work queue), and waits for queued message
+    jobs before it frees the client.
+  - For #2401's check, `GETTID()` now returns a per-thread id (the task handle on
+    chip, `pthread_self()` on the host). It was a constant, so every free while a
+    signaling thread ran was refused. A refused free now leaves the client and
+    everything it uses allocated, instead of freeing them under it.
 
   1.20.0 brought the SDP-renegotiation flow upstream (awslabs#2214), so the two
   local patches for it are dropped, and opt-in mbedTLS 4 support (awslabs#2325).

@@ -116,6 +116,7 @@ typedef struct __EspSignalingClientWrapper {
     MUTEX wsClientLock;
     BOOL isConnected;
     BOOL connectionAwaitingConfirmation; // Track pending connections
+    TaskHandle_t wsTask;                 // esp_websocket_client's task, from its events; NULL once destroyed
 } EspSignalingClientWrapper, *PEspSignalingClientWrapper;
 
 // Global ESP signaling client wrapper
@@ -532,6 +533,7 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
     }
 
     ESP_LOGD(TAG, "WebSocket event: %d, signalingClient: %p", (int)event_id, pSignalingClient);
+    pEspWrapper->wsTask = xTaskGetCurrentTaskHandle();
 
     /* Handle special opcodes up-front to prevent crashes when non-JSON frames
      * (like close frames) are processed as signaling messages */
@@ -1198,6 +1200,7 @@ STATUS terminateEspSignalingClient(PSignalingClient pSignalingClient)
             vTaskDelay(pdMS_TO_TICKS(200));
 
             esp_websocket_client_destroy(wsClientToDestroy);
+            gEspSignalingClientWrapper->wsTask = NULL;
             ESP_LOGI(TAG, "WebSocket client termination completed");
         } else {
             /* No client to destroy, just update state */
@@ -2941,6 +2944,15 @@ CleanUp:
 }
 
 // Implement the terminateLwsListenerLoop function
+BOOL isEspSignalingTask(PSignalingClient pSignalingClient)
+{
+    UNUSED_PARAM(pSignalingClient);
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+
+    // The websocket task delivers errorReportFn; the work queue runs the message jobs and their callbacks
+    return esp_work_queue_is_worker() || (gEspSignalingClientWrapper != NULL && gEspSignalingClientWrapper->wsTask == self);
+}
+
 STATUS terminateLwsListenerLoop(PSignalingClient pSignalingClient)
 {
     STATUS retStatus = STATUS_SUCCESS;

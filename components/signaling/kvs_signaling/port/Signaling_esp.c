@@ -13,6 +13,7 @@
 #include "Signaling/FileCache.h"
 #include "StateMachine.h"
 #include "flash_wrapper.h"
+#include "esp_work_queue.h"
 
 /* NVS-based caching configuration */
 #define SIGNALING_NVS_NAMESPACE      "kvs_signaling"
@@ -24,6 +25,8 @@
  * takes 3-7 s, so endpoint + ICE config + WebSocket after a reconnect often
  * runs past it. */
 #define ESP_SIGNALING_CONNECT_SYNC_TIMEOUT (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+// How long a free waits for queued message jobs, as kvs_signaling's own drain does
+#define ESP_SIGNALING_FREE_DRAIN_TIMEOUT_MS 2000
 
 /**
  * @brief Generate NVS key for signaling cache entry
@@ -404,9 +407,15 @@ STATUS freeSignaling(PSignalingClient* ppSignalingClient)
     pSignalingClient = *ppSignalingClient;
     CHK(pSignalingClient != NULL, retStatus);
 
+    // As upstream (#2401): from one of the client's own tasks this would stop and destroy the
+    // websocket client from inside its event handler, or drain the work queue from its worker
+    CHK_ERR(!isEspSignalingTask(pSignalingClient), STATUS_SIGNALING_FREE_FROM_CALLBACK,
+            "freeSignalingClient() called from a signaling callback; free the client from another task");
+
     ATOMIC_STORE_BOOL(&pSignalingClient->shutdown, TRUE);
 
-    terminateOngoingOperations(pSignalingClient, TRUE);
+    // The client is still whole, and its handle valid, if this fails: a message job is stuck
+    CHK_STATUS(terminateOngoingOperations(pSignalingClient, TRUE));
 
     // Free ESP WebSocket client if exists
     // Instead of lws_context_destroy, we'll use ESP WebSocket cleanup
@@ -417,6 +426,13 @@ STATUS freeSignaling(PSignalingClient* ppSignalingClient)
         // The cleanup function would be called here
         pSignalingClient->pWebsocketContext = NULL;
         MUTEX_UNLOCK(pSignalingClient->lwsServiceLock);
+    }
+
+    // A fetch or connect woken by terminateLwsListenerLoop() may still be unwinding in the state
+    // machine iterator, which holds stateLock: let it out before the state machine goes
+    if (IS_VALID_MUTEX_VALUE(pSignalingClient->stateLock)) {
+        MUTEX_LOCK(pSignalingClient->stateLock);
+        MUTEX_UNLOCK(pSignalingClient->stateLock);
     }
 
     freeStateMachine(pSignalingClient->pStateMachine);
@@ -561,16 +577,15 @@ CleanUp:
     return retStatus;
 }
 
-/* waitForAllThreads is TRUE only from freeSignaling() (see Signaling.h). The
- * ESP port has no unbounded wait for it to select: every caller gets the
- * bounded wait for the reconnect thread, so a caller that is itself that
- * thread still returns. */
+/* waitForAllThreads is TRUE only from freeSignaling() (see Signaling.h). It
+ * adds the bounded drain of queued message jobs. Every caller gets the bounded
+ * wait for the reconnect thread, so a caller that is itself that thread still
+ * returns. */
 STATUS terminateOngoingOperations(PSignalingClient pSignalingClient, BOOL waitForAllThreads)
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
 
-    UNUSED_PARAM(waitForAllThreads);
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
     // Terminate the listener thread if alive
@@ -580,6 +595,16 @@ STATUS terminateOngoingOperations(PSignalingClient pSignalingClient, BOOL waitFo
     if (STATUS_FAILED(awaitForThreadTermination(&pSignalingClient->reconnecterTracker, SIGNALING_CLIENT_SHUTDOWN_TIMEOUT))) {
         DLOGW("Reconnect thread still alive after %" PRIu64 " s; continuing",
               (UINT64) (SIGNALING_CLIENT_SHUTDOWN_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND));
+    }
+
+    if (waitForAllThreads) {
+        // The websocket is stopped, so no message job can be queued any more; let the queued
+        // ones run, since they read the client. The ESP counterpart of upstream counting its
+        // receive workers. Not running is fine: nothing is queued then. Anything else (a
+        // timeout, no memory for the barrier) has not waited for the jobs.
+        esp_err_t drained = esp_work_queue_sync(ESP_SIGNALING_FREE_DRAIN_TIMEOUT_MS);
+        CHK_ERR(drained == ESP_OK || drained == ESP_ERR_INVALID_STATE, STATUS_OPERATION_TIMED_OUT,
+                "Signaling message jobs not drained (%s); not freeing the client under them", esp_err_to_name(drained));
     }
 
 CleanUp:
@@ -706,11 +731,12 @@ STATUS signalingFetchSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
-    if (STATUS_FAILED(retStatus)) {
-        resetStateMachineRetryCount(pSignalingClient->pStateMachine);
-    }
-    // An expected outcome during freeSignalingClient(), already logged at WARN above.
+    // An expected outcome during freeSignalingClient(), already logged at WARN above. The state
+    // machine belongs to freeSignaling() by then, so leave it alone.
     if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
+        if (STATUS_FAILED(retStatus)) {
+            resetStateMachineRetryCount(pSignalingClient->pStateMachine);
+        }
         CHK_LOG_ERR(retStatus);
     }
     LEAVES();
@@ -746,10 +772,12 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
-    CHK_LOG_ERR(retStatus);
-
-    // Re-set the state if we failed
-    if (STATUS_FAILED(retStatus) && (pState != NULL)) {
+    // Re-set the state if we failed, unless a free is under way: the state machine belongs to
+    // freeSignaling() then (the network wait returns FREE_IN_PROGRESS from inside it)
+    if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
+        CHK_LOG_ERR(retStatus);
+    }
+    if (STATUS_FAILED(retStatus) && retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS && (pState != NULL)) {
         /* A WebSocket can still connect after the deadline. Close it, or
          * pSignalingClient->connected stays set while the state machine is
          * back where it started, and every later connect returns at once.

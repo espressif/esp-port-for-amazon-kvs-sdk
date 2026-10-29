@@ -146,13 +146,23 @@ static void esp_webrtc_handle_work_queue(void)
 }
 #endif
 
+/* The worker task, for esp_work_queue_is_worker(); NULL while none runs */
+static TaskHandle_t s_worker_task;
+
+bool esp_work_queue_is_worker(void)
+{
+    return s_worker_task != NULL && xTaskGetCurrentTaskHandle() == s_worker_task;
+}
+
 static void esp_work_queue_task(void *param)
 {
+    s_worker_task = xTaskGetCurrentTaskHandle();
     ESP_LOGI(TAG, "ESP Work Queue task started.");
     while (queue_state != WORK_QUEUE_STATE_STOP_REQUESTED) {
         esp_webrtc_handle_work_queue();
     }
     ESP_LOGI(TAG, "Stopping Work Queue task");
+    s_worker_task = NULL;
     queue_state = WORK_QUEUE_STATE_INIT_DONE;
     vTaskDelete(NULL);
 }
@@ -209,13 +219,23 @@ esp_err_t esp_work_queue_sync(uint32_t timeout_ms)
         return ESP_ERR_NO_MEM;
     }
 
-    esp_err_t err = esp_work_queue_add_task(esp_work_queue_barrier, done);
+    /* A full queue is likely when this is needed most (a burst of ICE candidates at
+     * teardown), so wait for room for the barrier within the same budget */
+    TickType_t start = xTaskGetTickCount();
+    esp_err_t err;
+    do {
+        err = esp_work_queue_add_task_timeout(esp_work_queue_barrier, done, timeout_ms ? timeout_ms : 1000);
+    } while (err == ESP_FAIL && timeout_ms == 0);
     if (err != ESP_OK) {
         vSemaphoreDelete(done);
-        return err;
+        return (err == ESP_FAIL) ? ESP_ERR_TIMEOUT : err;
     }
 
-    TickType_t wait = (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    TickType_t wait = portMAX_DELAY;
+    if (timeout_ms != 0) {
+        TickType_t budget = pdMS_TO_TICKS(timeout_ms), used = xTaskGetTickCount() - start;
+        wait = (used < budget) ? budget - used : 0;
+    }
     if (xSemaphoreTake(done, wait) != pdTRUE) {
         /* Barrier may still fire later and give a deleted semaphore, so leak it
          * (rare, small) rather than risk a use-after-free on the handle. */
