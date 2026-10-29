@@ -19,17 +19,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
   repository. The upstream SDK is now a git submodule with platform patches
   applied via `git am patches/*.patch`.
-- Moved the webrtc-c submodule to `develop` at `efdec3bf`: release **1.20.0** plus
-  the relay candidate filter (awslabs#2388), the TURN rejected-peer timeout fix
-  (#2387), the rtpmap payload-type fix for 32-bit platforms (#2405), no cipher list
-  on any mbedTLS build (#2409), srflx candidates from a pre-resolved STUN address
-  (#2410), the DTLS fingerprint through `mbedtls_md()` (#2392), the RNG from PSA
-  on mbedTLS 4 (#2385) and the `pSeenTransceivers` initialisation (#2415). 1.20.0
-  brought the SDP-renegotiation flow upstream (awslabs#2214), so the two local
-  patches for it are dropped, and opt-in mbedTLS 4 support (awslabs#2325); #2392,
-  #2385 and #2415 replace local patches 0005, 0004 and 0006. The previous pin
-  `4dd058d5` was the head of the `release-v1.20.0` branch (awslabs#2383); a commit
-  on `develop` stays fetchable when release branches are deleted. The current patch set is listed in `patches/README.md`.
+- Moved the webrtc-c submodule to the `develop` commit of awslabs#2429: release
+  **1.20.0** plus these upstream changes:
+  - the relay candidate filter (awslabs#2388) and the TURN rejected-peer timeout
+    fix (#2387);
+  - the rtpmap payload-type fix for 32-bit platforms (#2405);
+  - mbedTLS: no cipher list on any build (#2409), the DTLS fingerprint through
+    `mbedtls_md()` (#2392) and the RNG from PSA on mbedTLS 4 (#2385);
+  - srflx candidates from a pre-resolved STUN address (#2410);
+  - the `pSeenTransceivers` initialisation (#2415);
+  - negotiated data channels with an explicit stream id (#2399) and
+    `iceServersFinal` (#2400);
+  - signaling: `freeSignalingClient()` during a reconnect (#2401), the lws
+    service-loop wake after a send (#2417), and fetch, disconnect and delete
+    refused during a free (#2425). The ESP signaling port (`Signaling_esp.c`,
+    `LwsApiCalls_esp.c`) follows #2401 and #2425: it refuses a free from its own
+    tasks (the esp_websocket task, the work queue), and waits for queued message
+    jobs before it frees the client.
+  - For #2401's check, `GETTID()` now returns a per-thread id (the task handle on
+    chip, `pthread_self()` on the host). It was a constant, so every free while a
+    signaling thread ran was refused. A refused free now leaves the client and
+    everything it uses allocated, instead of freeing them under it.
+
+  1.20.0 brought the SDP-renegotiation flow upstream (awslabs#2214), so the two
+  local patches for it are dropped, and opt-in mbedTLS 4 support (awslabs#2325).
+  #2392, #2385 and #2415 replace local patches 0005, 0004 and 0006. The current
+  patch set is listed in `patches/README.md`.
 
 ### Added
 
@@ -120,6 +135,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SENT_ANSWER`, such as the power-save handler stopping its park timer, now see
   it only for an answer that goes out or will be re-sent. See `API_USAGE.md` for
   a buffered answer that never goes out.
+- Patch 0003 (`getpeername()` in `socketConnectionIsConnected`) is dropped.
+  The SDK's own check works on lwIP: an established socket gives `EISCONN`.
+  The patch could report a connect still in progress as connected. See
+  `patches/README.md`.
+- Patch 0001 no longer carries the libwebsockets callback and send-path rewrite
+  from awslabs#2134. Only the ws-off (`CONFIG_USE_ESP_WEBSOCKET_CLIENT=n`) path
+  used it; see `patches/README.md` for what replaced each part.
 - esp_camera: `join-room` leaves the current room first instead of failing with
   "Already connected"; a separate `disconnect` is no longer needed.
 - **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under

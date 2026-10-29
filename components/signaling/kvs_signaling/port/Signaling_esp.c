@@ -13,6 +13,7 @@
 #include "Signaling/FileCache.h"
 #include "StateMachine.h"
 #include "flash_wrapper.h"
+#include "esp_work_queue.h"
 
 /* NVS-based caching configuration */
 #define SIGNALING_NVS_NAMESPACE      "kvs_signaling"
@@ -24,6 +25,8 @@
  * takes 3-7 s, so endpoint + ICE config + WebSocket after a reconnect often
  * runs past it. */
 #define ESP_SIGNALING_CONNECT_SYNC_TIMEOUT (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+// How long a free waits for queued message jobs, as kvs_signaling's own drain does
+#define ESP_SIGNALING_FREE_DRAIN_TIMEOUT_MS 2000
 
 /**
  * @brief Generate NVS key for signaling cache entry
@@ -404,9 +407,15 @@ STATUS freeSignaling(PSignalingClient* ppSignalingClient)
     pSignalingClient = *ppSignalingClient;
     CHK(pSignalingClient != NULL, retStatus);
 
+    // As upstream (#2401): from one of the client's own tasks this would stop and destroy the
+    // websocket client from inside its event handler, or drain the work queue from its worker
+    CHK_ERR(!isEspSignalingTask(pSignalingClient), STATUS_SIGNALING_FREE_FROM_CALLBACK,
+            "freeSignalingClient() called from a signaling callback; free the client from another task");
+
     ATOMIC_STORE_BOOL(&pSignalingClient->shutdown, TRUE);
 
-    terminateOngoingOperations(pSignalingClient);
+    // The client is still whole, and its handle valid, if this fails: a message job is stuck
+    CHK_STATUS(terminateOngoingOperations(pSignalingClient, TRUE));
 
     // Free ESP WebSocket client if exists
     // Instead of lws_context_destroy, we'll use ESP WebSocket cleanup
@@ -417,6 +426,13 @@ STATUS freeSignaling(PSignalingClient* ppSignalingClient)
         // The cleanup function would be called here
         pSignalingClient->pWebsocketContext = NULL;
         MUTEX_UNLOCK(pSignalingClient->lwsServiceLock);
+    }
+
+    // A fetch or connect woken by terminateLwsListenerLoop() may still be unwinding in the state
+    // machine iterator, which holds stateLock: let it out before the state machine goes
+    if (IS_VALID_MUTEX_VALUE(pSignalingClient->stateLock)) {
+        MUTEX_LOCK(pSignalingClient->stateLock);
+        MUTEX_UNLOCK(pSignalingClient->stateLock);
     }
 
     freeStateMachine(pSignalingClient->pStateMachine);
@@ -561,7 +577,11 @@ CleanUp:
     return retStatus;
 }
 
-STATUS terminateOngoingOperations(PSignalingClient pSignalingClient)
+/* waitForAllThreads is TRUE only from freeSignaling() (see Signaling.h). It
+ * adds the bounded drain of queued message jobs. Every caller gets the bounded
+ * wait for the reconnect thread, so a caller that is itself that thread still
+ * returns. */
+STATUS terminateOngoingOperations(PSignalingClient pSignalingClient, BOOL waitForAllThreads)
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
@@ -572,7 +592,20 @@ STATUS terminateOngoingOperations(PSignalingClient pSignalingClient)
     terminateLwsListenerLoop(pSignalingClient);
 
     // Await for the reconnect thread to exit
-    awaitForThreadTermination(&pSignalingClient->reconnecterTracker, SIGNALING_CLIENT_SHUTDOWN_TIMEOUT);
+    if (STATUS_FAILED(awaitForThreadTermination(&pSignalingClient->reconnecterTracker, SIGNALING_CLIENT_SHUTDOWN_TIMEOUT))) {
+        DLOGW("Reconnect thread still alive after %" PRIu64 " s; continuing",
+              (UINT64) (SIGNALING_CLIENT_SHUTDOWN_TIMEOUT / HUNDREDS_OF_NANOS_IN_A_SECOND));
+    }
+
+    if (waitForAllThreads) {
+        // The websocket is stopped, so no message job can be queued any more; let the queued
+        // ones run, since they read the client. The ESP counterpart of upstream counting its
+        // receive workers. Not running is fine: nothing is queued then. Anything else (a
+        // timeout, no memory for the barrier) has not waited for the jobs.
+        esp_err_t drained = esp_work_queue_sync(ESP_SIGNALING_FREE_DRAIN_TIMEOUT_MS);
+        CHK_ERR(drained == ESP_OK || drained == ESP_ERR_INVALID_STATE, STATUS_OPERATION_TIMED_OUT,
+                "Signaling message jobs not drained (%s); not freeing the client under them", esp_err_to_name(drained));
+    }
 
 CleanUp:
 
@@ -672,9 +705,14 @@ STATUS signalingFetchSync(PSignalingClient pSignalingClient)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
+    // Another thread is inside freeSignaling(); the client is about to disappear and freeSignaling() may be
+    // waiting for the very thread making this call (a signaling callback). Return instead of waiting.
+    CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SIGNALING_FREE_IN_PROGRESS,
+             "signalingClientFetchSync() refused: freeSignalingClient() is running on another thread");
+
     // Check if we are already not connected
     if (ATOMIC_LOAD_BOOL(&pSignalingClient->connected)) {
-        CHK_STATUS(terminateOngoingOperations(pSignalingClient));
+        CHK_STATUS(terminateOngoingOperations(pSignalingClient, FALSE));
     }
 
     // move to the fromGetToken() so we can move to the necessary step
@@ -693,10 +731,14 @@ STATUS signalingFetchSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
-    if (STATUS_FAILED(retStatus)) {
-        resetStateMachineRetryCount(pSignalingClient->pStateMachine);
+    // An expected outcome during freeSignalingClient(), already logged at WARN above. The state
+    // machine belongs to freeSignaling() by then, so leave it alone.
+    if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
+        if (STATUS_FAILED(retStatus)) {
+            resetStateMachineRetryCount(pSignalingClient->pStateMachine);
+        }
+        CHK_LOG_ERR(retStatus);
     }
-    CHK_LOG_ERR(retStatus);
     LEAVES();
     return retStatus;
 }
@@ -730,10 +772,12 @@ STATUS signalingConnectSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
-    CHK_LOG_ERR(retStatus);
-
-    // Re-set the state if we failed
-    if (STATUS_FAILED(retStatus) && (pState != NULL)) {
+    // Re-set the state if we failed, unless a free is under way: the state machine belongs to
+    // freeSignaling() then (the network wait returns FREE_IN_PROGRESS from inside it)
+    if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
+        CHK_LOG_ERR(retStatus);
+    }
+    if (STATUS_FAILED(retStatus) && retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS && (pState != NULL)) {
         /* A WebSocket can still connect after the deadline. Close it, or
          * pSignalingClient->connected stays set while the state machine is
          * back where it started, and every later connect returns at once.
@@ -759,10 +803,15 @@ STATUS signalingDisconnectSync(PSignalingClient pSignalingClient)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
+    // Another thread is inside freeSignaling(), which disconnects the client anyway. Return success without waiting,
+    // as for a client that is not connected; see signalingFetchSync() for why this call must not wait.
+    CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SUCCESS,
+             "signalingClientDisconnectSync() skipped: freeSignalingClient() is running on another thread and disconnects the client");
+
     // Check if we are already not connected
     CHK(ATOMIC_LOAD_BOOL(&pSignalingClient->connected), retStatus);
 
-    CHK_STATUS(terminateOngoingOperations(pSignalingClient));
+    CHK_STATUS(terminateOngoingOperations(pSignalingClient, FALSE));
 
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
 
@@ -787,10 +836,15 @@ STATUS signalingDeleteSync(PSignalingClient pSignalingClient)
     // Check if we are already deleting
     CHK(!ATOMIC_LOAD_BOOL(&pSignalingClient->deleted), retStatus);
 
+    // Another thread is inside freeSignaling(); see signalingFetchSync(). Checked before the deleting flag and
+    // the state machine are touched so the refusal leaves the client exactly as freeSignaling() expects it.
+    CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SIGNALING_FREE_IN_PROGRESS,
+             "signalingClientDeleteSync() refused: freeSignalingClient() is running on another thread");
+
     // Mark as being deleted
     ATOMIC_STORE_BOOL(&pSignalingClient->deleting, TRUE);
 
-    CHK_STATUS(terminateOngoingOperations(pSignalingClient));
+    CHK_STATUS(terminateOngoingOperations(pSignalingClient, FALSE));
 
     // Set the state directly
     setStateMachineCurrentState(pSignalingClient->pStateMachine, SIGNALING_STATE_DELETE);
@@ -800,7 +854,10 @@ STATUS signalingDeleteSync(PSignalingClient pSignalingClient)
 
 CleanUp:
 
-    CHK_LOG_ERR(retStatus);
+    // An expected outcome during freeSignalingClient(), already logged at WARN above.
+    if (retStatus != STATUS_SIGNALING_FREE_IN_PROGRESS) {
+        CHK_LOG_ERR(retStatus);
+    }
 
     LEAVES();
     return retStatus;

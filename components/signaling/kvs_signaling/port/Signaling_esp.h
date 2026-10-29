@@ -22,6 +22,9 @@ BOOL signaling_is_ice_config_refresh_needed(PSignalingClient pSignalingClient);
 BOOL signaling_has_valid_ice_config(PSignalingClient pSignalingClient);
 STATUS refresh_ice_configuration(PSignalingClient pSignalingClient);
 
+// True on one of the tasks the client's callbacks run on (esp_websocket's, the work queue's)
+BOOL isEspSignalingTask(PSignalingClient pSignalingClient);
+
 #ifdef __cplusplus
 }
 #endif

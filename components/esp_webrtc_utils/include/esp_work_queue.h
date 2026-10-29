@@ -132,12 +132,21 @@ esp_err_t esp_work_queue_add_task(esp_work_fn_t work_fn, void *priv_data);
  *
  * Must not be called from the Work Queue's own task context (it would deadlock).
  *
- * @param[in] timeout_ms Max time to wait, or 0 to wait indefinitely.
+ * @param[in] timeout_ms Max time to wait, or 0 to wait indefinitely. A full queue counts
+ *                       against it: the barrier waits for room first.
  * @return ESP_OK once the queue is drained.
  * @return ESP_ERR_INVALID_STATE if the queue is not running.
  * @return ESP_ERR_TIMEOUT if it did not drain within timeout_ms.
+ * @return ESP_ERR_NO_MEM if the barrier's semaphore could not be allocated (nothing waited for).
  */
 esp_err_t esp_work_queue_sync(uint32_t timeout_ms);
+
+/** True when called from the Work Queue's own task (where esp_work_queue_sync() must not run).
+ *
+ * On the linux target this is only meaningful from a FreeRTOS task: a plain pthread there
+ * has no task of its own to compare.
+ */
+bool esp_work_queue_is_worker(void);
 
 #ifdef __cplusplus
 }

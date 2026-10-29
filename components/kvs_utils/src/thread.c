@@ -21,6 +21,9 @@
 #include "sdkconfig.h"
 #if CONFIG_IDF_TARGET_LINUX
 #include <signal.h>
+#else
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #endif
 
 #ifndef DEFAULT_THREAD_SIZE
@@ -198,10 +201,17 @@ PUBLIC_API STATUS defaultGetThreadName(TID thread, PCHAR name, UINT32 len)
     return (0 == retValue) ? STATUS_SUCCESS : STATUS_INVALID_OPERATION;
 }
 
+/* Unique per live thread: the SDK records each signaling thread's id from inside that
+ * thread and refuses freeSignalingClient() from one of them, so a constant made every
+ * free look like one from a callback. */
 PUBLIC_API TID defaultGetThreadId()
 {
-    // return (TID) pthread_self();
-    return (TID) 1234; // some random number for now
+#if CONFIG_IDF_TARGET_LINUX
+    return (TID) pthread_self();
+#else
+    /* pthread_self() asserts in a task pthread did not create (app_main, esp_timer) */
+    return (TID) (uintptr_t) xTaskGetCurrentTaskHandle();
+#endif
 }
 
 STATUS defaultCreateThreadPriWithCaps(PTID pThreadId, PCHAR threadName, UINT32 threadSize, UINT32 caps, BOOL joinable, startRoutine start, UINT32 prio, PVOID args)

@@ -116,6 +116,7 @@ typedef struct __EspSignalingClientWrapper {
     MUTEX wsClientLock;
     BOOL isConnected;
     BOOL connectionAwaitingConfirmation; // Track pending connections
+    TaskHandle_t wsTask;                 // esp_websocket_client's task, from its events; NULL once destroyed
 } EspSignalingClientWrapper, *PEspSignalingClientWrapper;
 
 // Global ESP signaling client wrapper
@@ -342,8 +343,10 @@ static VOID noteNetworkError(INT32 err)
  * (a new endpoint lookup, then ICE config, then the WebSocket), each a slow
  * TLS handshake on a small co-processor. Wait for the station's address
  * instead: up to ESP_SIGNALING_NETWORK_WAIT_MS per outage, shared by all calls
- * in it, so a lost network still fails them. Fails at once when the client is
- * shutting down. Runs inside the state machine, under the client's stateLock. */
+ * in it, so a lost network still fails them. Returns
+ * STATUS_SIGNALING_FREE_IN_PROGRESS at once when the client is being freed, as
+ * fetch and delete do, so Client.c stops retrying. Runs inside the state
+ * machine, under the client's stateLock. */
 static STATUS waitForNetwork(PSignalingClient pSignalingClient)
 {
 #ifdef ESP_SIGNALING_FOLLOWS_WIFI
@@ -351,7 +354,7 @@ static STATUS waitForNetwork(PSignalingClient pSignalingClient)
     EventBits_t bits;
 
     if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-        return STATUS_INVALID_OPERATION;
+        return STATUS_SIGNALING_FREE_IN_PROGRESS;
     }
     /* The first signaling call runs with the network up, so registering then
      * starts from the right state. */
@@ -402,13 +405,13 @@ static STATUS waitForNetwork(PSignalingClient pSignalingClient)
     // Clear, then re-check: a terminate that set the bit before the clear has already set shutdown
     xEventGroupClearBits(s_networkEvents, NETWORK_WAKE_BIT);
     if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-        return STATUS_INVALID_OPERATION;
+        return STATUS_SIGNALING_FREE_IN_PROGRESS;
     }
     bits = xEventGroupWaitBits(s_networkEvents, NETWORK_READY_BIT | NETWORK_WAKE_BIT, pdFALSE, pdFALSE,
                                pdMS_TO_TICKS(end - now));
     if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
         ESP_LOGI(TAG, "Signaling client shutting down; not waiting for the network");
-        return STATUS_INVALID_OPERATION;
+        return STATUS_SIGNALING_FREE_IN_PROGRESS;
     }
     if (bits & NETWORK_READY_BIT) {
         ESP_LOGI(TAG, "Network back after %" PRIu64 " ms", nowMs() - now);
@@ -530,6 +533,7 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
     }
 
     ESP_LOGD(TAG, "WebSocket event: %d, signalingClient: %p", (int)event_id, pSignalingClient);
+    pEspWrapper->wsTask = xTaskGetCurrentTaskHandle();
 
     /* Handle special opcodes up-front to prevent crashes when non-JSON frames
      * (like close frames) are processed as signaling messages */
@@ -1133,7 +1137,11 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
     // IMPORTANT: We call this with no locks held to avoid deadlocks
     // Note: Even for GOAWAY and RECONNECT_ICE_SERVER, we still call the callback
     // so the application can be aware of these events
-    if (pSignalingClient->signalingClientCallbacks.messageReceivedFn != NULL) {
+    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        // As upstream: the application has asked for the client to go away, so a message still in flight is dropped
+        ESP_LOGD(TAG, "Dropping received message of type %d: signaling client is shutting down",
+                 (int) pRecvMsg->signalingMessage.messageType);
+    } else if (pSignalingClient->signalingClientCallbacks.messageReceivedFn != NULL) {
         pSignalingClient->signalingClientCallbacks.messageReceivedFn(
             pSignalingClient->signalingClientCallbacks.customData,
             pRecvMsg);
@@ -1192,6 +1200,7 @@ STATUS terminateEspSignalingClient(PSignalingClient pSignalingClient)
             vTaskDelay(pdMS_TO_TICKS(200));
 
             esp_websocket_client_destroy(wsClientToDestroy);
+            gEspSignalingClientWrapper->wsTask = NULL;
             ESP_LOGI(TAG, "WebSocket client termination completed");
         } else {
             /* No client to destroy, just update state */
@@ -2935,6 +2944,15 @@ CleanUp:
 }
 
 // Implement the terminateLwsListenerLoop function
+BOOL isEspSignalingTask(PSignalingClient pSignalingClient)
+{
+    UNUSED_PARAM(pSignalingClient);
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+
+    // The websocket task delivers errorReportFn; the work queue runs the message jobs and their callbacks
+    return esp_work_queue_is_worker() || (gEspSignalingClientWrapper != NULL && gEspSignalingClientWrapper->wsTask == self);
+}
+
 STATUS terminateLwsListenerLoop(PSignalingClient pSignalingClient)
 {
     STATUS retStatus = STATUS_SUCCESS;
