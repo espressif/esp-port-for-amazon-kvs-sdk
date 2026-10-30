@@ -45,6 +45,9 @@ typedef struct {
     uint16_t buffer_frames;      /* Number of frames to buffer */
     void *codec_specific;        /* Codec-specific parameters if needed */
     void *display_handle;        /* Display handle for output (optional) */
+    /* Asks the remote sender for a keyframe. Optional. */
+    void (*request_keyframe)(void *ctx);
+    void *request_keyframe_ctx;
 } video_player_config_t;
 
 /**

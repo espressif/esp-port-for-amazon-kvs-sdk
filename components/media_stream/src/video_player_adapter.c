@@ -155,6 +155,11 @@ typedef struct {
     /* Stream state */
     uint16_t                     width;
     uint16_t                     height;
+    /* Last SPS + PPS seen, each with a 4-byte start code. Re-primes a reset
+     * decoder when the next IDR carries no parameter sets. */
+    uint8_t                     *param_sets;
+    uint32_t                     param_sets_len;
+    uint32_t                     last_keyframe_req_ms; /* 32-bit, so both tasks access it atomically */
 
     /* Stats */
     uint32_t                     frames_queued;
@@ -191,11 +196,93 @@ static void drain_queue(QueueHandle_t q)
     }
 }
 
-static esp_err_t ensure_stream_resolution(video_player_context_t *ctx)
+/* Copy every SPS and PPS NAL in the buffer into ctx->param_sets. */
+static void cache_param_sets(video_player_context_t *ctx, const uint8_t *data, uint32_t len)
 {
-    if (ctx->width != 0 && ctx->height != 0) {
-        return ESP_OK;
+    static const uint8_t start_code[4] = { 0, 0, 0, 1 };
+    uint8_t *buf = NULL;
+    uint32_t buf_len = 0;
+    size_t off = 0;
+    while (off < len) {
+        size_t rel_start = 0, sc_len = 0;
+        if (!h264_find_next_start_code(data + off, len - off, &rel_start, &sc_len)) {
+            break;
+        }
+        size_t nal_off = off + rel_start + sc_len;
+        if (nal_off >= len) {
+            break;
+        }
+        size_t next_rel = 0;
+        size_t nal_len = h264_find_next_start_code(data + nal_off, len - nal_off, &next_rel, NULL)
+                         ? next_rel : (len - nal_off);
+        h264_nal_type_t type = h264_nal_type_from_header(data[nal_off]);
+        if (type == H264_NAL_TYPE_SPS || type == H264_NAL_TYPE_PPS) {
+            uint8_t *grown = heap_caps_realloc(buf, buf_len + sizeof(start_code) + nal_len, FRAME_ALLOC_CAPS);
+            if (grown == NULL) {
+                heap_caps_free(buf);
+                return;
+            }
+            buf = grown;
+            memcpy(buf + buf_len, start_code, sizeof(start_code));
+            memcpy(buf + buf_len + sizeof(start_code), data + nal_off, nal_len);
+            buf_len += sizeof(start_code) + nal_len;
+        }
+        off = nal_off + nal_len;
     }
+    if (buf == NULL) {
+        return;
+    }
+    heap_caps_free(ctx->param_sets);
+    ctx->param_sets     = buf;
+    ctx->param_sets_len = buf_len;
+}
+
+/* Ask the sender for an IDR, at most twice a second. */
+static void request_keyframe(video_player_context_t *ctx)
+{
+    if (ctx->config.request_keyframe == NULL) {
+        return;
+    }
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (now - ctx->last_keyframe_req_ms < 500) {
+        return;
+    }
+    ctx->last_keyframe_req_ms = now;
+    ctx->config.request_keyframe(ctx->config.request_keyframe_ctx);
+}
+
+/* A lost frame orphans every P-frame after it; skip them until the next IDR. */
+static void drop_until_idr(video_player_context_t *ctx)
+{
+    ctx->frames_dropped++;
+    ctx->wait_for_idr = true;
+    request_keyframe(ctx);
+}
+
+/* Replace the decoder; dec and dec_param are NULL on failure. */
+static esp_err_t decoder_recreate(video_player_context_t *ctx)
+{
+    if (ctx->dec != NULL) {
+        esp_h264_dec_del(ctx->dec);
+    }
+    ctx->dec = NULL;
+    ctx->dec_param = NULL;
+    esp_h264_dec_cfg_sw_t cfg = { .pic_type = ESP_H264_RAW_FMT_I420 };
+    if (esp_h264_dec_sw_new(&cfg, &ctx->dec) != ESP_H264_ERR_OK || ctx->dec == NULL ||
+        esp_h264_dec_sw_get_param_hd(ctx->dec, &ctx->dec_param) != ESP_H264_ERR_OK) {
+        if (ctx->dec != NULL) {
+            esp_h264_dec_del(ctx->dec);
+        }
+        ctx->dec = NULL;
+        ctx->dec_param = NULL;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+/* The decoder reports the active SPS size; the sender may change it mid-stream. */
+static esp_err_t update_stream_resolution(video_player_context_t *ctx)
+{
     esp_h264_resolution_t res = { 0 };
     if (esp_h264_dec_get_resolution(ctx->dec_param, &res) != ESP_H264_ERR_OK) {
         return ESP_FAIL;
@@ -203,16 +290,18 @@ static esp_err_t ensure_stream_resolution(video_player_context_t *ctx)
     if (res.width == 0 || res.height == 0) {
         return ESP_FAIL;
     }
-    ctx->width  = res.width;
-    ctx->height = res.height;
-    ESP_LOGI(TAG, "stream resolution: %ux%u", ctx->width, ctx->height);
+    if (res.width != ctx->width || res.height != ctx->height) {
+        ctx->width  = res.width;
+        ctx->height = res.height;
+        ESP_LOGI(TAG, "stream resolution: %ux%u", ctx->width, ctx->height);
+    }
     return ESP_OK;
 }
 
 static void render_decoded_frame(video_player_context_t *ctx,
                                  const esp_h264_dec_out_frame_t *out)
 {
-    if (ensure_stream_resolution(ctx) != ESP_OK) {
+    if (update_stream_resolution(ctx) != ESP_OK) {
         return;
     }
     const uint16_t W = ctx->width;
@@ -262,9 +351,7 @@ static void decode_task(void *arg)
          * decoding until a recreate succeeds (retry here, cheap on the
          * error path) rather than dereferencing a NULL handle. */
         if (ctx->dec == NULL) {
-            esp_h264_dec_cfg_sw_t recover_cfg = { .pic_type = ESP_H264_RAW_FMT_I420 };
-            if (esp_h264_dec_sw_new(&recover_cfg, &ctx->dec) != ESP_H264_ERR_OK || ctx->dec == NULL) {
-                ctx->dec = NULL;
+            if (decoder_recreate(ctx) != ESP_OK) {
                 ctx->frames_dropped++;
                 frame_desc_free(f);
                 continue;
@@ -292,16 +379,13 @@ static void decode_task(void *arg)
                  * decoder (they just return OK) — only del+new actually runs
                  * h264bsdShutdown/h264bsdAlloc and clears the storage. So a
                  * real reset is a full teardown + recreate. */
-                esp_h264_dec_del(ctx->dec);
-                ctx->dec = NULL;
-                esp_h264_dec_cfg_sw_t reset_cfg = { .pic_type = ESP_H264_RAW_FMT_I420 };
-                if (esp_h264_dec_sw_new(&reset_cfg, &ctx->dec) != ESP_H264_ERR_OK || ctx->dec == NULL) {
+                if (decoder_recreate(ctx) != ESP_OK) {
                     ESP_LOGE(TAG, "decoder recreate after reset failed — RX video stalled");
-                    ctx->dec = NULL;
                 }
                 ctx->wait_for_idr = true;
                 /* Drain any frames already enqueued from before this error. */
                 drain_queue(ctx->queue);
+                request_keyframe(ctx);
                 break;
             }
             if (out.out_size > 0) {
@@ -468,50 +552,61 @@ esp_err_t video_player_play_frame(video_player_handle_t handle, const uint8_t *d
      * whether peer is actually sending us video vs. just negotiating the
      * track without traffic. */
     if (ctx->frames_queued + ctx->frames_dropped == 0) {
-        ESP_LOGI(TAG, "first inbound video frame: %" PRIu32 " bytes, is_keyframe=%d",
-                 len, (int)is_keyframe);
+        ESP_LOGI(TAG, "first inbound video frame: %" PRIu32 " bytes", len);
     }
+    (void)is_keyframe;
 
-    /* Cross-check: scan the buffer for SPS/IDR and trust whichever arrives. */
+    /* The SDK leaves Frame.flags uninitialised, so only the NAL scan decides. */
     h264_nal_scan_result_t scan = h264_scan_nals(data, len, H264_NAL_DIR_RX);
-    const bool key = is_keyframe || scan.has_idr;
+    const bool key = scan.has_idr;
+    /* Only an SPS refreshes the cache, so a PPS-only AU keeps the cached SPS. */
+    if (scan.has_sps) {
+        cache_param_sets(ctx, data, len);
+    }
 
     if (ctx->wait_for_idr && !key) {
         ctx->frames_dropped++;
+        request_keyframe(ctx);
         return ESP_OK;
     }
+    /* A re-sync IDR without its own SPS/PPS gets the cached ones prepended. */
+    const bool prime = ctx->wait_for_idr && key && !scan.has_sps && ctx->param_sets != NULL;
     if (key) {
         ctx->wait_for_idr = false;
     }
 
     /* If the queue is full: keyframes evict existing frames so we re-sync from
-     * a fresh GOP; non-keyframes are dropped. */
+     * a fresh GOP; a dropped non-keyframe orphans the rest of its GOP. */
     if (uxQueueSpacesAvailable(ctx->queue) == 0) {
         if (!key) {
-            ctx->frames_dropped++;
+            drop_until_idr(ctx);
             return ESP_OK;
         }
         drain_queue(ctx->queue);
     }
 
+    const uint32_t prefix_len = prime ? ctx->param_sets_len : 0;
     video_frame_desc_t *f = heap_caps_calloc(1, sizeof(*f), FRAME_ALLOC_CAPS);
     if (f == NULL) {
-        ctx->frames_dropped++;
+        drop_until_idr(ctx);
         return ESP_ERR_NO_MEM;
     }
-    f->data = heap_caps_malloc(len, FRAME_ALLOC_CAPS);
+    f->data = heap_caps_malloc(prefix_len + len, FRAME_ALLOC_CAPS);
     if (f->data == NULL) {
         heap_caps_free(f);
-        ctx->frames_dropped++;
+        drop_until_idr(ctx);
         return ESP_ERR_NO_MEM;
     }
-    memcpy(f->data, data, len);
-    f->len = len;
+    if (prefix_len) {
+        memcpy(f->data, ctx->param_sets, prefix_len);
+    }
+    memcpy(f->data + prefix_len, data, len);
+    f->len = prefix_len + len;
     f->is_keyframe = key;
 
     if (xQueueSend(ctx->queue, &f, 0) != pdTRUE) {
         frame_desc_free(f);
-        ctx->frames_dropped++;
+        drop_until_idr(ctx);
         return ESP_ERR_NO_MEM;
     }
     ctx->frames_queued++;
@@ -586,6 +681,7 @@ esp_err_t video_player_deinit(video_player_handle_t handle)
         esp_h264_dec_close(ctx->dec);
         esp_h264_dec_del(ctx->dec);
     }
+    heap_caps_free(ctx->param_sets);
     heap_caps_free(ctx);
     return ESP_OK;
 }
