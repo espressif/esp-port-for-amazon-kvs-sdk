@@ -55,7 +55,6 @@ STATUS createTlsSession(PTlsSessionCallbacks pCallbacks, PTlsSession* ppTlsSessi
     STATUS retStatus = STATUS_SUCCESS;
     PEspTlsSession pTlsSession = NULL;
 
-    ESP_LOGI(TAG, "ESP-TLS: createTlsSession() called - Using ESP-TLS implementation instead of mbedTLS");
     CHK(ppTlsSession != NULL && pCallbacks != NULL && pCallbacks->outboundPacketFn != NULL, STATUS_NULL_ARG);
 
     pTlsSession = (PEspTlsSession) MEMCALLOC(1, SIZEOF(EspTlsSession));
@@ -82,8 +81,6 @@ STATUS createTlsSession(PTlsSessionCallbacks pCallbacks, PTlsSession* ppTlsSessi
     pTlsSession->outboundBufferCapacity = DEFAULT_MTU_SIZE_BYTES;
     pTlsSession->pOutboundBuffer = (PBYTE) MEMCALLOC(1, pTlsSession->outboundBufferCapacity);
     CHK(pTlsSession->pOutboundBuffer != NULL, STATUS_NOT_ENOUGH_MEMORY);
-
-    ESP_LOGI(TAG, "ESP-TLS: Created ESP-TLS session with certificate bundle verification (no cert files needed!)");
 
 CleanUp:
     if (STATUS_FAILED(retStatus) && pTlsSession != NULL) {

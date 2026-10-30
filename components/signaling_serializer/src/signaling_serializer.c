@@ -104,7 +104,7 @@ esp_err_t create_ice_servers_message(const void* pRtcConfiguration, uint32_t ice
         strncpy(payload->ice_servers[i].credential, src_server + (SS_MAX_ICE_CONFIG_URI_LEN + 1) + (SS_MAX_ICE_CONFIG_USER_NAME_LEN + 1), SS_MAX_ICE_CONFIG_CREDENTIAL_LEN);
         payload->ice_servers[i].credential[SS_MAX_ICE_CONFIG_CREDENTIAL_LEN] = '\0';
 
-        ESP_LOGI(TAG, "ICE Server %d: %s (user: %s)", i, payload->ice_servers[i].urls, payload->ice_servers[i].username);
+        ESP_LOGI(TAG, "ICE Server %d: %s", i, payload->ice_servers[i].urls);
     }
 
     // Setup signaling message
@@ -247,8 +247,7 @@ esp_err_t create_ice_server_response_message(const void* pIceServer, bool have_m
         strncpy(payload->credential, ice_server_ptr + (SS_MAX_ICE_CONFIG_URI_LEN + 1) + (SS_MAX_ICE_CONFIG_USER_NAME_LEN + 1), SS_MAX_ICE_CONFIG_CREDENTIAL_LEN);
         payload->credential[SS_MAX_ICE_CONFIG_CREDENTIAL_LEN] = '\0';
 
-        ESP_LOGI(TAG, "ICE Server Response: %s (user: %s) [have_more: %s]",
-                 payload->urls, payload->username[0] ? payload->username : "none", have_more ? "true" : "false");
+        ESP_LOGI(TAG, "ICE Server Response: %s [have_more: %s]", payload->urls, have_more ? "true" : "false");
     }
 
     // Initialize the message structure

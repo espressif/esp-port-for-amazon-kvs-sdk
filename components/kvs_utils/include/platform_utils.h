@@ -94,6 +94,11 @@ extern "C" {
 // Adding this after LOG_LEVEL_SILENT to ensure we do not break backward compat
 #define LOG_LEVEL_PROFILE 8
 
+// ESP log tag for PROFILE timings. They print at ESP_LOG_DEBUG under this tag.
+#ifndef KVS_PROFILE_LOG_TAG
+#define KVS_PROFILE_LOG_TAG "kvs_profile"
+#endif
+
 #define LOG_LEVEL_VERBOSE_STR (PCHAR) "VERBOSE"
 #define LOG_LEVEL_DEBUG_STR   (PCHAR) "DEBUG"
 #define LOG_LEVEL_BETA_STR    (PCHAR) "BETA"

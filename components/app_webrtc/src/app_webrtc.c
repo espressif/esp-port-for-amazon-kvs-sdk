@@ -303,12 +303,9 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
         // Looks like a specific session
         pAppWebRTCSession = test_session;
         pSampleConfiguration = pAppWebRTCSession->pSampleConfiguration;
-        ESP_LOGI(TAG, "peerConnectionStateChangedWrapper: peer=%s, state=%d",
-                 pAppWebRTCSession->peerId, state);
     } else {
         // Looks like global config (bridge mode)
         pSampleConfiguration = (PSampleConfiguration) HANDLE_TO_POINTER(customData);
-        ESP_LOGI(TAG, "peerConnectionStateChangedWrapper: bridge_mode, state=%d", state);
     }
 
     if (pSampleConfiguration == NULL) {
@@ -322,7 +319,6 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
             break;
         case WEBRTC_PEER_STATE_CONNECTED:
             if (pAppWebRTCSession != NULL) {
-                ESP_LOGI(TAG, "Peer connection state for %s: %d", pAppWebRTCSession->peerId, state);
                 ATOMIC_STORE_BOOL(&pAppWebRTCSession->connectedAnnounced, TRUE);
                 raiseEvent(APP_WEBRTC_EVENT_PEER_CONNECTED, 0, pAppWebRTCSession->peerId, "Peer connected");
             } else {
@@ -373,8 +369,6 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
 
         case WEBRTC_PEER_STATE_MEDIA_STARTING:
             if (pAppWebRTCSession != NULL) {
-                ESP_LOGI(TAG, "Media starting for peer %s (handled by kvs_webrtc interface)",
-                         pAppWebRTCSession->peerId);
                 raiseEvent(APP_WEBRTC_EVENT_STREAMING_STARTED, 0, pAppWebRTCSession->peerId, "Media streaming started");
             } else {
                 ESP_LOGI(TAG, "Media starting (bridge mode)");
@@ -459,8 +453,6 @@ WEBRTC_STATUS app_webrtc_get_server_by_idx(int index, bool useTurn, uint8_t **da
     CHK(gSignalingClientData != NULL && gWebRtcAppConfig.signaling_client_if != NULL, STATUS_INVALID_OPERATION);
     CHK(gWebRtcAppConfig.signaling_client_if->get_ice_server_by_idx != NULL, STATUS_INVALID_OPERATION);
 
-    ESP_LOGI(TAG, "app_webrtc_get_server_by_idx: index=%d, useTurn=%s", index, useTurn ? "true" : "false");
-
     // Delegate to the signaling interface implementation
     CHK_STATUS(gWebRtcAppConfig.signaling_client_if->get_ice_server_by_idx(
         gSignalingClientData,
@@ -471,7 +463,7 @@ WEBRTC_STATUS app_webrtc_get_server_by_idx(int index, bool useTurn, uint8_t **da
         have_more
     ));
 
-    ESP_LOGI(TAG, "Successfully queried ICE server by index (have_more: %s)", *have_more ? "true" : "false");
+    DLOGI("ICE server %d (useTurn: %s, have_more: %s)", index, useTurn ? "true" : "false", *have_more ? "true" : "false");
 
 CleanUp:
     if (STATUS_FAILED(retStatus)) {
@@ -1102,8 +1094,7 @@ STATUS submitPendingIceCandidate(PPendingMessageQueue pPendingMessageQueue, PApp
                 // Use peer connection interface for queued ICE candidate handling if available
                 if (gWebRtcAppConfig.peer_connection_if != NULL &&
                     gWebRtcAppConfig.peer_connection_if->send_message != NULL) {
-                    ESP_LOGI(TAG, "Processing queued ICE candidate via peer connection interface for peer: %s",
-                             pWebRtcMessage->peer_client_id);
+                    DLOGI("Processing queued ICE candidate for peer: %s", pWebRtcMessage->peer_client_id);
 
                     // Send message through interface using stored session handle
                     STATUS interface_status = gWebRtcAppConfig.peer_connection_if->send_message(
@@ -1305,8 +1296,6 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
             if (g_kvs_webrtc_client == NULL) {
                 ESP_LOGE(TAG, "Peer connection client not initialized - should have been initialized in app_webrtc_runTask");
                 CHK(FALSE, STATUS_INVALID_OPERATION);
-            } else {
-                ESP_LOGI(TAG, "Using pre-initialized peer connection client");
             }
 
             // Check if we have a pluggable interface or need to use legacy functions directly
@@ -2393,7 +2382,7 @@ int app_webrtc_trigger_offer(char *pPeerId)
 
     pSampleConfiguration = gSampleConfiguration;
 
-    ESP_LOGI(TAG, "Creating and sending WebRTC offer to peer: %s", pPeerId);
+    DLOGI("Creating an offer for peer: %s", pPeerId);
 
     // Create a streaming session as the initiator
     MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
@@ -2429,8 +2418,6 @@ int app_webrtc_trigger_offer(char *pPeerId)
         if (g_kvs_webrtc_client == NULL) {
             ESP_LOGE(TAG, "Peer connection client not initialized - should have been initialized in app_webrtc_runTask");
             CHK(FALSE, STATUS_INVALID_OPERATION);
-        } else if (!use_direct_legacy) {
-            ESP_LOGI(TAG, "Using pre-initialized peer connection client for trigger offer");
         }
 
         /* Progressive ICE Optimization:
@@ -2515,7 +2502,6 @@ int app_webrtc_trigger_offer(char *pPeerId)
             pAppWebRTCSession->interface_session_handle = session_handle;
 
             // Set callbacks for this session - IMPORTANT: This must happen BEFORE auto-offer generation
-            ESP_LOGI(TAG, "Setting callbacks for session with pAppWebRTCSession=%p", (void *)pAppWebRTCSession);
             WEBRTC_STATUS cb_status = pc_interface->set_callbacks(session_handle, POINTER_TO_HANDLE(pAppWebRTCSession),
                                                   peerOutboundMessageWrapper, peerConnectionStateChangedWrapper);
             if (cb_status != WEBRTC_STATUS_SUCCESS) {
@@ -2523,13 +2509,9 @@ int app_webrtc_trigger_offer(char *pPeerId)
                 CHK(FALSE, STATUS_INTERNAL_ERROR);
             }
 
-            ESP_LOGI(TAG, "Initiator session created, offer should be auto-generated");
-
             raiseEvent(APP_WEBRTC_EVENT_SENT_OFFER, 0, pPeerId, "Triggered offer creation via interface");
         }
     }
-
-    ESP_LOGI(TAG, "Offer sent successfully to peer: %s", pPeerId);
 
 CleanUp:
 
@@ -2657,6 +2639,11 @@ WEBRTC_STATUS app_webrtc_set_log_level(uint32_t level)
     // Directly set the log level using kvs_utils logger
     SET_LOGGER_LOG_LEVEL(level);
 
+    // PROFILE lines print at ESP_LOG_DEBUG under their own tag, so let that tag through
+    if (level == LOG_LEVEL_PROFILE) {
+        esp_log_level_set(KVS_PROFILE_LOG_TAG, ESP_LOG_DEBUG);
+    }
+
     // Update in sample configuration if it exists
     if (gSampleConfiguration != NULL) {
         gSampleConfiguration->logLevel = level;
@@ -2758,8 +2745,6 @@ CleanUp:
     static app_webrtc_ice_servers_payload_t persistent_ice_cfg = {0};
     UINT32 ice_count = 0;
 
-    ESP_LOGI(TAG, "Progressive ICE: Updating ICE servers for peer connection client");
-
     // Check if we have a valid peer connection client and interface
     CHK(g_kvs_webrtc_client != NULL, STATUS_INVALID_OPERATION);
     CHK(gWebRtcAppConfig.peer_connection_if != NULL, STATUS_INVALID_OPERATION);
@@ -2769,7 +2754,6 @@ CleanUp:
     CHK(gWebRtcAppConfig.signaling_client_if != NULL && gSignalingClientData != NULL &&
         gWebRtcAppConfig.signaling_client_if->get_ice_servers != NULL, STATUS_INVALID_OPERATION);
 
-    ESP_LOGI(TAG, "Progressive ICE: Fetching fresh ICE servers (including new TURN servers)");
     STATUS ice_status = gWebRtcAppConfig.signaling_client_if->get_ice_servers(
         gSignalingClientData, &ice_count, persistent_ice_cfg.ice_servers);
     CHK(STATUS_SUCCEEDED(ice_status) && ice_count > 0, STATUS_INVALID_OPERATION);
@@ -2788,13 +2772,10 @@ CleanUp:
     CHK(valid > 0, STATUS_INVALID_OPERATION);
 
     // Update ICE servers in the peer connection client
-    ESP_LOGI(TAG, "Progressive ICE: Setting %" PRIu32 " fresh ICE servers for peer connection client", valid);
-    ESP_LOGI(TAG, "Progressive ICE: Calling kvs_pc_set_ice_servers() -> kvs_applyNewIceServersCallback() -> peerConnectionUpdateIceServers()");
+    DLOGI("Progressive ICE: setting %" PRIu32 " fresh ICE servers", valid);
     WEBRTC_STATUS update_status = gWebRtcAppConfig.peer_connection_if->set_ice_servers(
         g_kvs_webrtc_client, persistent_ice_cfg.ice_servers, valid);
     CHK(update_status == WEBRTC_STATUS_SUCCESS, STATUS_INTERNAL_ERROR);
-
-    ESP_LOGI(TAG, "Progressive ICE: Successfully updated ICE servers for peer connection client");
 
 CleanUp:
     if (STATUS_FAILED(retStatus)) {
@@ -2816,8 +2797,7 @@ static WEBRTC_STATUS app_webrtc_on_ice_servers_updated(uint64_t customData, uint
     UNUSED_PARAM(customData);
     WEBRTC_STATUS retStatus = WEBRTC_STATUS_SUCCESS;
 
-    ESP_LOGI(TAG, "Progressive ICE callback triggered! New server count: %" PRIu32, newServerCount);
-    ESP_LOGI(TAG, "This means TURN servers are now available for improved NAT traversal");
+    DLOGI("Progressive ICE: %" PRIu32 " ICE servers available", newServerCount);
 
     if (newServerCount == 0) {
         ESP_LOGW(TAG, "No new ICE servers available, skipping update");
@@ -2825,16 +2805,9 @@ static WEBRTC_STATUS app_webrtc_on_ice_servers_updated(uint64_t customData, uint
     }
 
     // Update ICE servers for the peer connection client
-    ESP_LOGI(TAG, "Updating peer connection client with fresh ICE servers...");
     retStatus = app_webrtc_update_ice_servers();
-    if (retStatus == WEBRTC_STATUS_SUCCESS) {
-        ESP_LOGD(TAG, "Progressive ICE update completed successfully!");
-        ESP_LOGD(TAG, "   • Existing connections: Will use current servers (STUN usually sufficient)");
-        ESP_LOGD(TAG, "   • New connections: Will use fresh servers including TURN");
-        ESP_LOGD(TAG, "   • NAT traversal: Improved for future sessions");
-    } else {
+    if (retStatus != WEBRTC_STATUS_SUCCESS) {
         ESP_LOGW(TAG, "Progressive ICE update failed: 0x%08" PRIx32, (UINT32) retStatus);
-        ESP_LOGD(TAG, "   • Impact: New connections may have reduced NAT traversal capability");
     }
 
     return retStatus;
@@ -2870,8 +2843,8 @@ static BOOL app_webrtc_apply_immediate_ice_server(uint8_t* ice_data, int ice_len
     uint32_t count = (uint32_t) (ice_len / SIZEOF(app_webrtc_ice_server_t));
     app_webrtc_ice_server_t *pServers = (app_webrtc_ice_server_t *) ice_data;
 
-    ESP_LOGI(TAG, "Progressive ICE: applying %" PRIu32 " immediate ICE server(s) for %s (first: %s)",
-             count, context, pServers[0].urls);
+    DLOGI("Progressive ICE: applying %" PRIu32 " immediate ICE server(s) for %s (first: %s)",
+          count, context, pServers[0].urls);
 
     WEBRTC_STATUS status = gWebRtcAppConfig.peer_connection_if->set_ice_servers(
         g_kvs_webrtc_client, pServers, count);
@@ -2911,8 +2884,6 @@ static WEBRTC_STATUS app_webrtc_trigger_progressive_ice(const char* context, boo
 
     // Check if progressive ICE mechanism is supported (get_ice_server_by_idx available)
     if (gWebRtcAppConfig.signaling_client_if->get_ice_server_by_idx != NULL) {
-        ESP_LOGI(TAG, "Using progressive ICE mechanism for %s", context);
-
         // Call with index 0 to get servers immediately and trigger background fetching
         uint8_t *ice_data = NULL;
         int ice_len = 0;
@@ -2922,8 +2893,7 @@ static WEBRTC_STATUS app_webrtc_trigger_progressive_ice(const char* context, boo
             gSignalingClientData, 0, useTurn, &ice_data, &ice_len, &have_more);
 
         if (trigger_status == WEBRTC_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "Progressive ICE: Triggered for %s, have_more=%s",
-                     context, have_more ? "true" : "false");
+            DLOGI("Progressive ICE: triggered for %s, have_more=%s", context, have_more ? "true" : "false");
             if (have_more) {
                 ESP_LOGD(TAG, "Progressive ICE: TURN servers will be fetched in background");
             }
@@ -2957,7 +2927,7 @@ static WEBRTC_STATUS app_webrtc_trigger_progressive_ice(const char* context, boo
                      * synchronously so gathering sees every server. The async apply that
                      * signaling also scheduled will re-install the same set later, which
                      * is harmless. */
-                    ESP_LOGI(TAG, "Progressive ICE: cached ICE config is usable - applying STUN+TURN synchronously for %s", context);
+                    DLOGI("Progressive ICE: cached ICE config is usable, applying STUN and TURN now for %s", context);
                     if (app_webrtc_update_ice_servers() == WEBRTC_STATUS_SUCCESS) {
                         applied = TRUE;
                     } else {

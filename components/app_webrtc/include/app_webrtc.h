@@ -238,12 +238,13 @@ WEBRTC_STATUS app_webrtc_set_ice_config(bool trickle_ice, bool use_turn);
  * @brief Set log level for WebRTC components
  *
  * This controls the log verbosity for KVS signaling and WebRTC peer connection components.
- * By default, log level is set to INFO (level 3).
- * This function allows runtime override of the log level.
+ * The default is WARN (level 4).
+ * - INFO (3) adds the session setup details: ICE servers, offer and answer, session count.
+ * - PROFILE (8) prints only the SDK timings, under the KVS_PROFILE_LOG_TAG tag.
  *
- * Levels: 0=PROFILE, 1=VERBOSE, 2=DEBUG, 3=INFO, 4=WARN, 5=ERROR, 6=FATAL, 7=SILENT
+ * Levels: 1=VERBOSE, 2=DEBUG, 3=INFO, 4=WARN, 5=ERROR, 6=FATAL, 7=SILENT, 8=PROFILE
  *
- * @param[in] level Log level (0-7)
+ * @param[in] level Log level (0-8)
  * @return WEBRTC_STATUS code of the execution
  */
 WEBRTC_STATUS app_webrtc_set_log_level(uint32_t level);

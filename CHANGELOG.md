@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Session setup prints fewer lines at the default log level. The setup details
+  (ICE servers, offer and answer, session count) print with
+  `app_webrtc_set_log_level(3)`. The SDK PROFILE timings print at DEBUG under the
+  `kvs_profile` tag (`KVS_PROFILE_LOG_TAG`). `app_webrtc_set_log_level(8)` turns
+  them on. Log lines no longer show the TURN username.
 - `KVS_SDK_PATH` pointing at a directory that does not exist (or one with no
   `components/kvs_webrtc`) is now a configure-time `FATAL_ERROR` instead of a warning
   that scrolled past while every `kvs_*` component silently resolved elsewhere.

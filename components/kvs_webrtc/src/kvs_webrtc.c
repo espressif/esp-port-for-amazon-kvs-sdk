@@ -132,8 +132,6 @@ static STATUS kvs_applyNewIceServersCallback(UINT64 callerData, PHashEntry pHash
     session = (kvs_pc_session_t*)HANDLE_TO_POINTER(pHashEntry->value);
     CHK(session != NULL && !session->terminated && session->peer_connection != NULL, STATUS_NULL_ARG);
 
-    ESP_LOGI(TAG, "Applying new ICE servers to existing session: %s", session->peer_id);
-
     // Extract only TURN servers for dynamic update (STUN servers are typically already applied)
     if (client->config.ice_servers != NULL && client->config.ice_server_count > 0) {
         // First pass: count TURN servers
@@ -149,46 +147,34 @@ static STATUS kvs_applyNewIceServersCallback(UINT64 callerData, PHashEntry pHash
             newTurnServers = (RtcIceServer*)MEMCALLOC(newTurnServerCount, SIZEOF(RtcIceServer));
             CHK(newTurnServers != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
-            ESP_LOGI(TAG, "Found %" PRIu32 " new TURN servers for dynamic update", newTurnServerCount);
-
             // Second pass: copy TURN servers
             for (UINT32 i = 0; i < client->config.ice_server_count; i++) {
                 RtcIceServer *server = &((RtcIceServer*)client->config.ice_servers)[i];
                 if (STRNCMPI(server->urls, "turn:", 5) == 0 || STRNCMPI(server->urls, "turns:", 6) == 0) {
                     MEMCPY(&newTurnServers[turnServerIndex], server, SIZEOF(RtcIceServer));
-                    ESP_LOGI(TAG, "TURN server %" PRIu32 ": %s (user: %s)",
-                             turnServerIndex, server->urls,
-                             server->username[0] != '\0' ? server->username : "(none)");
+                    DLOGI("TURN server %" PRIu32 ": %s", turnServerIndex, server->urls);
                     turnServerIndex++;
                 }
             }
 
             // Dynamic update: iceAgentAddIceServers will skip TURN relay candidate creation
             // if ICE has already reached CONNECTED state, avoiding the race condition.
-            ESP_LOGI(TAG, "Dynamically adding %" PRIu32 " TURN servers to peer connection: %s",
-                     newTurnServerCount, session->peer_id);
+            DLOGI("Adding %" PRIu32 " TURN servers to peer connection: %s", newTurnServerCount, session->peer_id);
 
             STATUS updateStatus = peerConnectionUpdateIceServers(session->peer_connection,
                                                                newTurnServers,
                                                                newTurnServerCount);
 
-            if (STATUS_SUCCEEDED(updateStatus)) {
-                ESP_LOGI(TAG, "Successfully added %" PRIu32 " new TURN servers to existing peer connection: %s",
-                         newTurnServerCount, session->peer_id);
-                ESP_LOGI(TAG, "Progressive ICE: TURN servers now available for ongoing connection!");
-            } else {
+            if (STATUS_FAILED(updateStatus)) {
                 ESP_LOGW(TAG, "Failed to add TURN servers to peer connection %s: 0x%08" PRIx32,
                          session->peer_id, updateStatus);
-                ESP_LOGI(TAG, "New TURN servers will be available for ICE restarts or new connections");
             }
         } else {
-            ESP_LOGI(TAG, "No new TURN servers found in update - only STUN servers (already applied)");
+            DLOGI("No TURN servers in the update, only STUN (already applied)");
         }
     } else {
-        ESP_LOGI(TAG, "No ICE servers in client configuration");
+        DLOGI("No ICE servers in client configuration");
     }
-
-    ESP_LOGI(TAG, "ICE server update processing completed for session: %s", session->peer_id);
 
 CleanUp:
     if (newTurnServers != NULL) {
@@ -216,7 +202,7 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
     client_data = (kvs_pc_client_t *)pPeerConnectionClient;
     CHK(client_data->initialized, STATUS_INVALID_OPERATION);
 
-    ESP_LOGI(TAG, "Updating ICE servers for KVS peer connection client (new count: %" PRIu32 ")", ice_count);
+    DLOGI("Updating ICE servers (new count: %" PRIu32 ")", ice_count);
 
     // Free any existing ICE servers (always heap-allocated or NULL)
     if (client_data->config.ice_servers != NULL && client_data->config.ice_servers != ice_servers) {
@@ -240,13 +226,11 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
                 dst[i].username[SIZEOF(dst[i].username) - 1] = '\0';
                 STRNCPY(dst[i].credential, src[i].credential, SIZEOF(dst[i].credential) - 1);
                 dst[i].credential[SIZEOF(dst[i].credential) - 1] = '\0';
-                ESP_LOGI(TAG, "ICE Server %" PRIu32 ": %s", i, dst[i].urls);
+                DLOGI("ICE server %" PRIu32 ": %s", i, dst[i].urls);
             }
             client_data->config.ice_servers = dst;
             client_data->config.ice_server_count = ice_count;
             client_data->ice_servers_cleared = false;
-
-            ESP_LOGI(TAG, "Updated ICE server configuration: %" PRIu32 " servers", ice_count);
         } else {
             client_data->config.ice_servers = NULL;
             client_data->config.ice_server_count = 0;
@@ -266,22 +250,16 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
         MUTEX_LOCK(client_data->statsLock);
         CHK_STATUS(hashTableGetCount(client_data->activeSessions, &activeSessionCount));
         if (activeSessionCount > 0) {
-            ESP_LOGI(TAG, "Progressive ICE: Dynamically applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
+            DLOGI("Progressive ICE: applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
             CHK_STATUS(hashTableIterateEntries(client_data->activeSessions, POINTER_TO_HANDLE(client_data), kvs_applyNewIceServersCallback));
-            ESP_LOGI(TAG, "Progressive ICE: Successfully processed all %" PRIu32 " existing sessions for dynamic updates", activeSessionCount);
-        } else {
-            ESP_LOGI(TAG, "Progressive ICE: No existing sessions to update - new ICE servers will be used for future connections");
         }
         MUTEX_UNLOCK(client_data->statsLock);
     } else if (client_data->activeSessions != NULL) {
         // Fallback without synchronization if statsLock is invalid
         CHK_STATUS(hashTableGetCount(client_data->activeSessions, &activeSessionCount));
         if (activeSessionCount > 0) {
-            ESP_LOGI(TAG, "Progressive ICE: Dynamically applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
+            DLOGI("Progressive ICE: applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
             CHK_STATUS(hashTableIterateEntries(client_data->activeSessions, POINTER_TO_HANDLE(client_data), kvs_applyNewIceServersCallback));
-            ESP_LOGI(TAG, "Progressive ICE: Successfully processed all %" PRIu32 " existing sessions for dynamic updates", activeSessionCount);
-        } else {
-            ESP_LOGI(TAG, "Progressive ICE: No existing sessions to update - new ICE servers will be used for future connections");
         }
     }
 
@@ -593,7 +571,6 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
     session->rtc_metrics_history.sessionStartTime = session->start_time;
 
         // Create the actual KVS peer connection
-    ESP_LOGI(TAG, "Creating KVS peer connection for peer: %s", peer_id);
     CHK_STATUS(kvs_initializePeerConnection(client_data, &session->peer_connection));
 
     // Set up callbacks
@@ -612,8 +589,6 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
         STATUS addStatus = hashTablePut(client_data->activeSessions, (UINT64)peerIdHash, POINTER_TO_HANDLE(session));
         if (STATUS_FAILED(addStatus)) {
             ESP_LOGW(TAG, "Failed to add session to internal tracking for metrics: 0x%08" PRIx32, (UINT32) addStatus);
-        } else {
-            ESP_LOGI(TAG, "Added session %s to internal metrics tracking (hash=0x%08" PRIx32 ")", peer_id, peerIdHash);
         }
         MUTEX_UNLOCK(client_data->statsLock);
     }
@@ -624,7 +599,7 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
     MUTEX_LOCK(client_data->session_count_mutex);
     UINT32 old_count = client_data->session_count;
     client_data->session_count++;
-    ESP_LOGI(TAG, "Session creation: Session count %" PRIu32 " -> %" PRIu32 " (peer: %s)", old_count, client_data->session_count, peer_id);
+    DLOGI("Session count %" PRIu32 " -> %" PRIu32 " (peer: %s)", old_count, client_data->session_count, peer_id);
 
     // Start global media threads when first session is created
     if (client_data->session_count == 1 && !client_data->global_media_started) {
@@ -644,7 +619,6 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
         STATUS media_status = kvs_media_start_global_transmission(client_data, &media_config);
         if (STATUS_SUCCEEDED(media_status)) {
             client_data->global_media_started = TRUE;
-            ESP_LOGI(TAG, "Global media threads started successfully");
         } else {
             ESP_LOGW(TAG, "Failed to start global media threads: 0x%08" PRIx32, (UINT32) media_status);
         }
@@ -654,8 +628,7 @@ static WEBRTC_STATUS kvs_pc_create_session(void *pPeerConnectionClient,
 
     *ppSession = session;
 
-    ESP_LOGI(TAG, "Created KVS peer connection session for peer: %s (initiator: %s)",
-             peer_id, is_initiator ? "true" : "false");
+    DLOGI("Created peer connection session for peer: %s (initiator: %s)", peer_id, is_initiator ? "true" : "false");
 
     // For initiator sessions, we'll create an offer AFTER callbacks are registered
     // This avoids the race condition where the offer is created but can't be sent
@@ -1029,27 +1002,16 @@ static WEBRTC_STATUS kvs_pc_set_callbacks(void *pSession,
         return WEBRTC_STATUS_NULL_ARG;
     }
 
-    ESP_LOGI(TAG, "kvs_pc_set_callbacks: Setting callbacks for peer %s", session->peer_id);
-    ESP_LOGI(TAG, "  - custom_data: 0x%llx", (unsigned long long)custom_data);
-    ESP_LOGI(TAG, "  - on_message_received: %p", on_message_received);
-    ESP_LOGI(TAG, "  - on_peer_state_changed: %p", on_peer_state_changed);
-
     session->custom_data = custom_data;
     session->on_message_received = on_message_received;
     session->on_peer_state_changed = on_peer_state_changed;
 
-    // Verify the callbacks were properly set
-    ESP_LOGI(TAG, "Set KVS peer connection callbacks for peer: %s (msg_cb=%p)",
-             session->peer_id, session->on_message_received);
-
     // If this session needs an offer, create it now that callbacks are registered
     if (session->needs_offer) {
-        ESP_LOGI(TAG, "Creating offer for session that needs one: %s", session->peer_id);
+        DLOGI("Creating offer for peer: %s", session->peer_id);
         STATUS offer_status = kvs_create_and_send_offer(session);
         if (STATUS_FAILED(offer_status)) {
             ESP_LOGW(TAG, "Failed to create offer after setting callbacks: 0x%08" PRIx32, (UINT32) offer_status);
-        } else {
-            ESP_LOGI(TAG, "Successfully created and sent offer after setting callbacks");
         }
         // Clear the flag regardless of success/failure
         session->needs_offer = FALSE;
@@ -1071,7 +1033,7 @@ static VOID onIceCandidateHandler(UINT64 customData, PCHAR candidateJson)
 
     if (candidateJson == NULL || candidateJson[0] == '\0') {
         /* ICE gathering completed */
-        ESP_LOGI(TAG, "ICE candidate gathering finished for peer: %s", session->peer_id);
+        DLOGI("ICE candidate gathering finished for peer: %s", session->peer_id);
         session->candidate_gathering_done = TRUE;
 
         /* Master (responder) in non-trickle mode: Send answer now with all candidates */
@@ -1445,8 +1407,6 @@ static STATUS kvs_create_and_send_offer(kvs_pc_session_t* session)
     CHK(session != NULL, STATUS_NULL_ARG);
     CHK(session->is_initiator, STATUS_INVALID_OPERATION);
 
-    ESP_LOGI(TAG, "Creating SDP offer for peer: %s", session->peer_id);
-
     /* Set trickle ICE based on config */
     offer_sdp.useTrickleIce = session->client->trickleIce;
 
@@ -1499,16 +1459,13 @@ static STATUS kvs_create_and_send_offer(kvs_pc_session_t* session)
         SNPRINTF(offer_msg.correlation_id, APP_WEBRTC_MAX_CORRELATION_ID_LEN, "%llu_%zu",
                  (unsigned long long) GETTIME(), ATOMIC_INCREMENT(&session->correlation_id_postfix));
 
-        ESP_LOGI(TAG, "Sending SDP offer for peer: %s (len=%" PRIu32 ")", session->peer_id, offer_len);
+        DLOGI("Sending SDP offer for peer: %s (len=%" PRIu32 ")", session->peer_id, offer_len);
 
         // Send through callback if registered
-        ESP_LOGI(TAG, "Checking message callback: %p for peer %s", session->on_message_received, session->peer_id);
         if (session->on_message_received != NULL) {
             WEBRTC_STATUS cb_status = session->on_message_received(session->custom_data, &offer_msg);
             if (cb_status != WEBRTC_STATUS_SUCCESS) {
                 ESP_LOGW(TAG, "Offer callback failed for peer %s: 0x%08" PRIx32, session->peer_id, (UINT32) cb_status);
-            } else {
-                ESP_LOGI(TAG, "Offer successfully sent via callback for peer: %s", session->peer_id);
             }
         } else {
             ESP_LOGW(TAG, "No message callback registered - offer not sent for peer: %s", session->peer_id);
@@ -1798,7 +1755,7 @@ static STATUS kvs_initializePeerConnection(kvs_pc_client_t* client, PRtcPeerConn
             if (configuration.iceServers[i].urls[0] == '\0') {
                 continue;
             }
-            ESP_LOGI(TAG, "ICE server %" PRIu32 ": %s", i, configuration.iceServers[i].urls);
+            DLOGI("ICE server %" PRIu32 ": %s", i, configuration.iceServers[i].urls);
         }
     } else if (client->ice_servers_cleared) {
         /* ICE servers explicitly cleared (e.g. local LAN session) — host candidates only.
@@ -1809,7 +1766,7 @@ static STATUS kvs_initializePeerConnection(kvs_pc_client_t* client, PRtcPeerConn
         SNPRINTF(configuration.iceServers[0].urls, MAX_ICE_CONFIG_URI_LEN, APP_WEBRTC_DEFAULT_STUN_SERVER);
         configuration.iceServers[0].username[0] = '\0';
         configuration.iceServers[0].credential[0] = '\0';
-        ESP_LOGI(TAG, "Creating peer connection with STUN server: %s", configuration.iceServers[0].urls);
+        DLOGI("Creating peer connection with STUN server: %s", configuration.iceServers[0].urls);
     }
 
     // Get or create a certificate for the peer connection
@@ -1818,13 +1775,10 @@ static STATUS kvs_initializePeerConnection(kvs_pc_client_t* client, PRtcPeerConn
     // Add certificate to configuration if available
     if (pRtcCertificate != NULL) {
         configuration.certificates[0] = *pRtcCertificate;
-        ESP_LOGI(TAG, "Using certificate for peer connection");
     }
 
     // Create the peer connection
     CHK_STATUS(createPeerConnection(&configuration, ppRtcPeerConnection));
-
-    ESP_LOGI(TAG, "KVS peer connection created successfully");
 
 CleanUp:
     CHK_LOG_ERR(retStatus);
@@ -1849,8 +1803,6 @@ static STATUS kvs_setupMediaTracks(kvs_pc_session_t* session)
 
     MEMSET(&videoTrack, 0x00, SIZEOF(RtcMediaStreamTrack));
     MEMSET(&audioTrack, 0x00, SIZEOF(RtcMediaStreamTrack));
-
-    ESP_LOGI(TAG, "Setting up media tracks for peer: %s", session->peer_id);
 
     // Add supported codecs from configuration
     CHK_STATUS(addSupportedCodec(session->peer_connection, session->client->config.video_codec));
@@ -1888,7 +1840,7 @@ static STATUS kvs_setupMediaTracks(kvs_pc_session_t* session)
         } else {
             fmtp = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";  /* 3.1 */
         }
-        ESP_LOGI(TAG, "H.264 SDP fmtp: %s (capture height %" PRIu32 ")", fmtp, (uint32_t)active.height);
+        DLOGI("H.264 SDP fmtp: %s (capture height %" PRIu32 ")", fmtp, (uint32_t)active.height);
         CHK_STATUS(transceiverSetFmtp(session->video_transceiver, (PCHAR) fmtp));
     }
 
@@ -1917,13 +1869,11 @@ static STATUS kvs_setupMediaTracks(kvs_pc_session_t* session)
 #if KVS_ENABLE_SENDER_BANDWIDTH_ESTIMATION
     if (session->client->config.trickle_ice) {  // Use trickle_ice as proxy for TWCC support
         CHK_STATUS(peerConnectionOnSenderBandwidthEstimation(session->peer_connection, POINTER_TO_HANDLE(session), kvs_senderBandwidthEstimationHandler));
-        ESP_LOGI(TAG, "TWCC sender bandwidth estimation enabled for peer: %s", session->peer_id);
+        DLOGI("TWCC sender bandwidth estimation enabled for peer: %s", session->peer_id);
     }
 #else
     ESP_LOGD(TAG, "TWCC sender bandwidth estimation disabled by macro for peer: %s", session->peer_id);
 #endif
-
-    ESP_LOGI(TAG, "Media tracks configured successfully");
 
 CleanUp:
     CHK_LOG_ERR(retStatus);
@@ -1996,7 +1946,7 @@ static STATUS kvs_handleOffer(kvs_pc_session_t* session, webrtc_message_t* messa
                 payload[answer_len] = '\0';
                 answer_msg.payload = payload;
                 answer_msg.payload_len = (UINT32) STRLEN(payload);
-                ESP_LOGI(TAG, "Sending answer to peer: %s", session->peer_id);
+                DLOGI("Sending answer to peer: %s", session->peer_id);
 
                 session->on_message_received(session->custom_data, &answer_msg);
                 SAFE_MEMFREE(payload);
@@ -2581,7 +2531,7 @@ static STATUS kvs_getOrCreateCertificate(kvs_pc_client_t* client, PRtcCertificat
         if (retStatus == STATUS_SUCCESS) {
             pCertificate = (PRtcCertificate)HANDLE_TO_POINTER(data);
             CHK_STATUS(stackQueueGetCount(client->pregeneratedCertificates, &certCount));
-            ESP_LOGI(TAG, "Using pre-generated certificate (remaining in pool: %" PRIu32 ")", certCount);
+            DLOGI("Using pre-generated certificate (remaining in pool: %" PRIu32 ")", certCount);
         } else if (retStatus == STATUS_NOT_FOUND) {
             // Empty queue is not an error - we'll create on demand
             retStatus = STATUS_SUCCESS;

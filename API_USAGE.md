@@ -208,7 +208,7 @@ WEBRTC_STATUS app_webrtc_set_role(webrtc_channel_role_type_t role);
 // ICE configuration (default: trickle ICE + TURN enabled)
 WEBRTC_STATUS app_webrtc_set_ice_config(bool trickle_ice, bool use_turn);
 
-// Logging (default: INFO level)
+// Logging (default: WARN). 3 (INFO) adds the session setup details.
 WEBRTC_STATUS app_webrtc_set_log_level(uint32_t level);
 
 // Codec selection (default: OPUS + H.264)

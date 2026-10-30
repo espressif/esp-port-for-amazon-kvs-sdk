@@ -539,7 +539,7 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
      * (like close frames) are processed as signaling messages */
     if (event_id == WEBSOCKET_EVENT_DATA && data != NULL) {
         if (data->data_ptr == NULL || data->data_len == 0) {
-            ESP_LOGI(TAG, "WebSocket empty frame received, op_code: 0x%x, fin: %d",
+            ESP_LOGD(TAG, "WebSocket empty frame received, op_code: 0x%x, fin: %d",
                     data->op_code, data->fin);
         } else {
             // For frames with data, log the content
@@ -696,8 +696,6 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
                 if (data->data_ptr == NULL || data->data_len == 0) {
                     // Empty PONG frames might come with op_code=0x1
                     // So we'll identify them based on being empty rather than by opcode
-                    ESP_LOGI(TAG, "Received empty WebSocket frame, likely a control frame (PING/PONG), op_code: 0x%x, fin: %d",
-                            data->op_code, data->fin);
                     break;
                 }
 
@@ -1085,17 +1083,17 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
         else if (pRecvMsg->signalingMessage.payloadLen > 0) {
             // Look for ICE candidate in the payload
             if (STRSTR(pRecvMsg->signalingMessage.payload, "candidate") != NULL) {
-                ESP_LOGI(TAG, "Detected ICE candidate in payload, setting message type accordingly");
+                DLOGI("Detected ICE candidate in payload, setting message type accordingly");
                 pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE;
             }
             // Check for SDP offer in the payload
             else if (STRSTR(pRecvMsg->signalingMessage.payload, "offer") != NULL) {
-                ESP_LOGI(TAG, "Detected SDP offer in payload, setting message type accordingly");
+                DLOGI("Detected SDP offer in payload, setting message type accordingly");
                 pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_OFFER;
             }
             // Check for SDP answer in the payload
             else if (STRSTR(pRecvMsg->signalingMessage.payload, "answer") != NULL) {
-                ESP_LOGI(TAG, "Detected SDP answer in payload, setting message type accordingly");
+                DLOGI("Detected SDP answer in payload, setting message type accordingly");
                 pRecvMsg->signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ANSWER;
             }
         }

@@ -76,23 +76,31 @@ VOID addLogMetadata(const PCHAR buffer, UINT32 bufferLen, const PCHAR fmt, UINT3
 //
 // Default logger function
 //
-#include "esp_log.h"
-
 VOID defaultLogPrint(UINT32 level, const PCHAR tag, const PCHAR fmt, ...)
 {
     CHAR logFmtString[MAX_LOG_FORMAT_LENGTH + 1];
     UINT32 logLevel = GET_LOGGER_LOG_LEVEL();
-    UNUSED_PARAM(tag);
     if (logLevel != LOG_LEVEL_SILENT && level >= logLevel) {
         addLogMetadata(logFmtString, (UINT32) ARRAY_SIZE(logFmtString), fmt, level);
 
         va_list valist;
         va_start(valist, fmt);
-        // KVS: VERBOSE=1 DEBUG=2 INFO=3 WARN=4 ERROR=5 FATAL=6 (higher=more severe)
-        // ESP: ERROR=1 WARN=2 INFO=3 DEBUG=4 VERBOSE=5 (higher=more verbose)
-        // Correct mapping: esp_level = 6 - kvs_level (clamped to ESP_LOG_ERROR minimum)
-        esp_log_level_t esp_level = (level >= 6) ? ESP_LOG_ERROR : (esp_log_level_t)(6 - level);
-        esp_log_writev(esp_level, tag, logFmtString, valist);
+        const char *esp_tag = tag;
+        esp_log_level_t esp_level;
+        switch (level) {
+            case LOG_LEVEL_VERBOSE: esp_level = ESP_LOG_VERBOSE; break;
+            case LOG_LEVEL_DEBUG:   esp_level = ESP_LOG_DEBUG;   break;
+            case LOG_LEVEL_INFO:    esp_level = ESP_LOG_INFO;    break;
+            case LOG_LEVEL_WARN:    esp_level = ESP_LOG_WARN;    break;
+            case LOG_LEVEL_PROFILE:
+                // PROFILE timings print on every session. Keep them at DEBUG under one tag:
+                // esp_log_level_set(KVS_PROFILE_LOG_TAG, ESP_LOG_DEBUG) turns them on.
+                esp_level = ESP_LOG_DEBUG;
+                esp_tag = KVS_PROFILE_LOG_TAG;
+                break;
+            default:                esp_level = ESP_LOG_ERROR;   break;
+        }
+        esp_log_writev(esp_level, esp_tag, logFmtString, valist);
         va_end(valist);
     }
 }
