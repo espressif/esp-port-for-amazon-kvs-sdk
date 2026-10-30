@@ -1,0 +1,10 @@
+# Runs the receive-path player with no display: the inbound video is decoded and
+# counted, and nothing is drawn. For ESP-EMU, which models no display, and for
+# boards without a panel.
+#
+# Under ESP-EMU, chain it last, after sdkconfig.ci.emu (which turns the player off)
+# and sdkconfig.ci.playermem (which moves the decoder to PSRAM):
+#   sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.e2e;sdkconfig.ci.emu;
+#   sdkconfig.ci.playermem;sdkconfig.ci.player_headless
+CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=y
+CONFIG_MEDIA_STREAM_PLAYER_HEADLESS=y

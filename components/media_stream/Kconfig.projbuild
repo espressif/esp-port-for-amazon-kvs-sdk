@@ -1771,6 +1771,18 @@ menu "Media Stream Configuration"
                 support PPA (CONFIG_SOC_PPA_SUPPORTED), otherwise a CPU
                 fallback is used.
 
+        config MEDIA_STREAM_PLAYER_HEADLESS
+            bool "Decode without a display (headless)"
+            depends on MEDIA_STREAM_ENABLE_VIDEO_PLAYER
+            default n
+            help
+                Decode the inbound video but do not draw it. The display is
+                never started. Each decoded frame is counted and dropped.
+
+                The player logs the same received and played fps as with a
+                display. Use this to test the receive path on a board or an
+                emulator (ESP-EMU) that has no panel.
+
         config MEDIA_STREAM_PLAYER_QUEUE_DEPTH
             int "Frame queue depth"
             depends on MEDIA_STREAM_ENABLE_VIDEO_PLAYER

@@ -27,8 +27,8 @@
  * this translation unit compiles to empty and video_player_adapter.c's
  * NO-PLAYER stub branch (selected via
  * CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n) never calls the symbols
- * defined below. */
-#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER
+ * defined below. A headless player uses video_render_headless.c instead. */
+#if CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER && !CONFIG_MEDIA_STREAM_PLAYER_HEADLESS
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -637,4 +637,4 @@ void video_render_display_deinit(video_render_display_handle_t handle)
     heap_caps_free(handle);
 }
 
-#endif /* CONFIG_IDF_TARGET_ESP32P4 */
+#endif /* CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER && !CONFIG_MEDIA_STREAM_PLAYER_HEADLESS */
