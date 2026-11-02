@@ -241,7 +241,9 @@ static void cache_param_sets(video_player_context_t *ctx, const uint8_t *data, u
 /* Ask the sender for an IDR, at most twice a second. */
 static void request_keyframe(video_player_context_t *ctx)
 {
-    if (ctx->config.request_keyframe == NULL) {
+    /* Not once a stop has begun: the PLI goes out under the peer's SRTP lock and can
+     * wait on the ICE lock, which the stop's caller may hold. */
+    if (ctx->config.request_keyframe == NULL || ctx->stopping) {
         return;
     }
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
@@ -509,10 +511,15 @@ fail:
 esp_err_t video_player_start(video_player_handle_t handle)
 {
     video_player_context_t *ctx = (video_player_context_t *)handle;
-    if (ctx == NULL || !ctx->initialized || ctx->running) {
+    /* ctx->task is still set when a stop timed out and left the old task running. */
+    if (ctx == NULL || !ctx->initialized || ctx->running || ctx->task != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     ctx->stopping = false;
+    /* Clear what an earlier stop can leave behind: a late give, and a sentinel the
+     * last task never read, which would end the new task at once. */
+    xSemaphoreTake(ctx->task_exited, 0);
+    drain_queue(ctx->queue);
     /* RX video decoder pinned to core 1 — paired with video_encoder. Audio
      * path (encoder/decoder/i2s_read/i2s_write) is pinned to core 0, so video
      * work doesn't preempt audio under bidirectional load. */
@@ -543,19 +550,27 @@ esp_err_t video_player_stop(video_player_handle_t handle)
     /* Wake the task: push a sentinel after draining. */
     drain_queue(ctx->queue);
     video_frame_desc_t *sentinel = FRAME_SENTINEL;
-    xQueueSend(ctx->queue, &sentinel, portMAX_DELAY);
+    /* Bounded like the wait below: with the decode task stuck the queue never
+     * empties, and an unbounded send would wedge the teardown before that wait. */
+    if (xQueueSend(ctx->queue, &sentinel, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "video queue still full, decode task not consuming");
+    }
 
     /* Wait for the task to signal it is out of its loop, then delete it from
      * here. Bounded: a decode call that never returns must not wedge the
      * session teardown (and with it every later offer) as well. */
+    ctx->running = false;
     if (ctx->task != NULL) {
         if (xSemaphoreTake(ctx->task_exited, pdMS_TO_TICKS(3000)) != pdTRUE) {
-            ESP_LOGE(TAG, "decode task did not exit within 3 s, deleting it anyway");
+            /* Leave the task and everything it uses alone: deleting it could leave a
+             * lock it holds taken for good, and freeing its state under it would
+             * corrupt the decoder or the display. deinit() then leaks the player. */
+            ESP_LOGE(TAG, "decode task did not exit within 3 s; leaving it and its state in place");
+            return ESP_ERR_TIMEOUT;
         }
         vTaskDeleteWithCaps(ctx->task);
         ctx->task = NULL;
     }
-    ctx->running = false;
     return ESP_OK;
 }
 
@@ -565,6 +580,10 @@ esp_err_t video_player_play_frame(video_player_handle_t handle, const uint8_t *d
     video_player_context_t *ctx = (video_player_context_t *)handle;
     if (ctx == NULL || !ctx->initialized || !ctx->running || data == NULL || len == 0) {
         return ESP_ERR_INVALID_ARG;
+    }
+    /* A stop is under way: don't refill the queue it is trying to wake the task through. */
+    if (ctx->stopping) {
+        return ESP_OK;
     }
 
     /* Log first inbound video frame and periodic call count so it's obvious
@@ -689,10 +708,18 @@ esp_err_t video_player_deinit(video_player_handle_t handle)
     if (ctx->running) {
         video_player_stop(handle);
     }
+    if (ctx->task != NULL) {
+        /* A stop timed out with the decode task still running: freeing now would pull
+         * the queue, the decoder and the display out from under it. */
+        ESP_LOGE(TAG, "decode task still running; leaking the player instead of freeing it");
+        return ESP_ERR_TIMEOUT;
+    }
     if (ctx->queue) {
         drain_queue(ctx->queue);
         vQueueDelete(ctx->queue);
-        if (ctx->task_exited) vSemaphoreDelete(ctx->task_exited);
+    }
+    if (ctx->task_exited) {
+        vSemaphoreDelete(ctx->task_exited);
     }
     if (ctx->render) {
         video_render_display_deinit(ctx->render);
