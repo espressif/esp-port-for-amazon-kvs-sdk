@@ -17,11 +17,23 @@
 #include <freertos/task.h>
 
 #include "lwip/sockets.h"
+#if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
+#include "driver/uart.h"
+#include "driver/uart_vfs.h"
+#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
 
 #include "webrtc_mem_utils.h"
 #include "esp_cli.h"
 
 static const char *TAG = "[esp_cli]";
+
+/* RX ring for the console. The REPL installs 256 bytes, and a pasted line
+ * overruns it: linenoise redraws per byte, so it reads slower than 115200.
+ * One line at the 2 kB limit is enough; the ring comes out of internal RAM. */
+#define ESP_CLI_RX_BUF_SIZE (2048 + 256)
 
 static int task_dump_cli_handler(int argc, char *argv[])
 {
@@ -298,6 +310,15 @@ int esp_cli_start()
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
     esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_uart(&hw_config, &repl_config, &repl));
+    /* Reinstall with a larger RX ring; the REPL task doesn't read until started.
+     * Point stdout back at the driverless path first, as the REPL's own teardown does. */
+    uart_vfs_dev_use_nonblocking(hw_config.channel);
+    ESP_ERROR_CHECK(uart_driver_delete(hw_config.channel));
+    ESP_ERROR_CHECK(uart_driver_install(hw_config.channel, ESP_CLI_RX_BUF_SIZE, 0, 0, NULL, 0));
+    /* uart_driver_delete() released the console pins; route them again (custom pins). */
+    ESP_ERROR_CHECK(uart_set_pin(hw_config.channel, hw_config.tx_gpio_num, hw_config.rx_gpio_num,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    uart_vfs_dev_use_driver(hw_config.channel);
 
 #elif defined(CONFIG_ESP_CONSOLE_USB_CDC)
     esp_console_dev_usb_cdc_config_t hw_config = ESP_CONSOLE_DEV_CDC_CONFIG_DEFAULT();
@@ -306,6 +327,13 @@ int esp_cli_start()
 #elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
     esp_console_dev_usb_serial_jtag_config_t hw_config = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl));
+    /* As for UART: the driver drops RX packets when its ring is full. */
+    usb_serial_jtag_driver_config_t usj_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    usj_config.rx_buffer_size = ESP_CLI_RX_BUF_SIZE;
+    usb_serial_jtag_vfs_use_nonblocking();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_uninstall());
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj_config));
+    usb_serial_jtag_vfs_use_driver();
 
 #else
 #error Unsupported console type
