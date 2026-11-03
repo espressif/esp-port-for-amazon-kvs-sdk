@@ -854,6 +854,10 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
     BOOL sampleConfigurationObjLockLocked = FALSE, streamingSessionListReadLockLocked = FALSE;
     PAppWebRTCSession pAppWebRTCSession = NULL;
     UINT32 i, clientIdHash;
+    // Signaling reconnect retry state. It starts fresh on every run.
+    UINT32 retryCount = 0;
+    UINT64 lastRetryTime = 0, connectionStartTime = 0;
+    BOOL connectionInProgress = FALSE;
 
     CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
 
@@ -903,11 +907,6 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
             gWebRtcAppConfig.signaling_client_if != NULL &&
             gSignalingClientData != NULL) {
 
-            // Static variables to track retry attempts and timing
-            static UINT32 retryCount = 0;
-            static UINT64 lastRetryTime = 0;
-            static UINT64 connectionStartTime = 0;
-            static BOOL connectionInProgress = FALSE;
             UINT64 currentTime = GETTIME();
 
             // Exponential backoff: 5s, 10s, 20s, 40s, 60s (max)
@@ -990,6 +989,8 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                 // now rather than carrying on against a context about to be freed.
                 if (ATOMIC_LOAD_BOOL(&pSampleConfiguration->appTerminateFlag)) {
                     DLOGI("Terminate requested during signaling reconnect - leaving cleanup loop");
+                    // A connect cut short by the terminate is not an error
+                    retStatus = STATUS_SUCCESS;
                     MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
                     sampleConfigurationObjLockLocked = FALSE;
                     break;
@@ -1939,6 +1940,9 @@ static void app_webrtc_runTask(void *pvParameters)
             CHK(!ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag), STATUS_SUCCESS);
             init_delay_ms = MIN(init_delay_ms * 2, 60000);
         }
+        // A terminate during a successful init() found no client to abort. Stop before
+        // the first connect. The teardown frees the client.
+        CHK(!ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag), STATUS_SUCCESS);
 
         DLOGI("Signaling client initialized successfully");
 
@@ -1995,7 +1999,10 @@ static void app_webrtc_runTask(void *pvParameters)
             DLOGD("Connecting signaling client");
             retStatus = gWebRtcAppConfig.signaling_client_if->connect(gSignalingClientData);
 
-            if (STATUS_FAILED(retStatus)) {
+            if (STATUS_FAILED(retStatus) && ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag)) {
+                DLOGI("Initial signaling connect stopped by terminate");
+                retStatus = STATUS_SUCCESS;
+            } else if (STATUS_FAILED(retStatus)) {
                 DLOGE("Initial signaling client connection failed: 0x%08x", retStatus);
                 DLOGI("Connection failure will be handled by retry logic in sessionCleanupWait");
 

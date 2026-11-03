@@ -720,7 +720,7 @@ STATUS signalingFetchSync(PSignalingClient pSignalingClient)
     // Another thread is inside freeSignaling(); the client is about to disappear and freeSignaling() may be
     // waiting for the very thread making this call (a signaling callback). Return instead of waiting.
     CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SIGNALING_FREE_IN_PROGRESS,
-             "signalingClientFetchSync() refused: freeSignalingClient() is running on another thread");
+             "signalingClientFetchSync() refused: the client is shutting down");
 
     // Check if we are already not connected
     if (ATOMIC_LOAD_BOOL(&pSignalingClient->connected)) {
@@ -827,10 +827,13 @@ STATUS signalingDisconnectSync(PSignalingClient pSignalingClient)
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
-    // Another thread is inside freeSignaling(), which disconnects the client anyway. Return success without waiting,
-    // as for a client that is not connected; see signalingFetchSync() for why this call must not wait.
-    CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SUCCESS,
-             "signalingClientDisconnectSync() skipped: freeSignalingClient() is running on another thread and disconnects the client");
+    // The client is shutting down: an abort or a free set shutdown, and freeSignaling() disconnects the client anyway.
+    // Return success without waiting, as for a client that is not connected; see signalingFetchSync() for why this
+    // call must not wait. Every terminate after an abort comes here, so this is not a warning.
+    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        DLOGI("signalingClientDisconnectSync() skipped: the client is shutting down");
+        CHK(FALSE, STATUS_SUCCESS);
+    }
 
     // Check if we are already not connected
     CHK(ATOMIC_LOAD_BOOL(&pSignalingClient->connected), retStatus);
@@ -863,7 +866,7 @@ STATUS signalingDeleteSync(PSignalingClient pSignalingClient)
     // Another thread is inside freeSignaling(); see signalingFetchSync(). Checked before the deleting flag and
     // the state machine are touched so the refusal leaves the client exactly as freeSignaling() expects it.
     CHK_WARN(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SIGNALING_FREE_IN_PROGRESS,
-             "signalingClientDeleteSync() refused: freeSignalingClient() is running on another thread");
+             "signalingClientDeleteSync() refused: the client is shutting down");
 
     // Mark as being deleted
     ATOMIC_STORE_BOOL(&pSignalingClient->deleting, TRUE);
