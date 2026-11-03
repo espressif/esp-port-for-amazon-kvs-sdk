@@ -1,0 +1,77 @@
+From 80cb18ce7ae049095e54029481601d5e26d271c1 Mon Sep 17 00:00:00 2001
+From: Vikram Dattu <vikram.dattu@espressif.com>
+Date: Tue, 3 Nov 2026 21:51:21 +0530
+Subject: [PATCH] Signaling: end the fetch and GET_TOKEN back-offs on shutdown
+
+A free sets the client's shutdown flag, and so does a caller that wants
+a connect in progress to stop. Two sleeps ignored it:
+
+- signalingClientFetchSync() slept its whole back-off between attempts,
+  up to about 32 s with full jitter.
+- The GET_TOKEN state slept until its retry time, up to 10 s.
+
+Both now sleep in steps of at most 100 ms and stop when shutdown is set.
+The fetch then returns STATUS_SIGNALING_FREE_IN_PROGRESS, as for a fetch
+refused during a free. GET_TOKEN returns without fetching a token, and
+the state machine stops at its next shutdown check.
+---
+ src/source/Signaling/Client.c       | 9 +++++++--
+ src/source/Signaling/StateMachine.c | 8 +++++++-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/src/source/Signaling/Client.c b/src/source/Signaling/Client.c
+index 898af93ed3..fbcda94939 100644
+--- a/src/source/Signaling/Client.c
++++ b/src/source/Signaling/Client.c
+@@ -188,7 +188,7 @@ STATUS signalingClientFetchSync(SIGNALING_CLIENT_HANDLE signalingClientHandle)
+     SignalingClientInfoInternal signalingClientInfoInternal;
+     KvsRetryStrategy createSignalingClientRetryStrategy = {NULL, NULL, KVS_RETRY_STRATEGY_DISABLED};
+     INT32 signalingClientCreationMaxRetryCount;
+-    UINT64 signalingClientCreationWaitTime;
++    UINT64 signalingClientCreationWaitTime, wakeTime, now;
+     UINT64 startTime = 0;
+ 
+     DLOGI("Signaling Client Fetch Sync");
+@@ -233,7 +233,12 @@ STATUS signalingClientFetchSync(SIGNALING_CLIENT_HANDLE signalingClientHandle)
+         DLOGV("Attempting to back off for [%lf] milliseconds before creating signaling client again. "
+               "Signaling client creation retry count [%u]",
+               retStatus, signalingClientCreationWaitTime / 1000.0f, signalingClientCreationMaxRetryCount);
+-        THREAD_SLEEP(signalingClientCreationWaitTime);
++        // A free or an abort sets shutdown. Don't sit out the back-off.
++        wakeTime = GETTIME() + signalingClientCreationWaitTime;
++        while (!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown) && (now = GETTIME()) < wakeTime) {
++            THREAD_SLEEP(MIN(wakeTime - now, 100 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
++        }
++        CHK(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_SIGNALING_FREE_IN_PROGRESS);
+         signalingClientCreationMaxRetryCount--;
+     }
+ 
+diff --git a/src/source/Signaling/StateMachine.c b/src/source/Signaling/StateMachine.c
+index 9f543b670a..c92b1d3d2e 100644
+--- a/src/source/Signaling/StateMachine.c
++++ b/src/source/Signaling/StateMachine.c
+@@ -346,6 +346,7 @@ STATUS executeGetTokenSignalingState(UINT64 customData, UINT64 time)
+     STATUS retStatus = STATUS_SUCCESS;
+     PSignalingClient pSignalingClient = SIGNALING_CLIENT_FROM_CUSTOM_DATA(customData);
+     SERVICE_CALL_RESULT serviceCallResult;
++    UINT64 now;
+ 
+     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+ 
+@@ -358,7 +359,12 @@ STATUS executeGetTokenSignalingState(UINT64 customData, UINT64 time)
+                                                                             SIGNALING_CLIENT_STATE_GET_CREDENTIALS));
+     }
+ 
+-    THREAD_SLEEP_UNTIL(time);
++    // A free or an abort sets shutdown. Don't sit out the back-off, and fetch no token:
++    // the state machine stops at its next shutdown check, as for any other state.
++    while (!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown) && (now = GETTIME()) < time) {
++        THREAD_SLEEP(MIN(time - now, 100 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
++    }
++    CHK(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), retStatus);
+ 
+     // Use the credential provider to get the token
+     PROFILE_CALL_WITH_START_END_T_OBJ(retStatus = pSignalingClient->pCredentialProvider->getCredentialsFn(pSignalingClient->pCredentialProvider,
+-- 
+2.43.0
+
