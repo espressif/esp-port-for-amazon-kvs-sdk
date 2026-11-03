@@ -94,11 +94,34 @@ if(IDF_TARGET STREQUAL "linux")
     set(LWS_ROLE_QUIC OFF CACHE BOOL "" FORCE)
 endif()
 
+# IDF v6 ships mbedTLS 4 and picolibc, whose errno is thread-local. lws decides at the
+# top of its CMakeLists, before its own mbedtls probe runs, whether to force
+# LWIP_PROVIDE_ERRNO; with LWS_HAVE_MBEDTLS_V4 unset it does, lwIP then declares a
+# non-TLS `extern int errno`, and the link fails ("TLS definition ... mismatches
+# non-TLS reference"). Set the probe result up front. lws's own probe then skips, and
+# the value reaches lws_config.h (#define LWS_HAVE_MBEDTLS_V4), which is how both the
+# lws sources and consumers of libwebsockets.h see it; nothing passes it as a -D.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
+    set(LWS_HAVE_MBEDTLS_V4 1)
+endif()
+
 # Add libwebsockets as a subdirectory
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libwebsockets
                  ${CMAKE_CURRENT_BINARY_DIR}/libwebsockets)
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE websockets)
+
+# The other half of the IDF v6 errno fix above: lws's lib/CMakeLists puts lwIP's own
+# src/include/lwip dir on the path, where <errno.h> is lwip/errno.h. Without
+# LWIP_PROVIDE_ERRNO that declares nothing, so drop the dir and let <errno.h> reach
+# picolibc. <netdb.h> still resolves through lwip/port/include.
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
+    get_target_property(_lws_inc websockets INCLUDE_DIRECTORIES)
+    if(_lws_inc)
+        list(FILTER _lws_inc EXCLUDE REGEX "components/lwip/lwip/src/include/lwip/?$")
+        set_target_properties(websockets PROPERTIES INCLUDE_DIRECTORIES "${_lws_inc}")
+    endif()
+endif()
 
 # GCC 13+ (IDF v5.5.4 toolchain) flags lws's own mbedtls-client.c ALPN code
 # (temp_alpn stack buffer aliased into alpn_comma, used after its scope ends) —
@@ -152,16 +175,6 @@ else()
     target_link_libraries(websockets PRIVATE idf::mbedtls)
 endif()
 
-# add_subdirectory bypasses lws's own mbedtls-version detection; set
-# LWS_HAVE_MBEDTLS_V4 so libwebsockets.h uses the v4 include paths (lws sources +
-# public consumers of the header). On linux we pin LWS_MBEDTLS_INCLUDE_DIRS, so
-# lws's own v4 probe runs and sets LWS_HAVE_MBEDTLS_V4 in lws_config.h — setting
-# it manually too would redefine it.
-if(IDF_VERSION_MAJOR GREATER_EQUAL 6 AND NOT IDF_TARGET STREQUAL "linux")
-    target_compile_definitions(websockets PUBLIC LWS_HAVE_MBEDTLS_V4=1)
-    target_compile_definitions(${COMPONENT_LIB} INTERFACE LWS_HAVE_MBEDTLS_V4=1)
-endif()
-
 # Same reason for spi_flash: lws romfs.c includes esp_flash.h, whose v6 header
 # chain (esp_hal_mspi, esp_blockdev) an add_subdirectory subproject cannot see
 # through the component REQUIRES.
@@ -176,3 +189,4 @@ endif()
 # Supply our own dependency-free UTC timegm() (picolibc's symbol isn't linkable here)
 # so lws's date.c resolves it under LWS_HAVE_TIMEGM.
 target_sources(websockets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lws_timegm.c)
+target_sources(websockets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/lws_fd_cloexec.c)

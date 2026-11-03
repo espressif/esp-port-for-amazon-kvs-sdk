@@ -1,0 +1,2 @@
+# libwebsockets signaling instead of esp_websocket_client, so the lws component is compiled and linked.
+CONFIG_USE_ESP_WEBSOCKET_CLIENT=n
