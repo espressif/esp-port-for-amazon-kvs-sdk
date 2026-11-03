@@ -1142,6 +1142,14 @@ STATUS abortKvsSignalingClient(PVOID pSignalingClient)
         ATOMIC_STORE_BOOL(&pClient->shutdown, TRUE);
         CVAR_BROADCAST(pClient->connectedCvar);
     }
+#ifdef CONFIG_IOT_CORE_ENABLE_CREDENTIALS
+    // A GET_TOKEN refresh retries its fetch. Stop it at the next attempt.
+    // Same provider-type order as the free in freeKvsSignalingClient().
+    if (pClientData->pCredentialProvider != NULL && pClientData->config.fetch_credentials_cb == NULL &&
+        pClientData->config.useIotCredentials) {
+        iotCredentialProviderAbort(pClientData->pCredentialProvider);
+    }
+#endif
 #ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
     // After the store: a woken wait re-checks shutdown
     wakeEspSignalingWaits();
