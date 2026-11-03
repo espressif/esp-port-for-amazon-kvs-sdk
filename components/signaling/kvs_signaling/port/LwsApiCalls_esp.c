@@ -349,13 +349,14 @@ static VOID noteNetworkError(INT32 err)
  * machine, under the client's stateLock. */
 static STATUS waitForNetwork(PSignalingClient pSignalingClient)
 {
+    // Every signaling request passes here. A client that is shutting down sends nothing more.
+    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
+        return STATUS_SIGNALING_FREE_IN_PROGRESS;
+    }
 #ifdef ESP_SIGNALING_FOLLOWS_WIFI
     UINT64 now, end;
     EventBits_t bits;
 
-    if (ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown)) {
-        return STATUS_SIGNALING_FREE_IN_PROGRESS;
-    }
     /* The first signaling call runs with the network up, so registering then
      * starts from the right state. */
     if (s_networkEvents == NULL) {
@@ -418,8 +419,6 @@ static STATUS waitForNetwork(PSignalingClient pSignalingClient)
     } else if (!(bits & NETWORK_WAKE_BIT)) {
         ESP_LOGW(TAG, "Network still down; trying anyway");
     }
-#else
-    UNUSED_PARAM(pSignalingClient);
 #endif
     return STATUS_SUCCESS;
 }
@@ -1555,6 +1554,8 @@ STATUS connectEspSignalingClient(PSignalingClient pSignalingClient)
         MUTEX_LOCK(pSignalingClient->diagnosticsLock);
         pSignalingClient->diagnostics.connectTime = GETTIME();
         MUTEX_UNLOCK(pSignalingClient->diagnosticsLock);
+    } else if (retStatus == STATUS_SIGNALING_FREE_IN_PROGRESS) {
+        ESP_LOGI(TAG, "WebSocket connect stopped: the client is shutting down");
     } else {
         ESP_LOGE(TAG, "WebSocket connection failed with status: 0x%08" PRIx32, retStatus);
         // CHK(FALSE, retStatus == STATUS_SUCCESS ? STATUS_SIGNALING_CONNECT_FAILED : retStatus);
@@ -2959,7 +2960,6 @@ VOID wakeEspSignalingWaits(VOID)
 #endif
 }
 
-// Implement the terminateLwsListenerLoop function
 BOOL isEspSignalingTask(PSignalingClient pSignalingClient)
 {
     UNUSED_PARAM(pSignalingClient);
@@ -2969,6 +2969,7 @@ BOOL isEspSignalingTask(PSignalingClient pSignalingClient)
     return esp_work_queue_is_worker() || (gEspSignalingClientWrapper != NULL && gEspSignalingClientWrapper->wsTask == self);
 }
 
+// Implement the terminateLwsListenerLoop function
 STATUS terminateLwsListenerLoop(PSignalingClient pSignalingClient)
 {
     STATUS retStatus = STATUS_SUCCESS;
@@ -2978,12 +2979,8 @@ STATUS terminateLwsListenerLoop(PSignalingClient pSignalingClient)
      * WebSocket up also leaves pSignalingClient->connected set, and the next
      * connect then returns at once without connecting. */
     terminateEspSignalingClient(pSignalingClient);
-#ifdef ESP_SIGNALING_FOLLOWS_WIFI
     // A call waiting for the network notices a free now, not when its wait runs out
-    if (s_networkEvents != NULL) {
-        xEventGroupSetBits(s_networkEvents, NETWORK_WAKE_BIT);
-    }
-#endif
+    wakeEspSignalingWaits();
 
 CleanUp:
 
