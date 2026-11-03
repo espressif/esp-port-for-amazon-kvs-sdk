@@ -53,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Headless video player** (`CONFIG_MEDIA_STREAM_PLAYER_HEADLESS`): the receive
+  path decodes inbound H.264 without starting a display, and counts the decoded
+  frames. It lets the player run under ESP-EMU, which models no display
+  (`webrtc_classic/sdkconfig.ci.player_headless`). CI builds it on its own and in
+  the emulator chain.
 - **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
   with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
   master.

@@ -39,6 +39,7 @@ else()
         "src/video_player_adapter.c"
         "src/h264_nalu_utils.c"
         "src/video_render_display.c"
+        "src/video_render_headless.c"
         "src/media_stream.c"
     )
 endif()

@@ -172,7 +172,7 @@ build_feature_combos:
     - cd $CI_PROJECT_DIR/examples/webrtc_classic
     # Each combo is a committed sdkconfig fragment (sdkconfig.ci.*) appended
     # to the default esp32p4 chain; one board is enough for the gating checks.
-    - for COMBO in noglib no_player no_dc; do
+    - for COMBO in noglib no_player no_dc player_headless; do
     -   idf.py -B build_combo -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.$COMBO" set-target esp32p4
     -   idf.py -B build_combo build
     -   rm -rf build_combo sdkconfig dependencies.lock
@@ -195,7 +195,7 @@ build_e2e_configs:
     # appended to the per-target defaults in the order the README gives.
     - |
       set -e
-      for SPEC in webrtc_classic:esp32p4:e2e webrtc_classic:esp32p4:e2e,emu streaming_only:esp32p4:e2e,emu signaling_only:esp32c6:e2e,emu; do
+      for SPEC in webrtc_classic:esp32p4:e2e webrtc_classic:esp32p4:e2e,emu webrtc_classic:esp32p4:e2e,emu,playermem,player_headless streaming_only:esp32p4:e2e,emu signaling_only:esp32c6:e2e,emu; do
         IFS=: read EXAMPLE TARGET OVERLAYS <<< "$SPEC"
         DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.$TARGET"
         for O in ${OVERLAYS//,/ }; do DEFAULTS="$DEFAULTS;sdkconfig.ci.$O"; done

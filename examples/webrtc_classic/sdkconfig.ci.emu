@@ -13,7 +13,8 @@ CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y
 # asserts once media starts. Video only, in both directions.
 CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
 
-# The receive path needs a display the emulator does not model either.
+# The receive path needs a display the emulator does not model either. To run the
+# player anyway, without a display, chain sdkconfig.ci.player_headless after this file.
 # CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
 
 # The emulator presents UART0 as its stdio; there is no USB-Serial/JTAG model.

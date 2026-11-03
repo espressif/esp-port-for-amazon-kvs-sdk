@@ -389,6 +389,18 @@ by default so builds that only send video stay lean.
    render backend calls `bsp_display_start()` and creates an LVGL canvas on
    the active screen.
 
+### Without a display (headless)
+
+`CONFIG_MEDIA_STREAM_PLAYER_HEADLESS=y` decodes the inbound video but does not
+draw it.
+- The display is never started.
+- Each decoded frame is counted and dropped (`video_render_headless.c`).
+- The player logs the same `fps: rx=... played=...` line as with a display.
+
+Use it to test the receive path where there is no panel, such as ESP-EMU. The
+`webrtc_classic` overlay `sdkconfig.ci.player_headless` turns it on. The
+emulator chain is in that file.
+
 ### Pipeline
 
 ```
