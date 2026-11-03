@@ -115,9 +115,7 @@ void bridge_message_handler(const void* data, int len)
 
             // Log the ICE servers for debugging
             for (int i = 0; i < g_bridge_client->ice_servers_config.ice_server_count; i++) {
-                ESP_LOGI(TAG, "ICE Server %d: %s (user: %s)", i,
-                         g_bridge_client->ice_servers_config.ice_servers[i].urls,
-                         g_bridge_client->ice_servers_config.ice_servers[i].username);
+                ESP_LOGI(TAG, "ICE Server %d: %s", i, g_bridge_client->ice_servers_config.ice_servers[i].urls);
             }
         } else {
             ESP_LOGE(TAG, "Failed to extract ICE servers from message");

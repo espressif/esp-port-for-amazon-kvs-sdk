@@ -230,7 +230,7 @@ static void kvs_apply_cached_ice_task(void *arg)
         STATUS iceCountStatus = signalingClientGetIceConfigInfoCount(
             pClientData->signalingClientHandle, &iceConfigCount);
         if (STATUS_SUCCEEDED(iceCountStatus) && iceConfigCount > 0) {
-            ESP_LOGI(TAG, "Applying %" PRIu32 " cached ICE servers to peer connection (async)", iceConfigCount);
+            DLOGI("Applying %" PRIu32 " cached ICE servers to peer connection (async)", iceConfigCount);
             pClientData->ice_callback_ctx.on_ice_servers_updated(
                 pClientData->ice_callback_ctx.customData, iceConfigCount);
         }
@@ -253,7 +253,6 @@ static void kvs_refresh_ice_task(void *arg)
     SIGNALING_CLIENT_HANDLE signalingClientHandle = pClientData->signalingClientHandle;
 
     if (signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
-        ESP_LOGI(TAG, "Background ICE refresh task started");
         STATUS status = refresh_ice_configuration((PSignalingClient)signalingClientHandle);
         if (STATUS_FAILED(status)) {
             ESP_LOGE(TAG, "Background ICE refresh failed: 0x%08" PRIx32, status);
@@ -858,9 +857,8 @@ STATUS createKvsSignalingClient(kvs_signaling_config_t *pConfig, PVOID *ppSignal
     pClientData->channelInfo.messageTtl = 0; // Default is 60 seconds
     pClientData->channelInfo.pRegion = pConfig->awsRegion;
 
-    // Set up client info with default log level
+    // Set up client info. The log level is filled in when the client is created.
     pClientData->clientInfo.version = SIGNALING_CLIENT_INFO_CURRENT_VERSION;
-    pClientData->clientInfo.loggingLevel = LOG_LEVEL_DEBUG; // Default log level
     pClientData->clientInfo.cacheFilePath = NULL; // Use the default path
     pClientData->clientInfo.signalingClientCreationMaxRetryAttempts = CREATE_SIGNALING_CLIENT_RETRY_ATTEMPTS_SENTINEL_VALUE;
 
@@ -1083,6 +1081,9 @@ STATUS connectKvsSignalingClient(PVOID pSignalingClient)
 
     // Create KVS signaling client if not already created
     if (pClientData->signalingClientHandle == INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
+        // Upstream Signaling.c sets the global log level from clientInfo. Pass the current
+        // level so that it keeps what app_webrtc_set_log_level() set.
+        pClientData->clientInfo.loggingLevel = GET_LOGGER_LOG_LEVEL();
         CHK_STATUS(createSignalingClientSync(
             &pClientData->clientInfo,
             &pClientData->channelInfo,
@@ -1493,7 +1494,7 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
             /* Skip turns:...transport=udp: the SDK has no TURN-over-DTLS, so this URI yields no
              * usable relay candidate and its stalled allocation only slows ICE gathering. */
             if (STRNCMP(pIceConfigInfo->uris[j], "turns:", 6) == 0 && STRSTR(pIceConfigInfo->uris[j], "transport=udp") != NULL) {
-                ESP_LOGI(TAG, "Skipping unusable TURNS-over-UDP URI: %s", pIceConfigInfo->uris[j]);
+                DLOGI("Skipping unusable TURNS-over-UDP URI: %s", pIceConfigInfo->uris[j]);
                 continue;
             }
 
@@ -1507,7 +1508,7 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
 
     // Add 1 for the STUN server
     *pIceConfigCount = uriCount + 1;
-    ESP_LOGI(TAG, "Total ICE servers configured: %" PRIu32, *pIceConfigCount);
+    DLOGI("Total ICE servers configured: %" PRIu32, *pIceConfigCount);
 
 CleanUp:
     return retStatus;
@@ -1543,8 +1544,6 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
 
     CHK(pClientData != NULL && data != NULL && len != NULL && have_more != NULL, STATUS_NULL_ARG);
 
-    ESP_LOGI(TAG, "kvsSignalingQueryServerGetByIdx: index=%d, useTurn=%s", index, useTurn ? "true" : "false");
-
     if (index == 0) {
         uriCount = 1; // Start with STUN server
         is_ice_refresh_in_progress = false;
@@ -1573,7 +1572,7 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
 
             if (checkStatus == WEBRTC_STATUS_SUCCESS && refreshNeeded) {
                 is_ice_refresh_in_progress = true;
-                ESP_LOGI(TAG, "ICE refresh needed - triggering background refresh");
+                DLOGI("ICE refresh needed, starting a background refresh");
 
                 // Trigger background refresh using work queue
                 // Pass pClientData instead of signalingClientHandle for progressive callback support
@@ -1582,7 +1581,7 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
                     ESP_LOGE(TAG, "Failed to queue background ICE refresh: %d", (int) result);
                 }
             } else if (checkStatus == WEBRTC_STATUS_SUCCESS) {
-                ESP_LOGI(TAG, "ICE configuration is up to date - scheduling async apply");
+                DLOGI("ICE configuration is up to date, scheduling an async apply");
                 // ICE configs are still valid (not expired). Dispatch to work queue so the
                 // callback chain doesn't block the current call (offer processing path).
                 esp_err_t result = esp_work_queue_add_task(&kvs_apply_cached_ice_task, (void*)pClientData);
@@ -1594,8 +1593,8 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
             }
         }
 
-        ESP_LOGI(TAG, "Sending immediate STUN server: %s", pIceServer->urls);
-        ESP_LOGI(TAG, "ICE refresh in progress: %s", is_ice_refresh_in_progress ? "true" : "false");
+        DLOGI("Sending immediate STUN server: %s (refresh in progress: %s)", pIceServer->urls,
+              is_ice_refresh_in_progress ? "true" : "false");
         *have_more = true; // Always ask for more to get TURN servers
         goto CleanUp;
 
@@ -1606,11 +1605,11 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
             WEBRTC_STATUS checkStatus = kvsIsIceRefreshNeededWrapper(pClientData, &refreshNeeded);
 
             if (checkStatus == WEBRTC_STATUS_SUCCESS && refreshNeeded) {
-                ESP_LOGI(TAG, "ICE refresh still in progress - asking caller to wait");
+                DLOGI("ICE refresh still in progress, asking the caller to wait");
                 *have_more = true; // Ask caller to wait for refresh completion
                 goto CleanUp;
             } else if (checkStatus == WEBRTC_STATUS_SUCCESS) {
-                ESP_LOGI(TAG, "ICE refresh completed");
+                DLOGI("ICE refresh completed");
                 is_ice_refresh_in_progress = false;
             } else {
                 ESP_LOGW(TAG, "ICE refresh check failed, assuming completed");
@@ -1640,7 +1639,7 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
                 goto CleanUp;
             }
 
-            ESP_LOGI(TAG, "Retrieved %" PRIu32 " ICE configurations", iceConfigCount);
+            DLOGI("Retrieved %" PRIu32 " ICE configurations", iceConfigCount);
 
             if (iceConfigCount > 0) {
                 // Get the first ICE config info (contains TURN servers)
@@ -1653,7 +1652,7 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
                 }
 
                 uriCount += pIceConfigInfoPtr->uriCount;
-                ESP_LOGI(TAG, "Total URI count (STUN + TURN): %" PRIu32, uriCount);
+                DLOGI("Total URI count (STUN + TURN): %" PRIu32, uriCount);
 
                 // Store the ICE config for subsequent requests
                 pIceConfigInfo = pIceConfigInfoPtr;
@@ -1680,13 +1679,13 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
 
             *have_more = (index < uriCount - 1);
 
-            ESP_LOGI(TAG, "Sending TURN server %" PRIu32 ": %s (user: %s) [have_more: %s]",
-                     turnIndex, pIceServer->urls, pIceServer->username, *have_more ? "true" : "false");
+            DLOGI("Sending TURN server %" PRIu32 ": %s [have_more: %s]", turnIndex, pIceServer->urls,
+                  *have_more ? "true" : "false");
             goto CleanUp;
         }
     }
 
-    ESP_LOGI(TAG, "No more ICE servers available for index %d", index);
+    DLOGI("No more ICE servers available for index %d", index);
     *have_more = false;
 
 CleanUp:
@@ -1886,7 +1885,6 @@ static WEBRTC_STATUS kvsGetIceServersWrapper(void *pSignalingClient, uint32_t *p
             STRNCPY(out[i].credential, iceServers[i].credential, SIZEOF(out[i].credential) - 1);
             out[i].credential[SIZEOF(out[i].credential) - 1] = '\0';
         }
-        ESP_LOGI(TAG, "KVS get_ice_servers: copied %" PRIu32 " servers to generic iceServers array", *pIceConfigCount);
     }
 
 CleanUp:
