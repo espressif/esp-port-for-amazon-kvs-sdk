@@ -182,9 +182,11 @@ build_feature_combos:
     - apt-get update && apt-get install -y pkg-config
     - *apply_sdk_patches
     - cd $CI_PROJECT_DIR/examples/webrtc_classic
+    # Stub co-processor images for the slave_* combos; they only have to build.
+    - mkdir -p /tmp/slave_stub && for f in bootloader partition-table app; do head -c 4096 /dev/urandom > /tmp/slave_stub/$f.bin; done
     # Each combo is a committed sdkconfig fragment (sdkconfig.ci.*) appended
     # to the default esp32p4 chain; one board is enough for the gating checks.
-    - for COMBO in noglib no_player no_dc player_headless lws; do
+    - for COMBO in noglib no_player no_dc player_headless lws slave_embedded slave_spiffs; do
     -   idf.py -B build_combo -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.$COMBO" set-target esp32p4
     -   idf.py -B build_combo build
     -   rm -rf build_combo sdkconfig dependencies.lock

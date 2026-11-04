@@ -8,6 +8,36 @@ menu "Slave Flasher Configuration"
             device via UART. When enabled, the host device can flash bootloader,
             partition table, and application binaries to the slave device.
 
+    choice SLAVE_FLASHER_IMAGE_SOURCE
+        prompt "Slave image source"
+        default SLAVE_FLASHER_IMAGE_SPIFFS
+        depends on SLAVE_FLASHER_ENABLE
+        help
+            Select where flash_slave() reads bootloader.bin, partition-table.bin
+            and app.bin from.
+
+        config SLAVE_FLASHER_IMAGE_SPIFFS
+            bool "SPIFFS partition 'slave'"
+            help
+                The component packs the images into a SPIFFS partition with the
+                label 'slave'. An app OTA does not update this partition.
+
+        config SLAVE_FLASHER_IMAGE_EMBEDDED
+            bool "Embedded in the app binary"
+            help
+                Embed the images in the app binary as rodata. Each app OTA
+                then brings its own slave image. The 'slave' partition and
+                the spiffs component are not necessary.
+    endchoice
+
+    config SLAVE_FLASHER_IMAGE_DIR
+        string "Directory with the slave images"
+        default "target-firmware"
+        depends on SLAVE_FLASHER_ENABLE
+        help
+            Directory that holds bootloader.bin, partition-table.bin and app.bin.
+            A relative path starts at the project directory.
+
     config SLAVE_PARTITION_TABLE_ADDRESS
         hex "Partition Table Address"
         default 0xC000
