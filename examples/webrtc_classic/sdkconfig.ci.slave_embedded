@@ -1,0 +1,5 @@
+# Build-only check of the slave_flasher embedded source.
+# CI writes stub images to /tmp/slave_stub.
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_FLASHER_IMAGE_EMBEDDED=y
+CONFIG_SLAVE_FLASHER_IMAGE_DIR="/tmp/slave_stub"

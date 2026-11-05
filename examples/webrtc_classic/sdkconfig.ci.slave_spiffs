@@ -1,0 +1,10 @@
+# Build-only check of the slave_flasher SPIFFS source.
+# CI writes stub images to /tmp/slave_stub.
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_FLASHER_IMAGE_SPIFFS=y
+CONFIG_SLAVE_FLASHER_IMAGE_DIR="/tmp/slave_stub"
+
+# The 16 MB table has the 'slave' partition.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.16mb.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.16mb.csv"

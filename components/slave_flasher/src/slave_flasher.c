@@ -9,7 +9,9 @@
 #include "slave_flasher.h"
 #include "loader_utils.h"
 
+#if CONFIG_SLAVE_FLASHER_IMAGE_SPIFFS
 #include "esp_spiffs.h"
+#endif
 #include "esp_heap_caps.h"
 #include "mbedtls/md.h"
 
@@ -167,169 +169,214 @@ static void slave_monitor(void *arg)
 }
 #endif // CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
 
-static esp_err_t check_and_flash_partition(const char *file_path, uint32_t addr)
+#define MD5_MAX_LEN     16
+#define MD5_CHUNK_SIZE  4096
+#define FLASH_BLOCK_SIZE 1024
+
+typedef struct {
+    const char *name;
+    FILE *file;             /* NULL for a memory source */
+    const uint8_t *data;
+    size_t size;
+    char path[48];
+} image_src_t;
+
+/* Return len bytes at off: in place for a memory source, else read into buf.
+ * Callers read in order from off 0. */
+static const uint8_t *image_read(image_src_t *src, size_t off, size_t len, uint8_t *buf)
 {
-    FILE *f = fopen(file_path, "rb");
-    if (f == NULL) {
-        ESP_LOGE(TAG, "Failed to open %s", file_path);
-        return ESP_FAIL;
+    if (!src->file) {
+        return src->data + off;
+    }
+    if (off == 0) {
+        rewind(src->file);
+    }
+    size_t read = fread(buf, 1, len, src->file);
+    if (read != len) {
+        ESP_LOGE(TAG, "Failed to read %s (read %zu of %zu)", src->name, read, len);
+        return NULL;
+    }
+    return buf;
+}
+
+static esp_err_t image_md5_hex(image_src_t *src, char digest_str[MD5_MAX_LEN * 2 + 1])
+{
+    uint8_t *chunk = NULL;
+    if (src->file) {
+        chunk = heap_caps_malloc(MD5_CHUNK_SIZE, MALLOC_CAP_SPIRAM);
+        if (!chunk) {
+            ESP_LOGE(TAG, "Failed to allocate MD5 buffer for %s", src->name);
+            return ESP_ERR_NO_MEM;
+        }
     }
 
-    // Get file size
-    fseek(f, 0, SEEK_END);
-    size_t size = ftell(f);
-    rewind(f);
-
-    if (size == 0) {
-        ESP_LOGE(TAG, "File %s is empty", file_path);
-        fclose(f);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    // Compute MD5 by reading file in chunks (memory efficient)
-    // Use heap allocation to avoid stack overflow
-    #define MD5_MAX_LEN 16
-    #define MD5_CHUNK_SIZE 4096  // 4KB chunks for MD5 computation
-
-    // Generic mbedtls_md streaming API (works on mbedTLS 3 and 4; the
-    // standalone mbedtls_md5_* API is dropped/private in mbedTLS 4).
     mbedtls_md_context_t ctx;
     unsigned char digest[MD5_MAX_LEN];
-    uint8_t *chunk = heap_caps_malloc(MD5_CHUNK_SIZE, MALLOC_CAP_SPIRAM);
-    if (!chunk) {
-        ESP_LOGE(TAG, "Failed to allocate MD5 buffer for %s", file_path);
-        fclose(f);
-        return ESP_ERR_NO_MEM;
-    }
-
+    esp_err_t ret = ESP_OK;
     mbedtls_md_init(&ctx);
     if (mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_MD5), 0) != 0) {
         ESP_LOGE(TAG, "MD5 unavailable in mbedTLS config");
-        mbedtls_md_free(&ctx);
-        free(chunk);
-        fclose(f);
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto out;
     }
     mbedtls_md_starts(&ctx);
 
-    size_t remaining = size;
-    while (remaining > 0) {
-        size_t to_read = MIN(remaining, MD5_CHUNK_SIZE);
-        size_t read = fread(chunk, 1, to_read, f);
-        if (read != to_read) {
-            ESP_LOGE(TAG, "Failed to read file %s (read %zu of %zu)", file_path, read, to_read);
-            mbedtls_md_free(&ctx);
-            free(chunk);
-            fclose(f);
-            return ESP_FAIL;
+    for (size_t off = 0; off < src->size; off += MD5_CHUNK_SIZE) {
+        size_t len = MIN(src->size - off, MD5_CHUNK_SIZE);
+        const uint8_t *p = image_read(src, off, len, chunk);
+        if (!p) {
+            ret = ESP_FAIL;
+            goto out;
         }
-        mbedtls_md_update(&ctx, chunk, read);
-        remaining -= read;
+        mbedtls_md_update(&ctx, p, len);
     }
-
     mbedtls_md_finish(&ctx, digest);
-    mbedtls_md_free(&ctx);
-    free(chunk);  // Free MD5 buffer before allocating flash buffer
-
-    // Create a string of the digest (32 hex chars + null terminator)
-    char digest_str[MD5_MAX_LEN * 2 + 1];
 
     for (int i = 0; i < MD5_MAX_LEN; i++) {
         sprintf(&digest_str[i * 2], "%02x", (unsigned int)digest[i]);
     }
-    digest_str[MD5_MAX_LEN * 2] = '\0';  // Ensure null termination
+    digest_str[MD5_MAX_LEN * 2] = '\0';
 
-    ESP_LOGI(TAG, "Computed MD5 hash of %s: %s", file_path, digest_str);
+out:
+    mbedtls_md_free(&ctx);
+    free(chunk);
+    return ret;
+}
 
-    // Verify MD5 against flash
-    if (esp_loader_flash_verify_known_md5(addr, size, (uint8_t *)digest_str) != ESP_LOADER_SUCCESS) {
-        ESP_LOGI(TAG, "%s MD5 mismatch, flashing...", file_path);
+static esp_err_t image_flash(image_src_t *src, uint32_t addr)
+{
+    uint8_t *block = heap_caps_malloc(FLASH_BLOCK_SIZE, MALLOC_CAP_SPIRAM);
+    if (!block) {
+        ESP_LOGE(TAG, "Failed to allocate flash buffer for %s", src->name);
+        return ESP_ERR_NO_MEM;
+    }
 
-        // Stream file for flashing (read chunks and write to flash)
-        esp_loader_error_t err = esp_loader_flash_start(addr, size, 1024);
-        if (err != ESP_LOADER_SUCCESS) {
-            ESP_LOGE(TAG, "Failed to start flash operation: %d", err);
-            fclose(f);
+    esp_loader_error_t err = esp_loader_flash_start(addr, src->size, FLASH_BLOCK_SIZE);
+    if (err != ESP_LOADER_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to start flash operation: %d", err);
+        free(block);
+        return ESP_FAIL;
+    }
+
+    for (size_t off = 0; off < src->size; off += FLASH_BLOCK_SIZE) {
+        size_t len = MIN(src->size - off, FLASH_BLOCK_SIZE);
+        const uint8_t *p = image_read(src, off, len, block);
+        if (!p) {
+            free(block);
             return ESP_FAIL;
         }
-
-        rewind(f);
-        remaining = size;
-        size_t written = 0;
-        uint8_t *flash_chunk = heap_caps_malloc(1024, MALLOC_CAP_SPIRAM);  // Match flash_binary payload size
-        if (!flash_chunk) {
-            ESP_LOGE(TAG, "Failed to allocate flash buffer for %s", file_path);
-            fclose(f);
-            return ESP_ERR_NO_MEM;
+        // esp_loader_flash_write() pads the buffer in place, so rodata needs a copy.
+        if (p != block) {
+            memcpy(block, p, len);
         }
-
-        while (remaining > 0) {
-            size_t to_read = MIN(remaining, 1024);
-            size_t read = fread(flash_chunk, 1, to_read, f);
-            if (read != to_read) {
-                ESP_LOGE(TAG, "Failed to read file for flashing (read %zu of %zu)", read, to_read);
-                free(flash_chunk);
-                fclose(f);
-                return ESP_FAIL;
-            }
-
-            err = esp_loader_flash_write(flash_chunk, to_read);
-            if (err != ESP_LOADER_SUCCESS) {
-                ESP_LOGE(TAG, "Failed to write flash chunk: %d", err);
-                free(flash_chunk);
-                fclose(f);
-                return ESP_FAIL;
-            }
-
-            remaining -= to_read;
-            written += to_read;
-
-            int progress = (int)(((float)written / size) * 100);
-            printf("\rFlashing progress: %d%%", progress);
-            // fflush(stdout);
-        }
-        printf("\n");  // Newline after progress completes
-
-        free(flash_chunk);
-        err = esp_loader_flash_verify();
-        fclose(f);
-
+        err = esp_loader_flash_write(block, len);
         if (err != ESP_LOADER_SUCCESS) {
-            ESP_LOGE(TAG, "Failed to finish flash operation: %d", err);
+            ESP_LOGE(TAG, "Failed to write flash chunk: %d", err);
+            free(block);
             return ESP_FAIL;
         }
+        printf("\rFlashing progress: %d%%", (int)(((float)(off + len) / src->size) * 100));
+    }
+    printf("\n");
+    free(block);
 
-        ESP_LOGI(TAG, "Successfully flashed %s", file_path);
-        return ESP_OK;
-    } else {
-        ESP_LOGI(TAG, "%s MD5 match, skipping...", file_path);
-        fclose(f);
+    err = esp_loader_flash_verify();
+    if (err != ESP_LOADER_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to finish flash operation: %d", err);
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Successfully flashed %s", src->name);
+    return ESP_OK;
+}
+
+static esp_err_t check_and_flash_image(image_src_t *src, uint32_t addr)
+{
+    if (src->size == 0) {
+        ESP_LOGE(TAG, "File %s is empty", src->name);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    char digest_str[MD5_MAX_LEN * 2 + 1];
+    esp_err_t ret = image_md5_hex(src, digest_str);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ESP_LOGI(TAG, "Computed MD5 hash of %s: %s", src->name, digest_str);
+
+    if (esp_loader_flash_verify_known_md5(addr, src->size, (uint8_t *)digest_str) == ESP_LOADER_SUCCESS) {
+        ESP_LOGI(TAG, "%s MD5 match, skipping...", src->name);
         return ESP_OK;
     }
+    ESP_LOGI(TAG, "%s MD5 mismatch, flashing...", src->name);
+    return image_flash(src, addr);
 }
 
-/**
- * Register CLI commands for slave console interaction
- */
-static void register_slave_commands(void)
+#if CONFIG_SLAVE_FLASHER_IMAGE_EMBEDDED
+#define EMBEDDED_IMAGE(sym) \
+    extern const uint8_t _binary_##sym##_start[] asm("_binary_" #sym "_start"); \
+    extern const uint8_t _binary_##sym##_end[] asm("_binary_" #sym "_end")
+EMBEDDED_IMAGE(slave_bootloader_bin);
+EMBEDDED_IMAGE(slave_partition_table_bin);
+EMBEDDED_IMAGE(slave_app_bin);
+
+static const struct {
+    const char *name;
+    const uint8_t *start;
+    const uint8_t *end;
+} s_embedded_images[] = {
+    { "bootloader.bin",      _binary_slave_bootloader_bin_start,      _binary_slave_bootloader_bin_end },
+    { "partition-table.bin", _binary_slave_partition_table_bin_start, _binary_slave_partition_table_bin_end },
+    { "app.bin",             _binary_slave_app_bin_start,             _binary_slave_app_bin_end },
+};
+
+static esp_err_t image_open(const char *name, image_src_t *src)
 {
-    // Register write_slave command
-    write_slave_args.data = arg_str1(NULL, NULL, "<data>", "Data string to write to slave device");
-    write_slave_args.end = arg_end(1);
-
-    const esp_console_cmd_t write_slave_cmd = {
-        .command = "write_slave",
-        .help = "Write data string to slave device console",
-        .hint = NULL,
-        .func = &cmd_write_slave,
-        .argtable = &write_slave_args
-    };
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&write_slave_cmd));
-    ESP_LOGI(TAG, "Registered CLI command: write_slave");
+    for (size_t i = 0; i < sizeof(s_embedded_images) / sizeof(s_embedded_images[0]); i++) {
+        if (strcmp(s_embedded_images[i].name, name) == 0) {
+            *src = (image_src_t) {
+                .name = s_embedded_images[i].name,
+                .data = s_embedded_images[i].start,
+                .size = (size_t)(s_embedded_images[i].end - s_embedded_images[i].start),
+            };
+            return ESP_OK;
+        }
+    }
+    ESP_LOGE(TAG, "No embedded image %s", name);
+    return ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t flash_slave()
+static void image_close(image_src_t *src)
+{
+}
+
+static esp_err_t image_source_init(void)
+{
+    ESP_LOGI(TAG, "Using embedded slave image (app %u bytes)",
+             (unsigned)(_binary_slave_app_bin_end - _binary_slave_app_bin_start));
+    return ESP_OK;
+}
+#else
+static esp_err_t image_open(const char *name, image_src_t *src)
+{
+    *src = (image_src_t) { 0 };
+    snprintf(src->path, sizeof(src->path), "/target_fw/%s", name);
+    src->name = src->path;
+    src->file = fopen(src->path, "rb");
+    if (src->file == NULL) {
+        ESP_LOGE(TAG, "Failed to open %s", src->path);
+        return ESP_FAIL;
+    }
+    fseek(src->file, 0, SEEK_END);
+    src->size = ftell(src->file);
+    return ESP_OK;
+}
+
+static void image_close(image_src_t *src)
+{
+    fclose(src->file);
+}
+
+static esp_err_t image_source_init(void)
 {
     ESP_LOGI(TAG, "Initializing SPIFFS");
 
@@ -362,6 +409,37 @@ esp_err_t flash_slave()
     } else {
         ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
     }
+    return ESP_OK;
+}
+#endif
+
+/**
+ * Register CLI commands for slave console interaction
+ */
+static void register_slave_commands(void)
+{
+    // Register write_slave command
+    write_slave_args.data = arg_str1(NULL, NULL, "<data>", "Data string to write to slave device");
+    write_slave_args.end = arg_end(1);
+
+    const esp_console_cmd_t write_slave_cmd = {
+        .command = "write_slave",
+        .help = "Write data string to slave device console",
+        .hint = NULL,
+        .func = &cmd_write_slave,
+        .argtable = &write_slave_args
+    };
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&write_slave_cmd));
+    ESP_LOGI(TAG, "Registered CLI command: write_slave");
+}
+
+esp_err_t flash_slave()
+{
+    esp_err_t ret = image_source_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
 
 #if CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
     #define CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
@@ -383,24 +461,25 @@ esp_err_t flash_slave()
 
     if (connect_to_target(HIGHER_BAUDRATE) == ESP_LOADER_SUCCESS) {
 
-        target_chip_t chip = esp_loader_get_target();
-        uint32_t bootloader_addr = get_bootloader_address(chip);
-        uint32_t partition_addr = PARTITION_TABLE_ADDRESS;
-        uint32_t app_addr = APPLICATION_ADDRESS;
+        const struct {
+            const char *name;
+            uint32_t addr;
+        } images[] = {
+            { "bootloader.bin",      get_bootloader_address(esp_loader_get_target()) },
+            { "partition-table.bin", PARTITION_TABLE_ADDRESS },
+            { "app.bin",             APPLICATION_ADDRESS },
+        };
 
-        ret = check_and_flash_partition("/target_fw/bootloader.bin", bootloader_addr);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-
-        ret = check_and_flash_partition("/target_fw/partition-table.bin", partition_addr);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-
-        ret = check_and_flash_partition("/target_fw/app.bin", app_addr);
-        if (ret != ESP_OK) {
-            return ret;
+        for (size_t i = 0; i < sizeof(images) / sizeof(images[0]); i++) {
+            image_src_t src;
+            ret = image_open(images[i].name, &src);
+            if (ret == ESP_OK) {
+                ret = check_and_flash_image(&src, images[i].addr);
+                image_close(&src);
+            }
+            if (ret != ESP_OK) {
+                return ret;
+            }
         }
         ESP_LOGI(TAG, "Done!");
         esp_loader_reset_target();

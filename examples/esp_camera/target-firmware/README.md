@@ -7,17 +7,14 @@ don't need a separate cable/console on the C6.
 
 ## How it's used
 
-`esp_camera`'s `CMakeLists.txt` packs this directory into a `slave` SPIFFS
-partition (only when `CONFIG_SLAVE_FLASHER_ENABLE` is set — i.e. the P4-EYE
-overlay):
+When `CONFIG_SLAVE_FLASHER_ENABLE=y` (the P4-EYE overlay), the `slave_flasher`
+component packs this directory into a `slave` SPIFFS partition. The build fails
+if a file below is missing or empty.
 
-```cmake
-spiffs_create_partition_image(slave ${_slave_fw_dir} FLASH_IN_PROJECT)
-```
-
-At startup `app_main()` calls `flash_slave()` (from the `slave_flasher`
-component), which reads these images out of that partition and programs the C6
-at its standard offsets before Wi-Fi (which runs over the C6) is brought up.
+At startup `app_main()` calls `flash_slave()`, which reads these images out of
+that partition and programs the C6 at its standard offsets before Wi-Fi (which
+runs over the C6) is brought up. To embed the images in the app instead, set
+`CONFIG_SLAVE_FLASHER_IMAGE_EMBEDDED=y` (see `components/slave_flasher/README.md`).
 
 ## Files to place here
 

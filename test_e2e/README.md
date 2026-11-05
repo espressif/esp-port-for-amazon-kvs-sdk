@@ -157,7 +157,7 @@ forwarding when both are available.
 ### Build both halves
 
 AWS credentials live on the **C6** — `streaming_only` has no `CONFIG_AWS_*` at all. The
-C6 image is delivered by the P4: `streaming_only/CMakeLists.txt` packs
+C6 image is delivered by the P4: the `slave_flasher` component packs
 `target-firmware/` into a `slave` SPIFFS partition and `flash_slave()` programs the C6
 over the internal UART at boot.
 

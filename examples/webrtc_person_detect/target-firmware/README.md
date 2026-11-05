@@ -12,11 +12,12 @@ co-processor directly there.
 
 ## How it's used
 
-When `CONFIG_SLAVE_FLASHER_ENABLE=y`, `webrtc_classic`'s `CMakeLists.txt` packs
-this directory into a `slave` SPIFFS partition and the app calls `flash_slave()`
-(from the `slave_flasher` component) at startup, which programs the C6/C5. The
-build **fails fast** if the images below are missing, so you can't accidentally
-flash an empty partition.
+When `CONFIG_SLAVE_FLASHER_ENABLE=y`, the `slave_flasher` component packs this
+directory into a `slave` SPIFFS partition. At startup the app calls
+`flash_slave()`, which programs the C6/C5. The build **fails fast** if a file
+below is missing or empty, so you can't accidentally flash an empty partition.
+To embed the images in the app instead, set
+`CONFIG_SLAVE_FLASHER_IMAGE_EMBEDDED=y` (see `components/slave_flasher/README.md`).
 
 ## Files to place here
 

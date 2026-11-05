@@ -7,17 +7,14 @@ need to attach a separate cable/console to the C6.
 
 ## How it's used
 
-`streaming_only`'s `CMakeLists.txt` packs this directory into a `slave` SPIFFS
-partition:
+When `CONFIG_SLAVE_FLASHER_ENABLE=y`, the `slave_flasher` component packs this
+directory into a `slave` SPIFFS partition. The build fails if a file below is
+missing or empty.
 
-```cmake
-spiffs_create_partition_image(slave ${CMAKE_CURRENT_SOURCE_DIR}/target-firmware FLASH_IN_PROJECT)
-```
-
-At startup the app calls `flash_slave()` (from the `slave_flasher` component),
-which reads the images below out of that partition and programs the C6 over the
-UART link at their standard offsets. If the images are missing the P4 boots
-normally but cannot (re)flash the C6.
+At startup the app calls `flash_slave()`, which reads the images below out of
+that partition and programs the C6 over the UART link at their standard
+offsets. To embed the images in the app instead, set
+`CONFIG_SLAVE_FLASHER_IMAGE_EMBEDDED=y` (see `components/slave_flasher/README.md`).
 
 ## Files to place here
 
