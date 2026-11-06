@@ -130,7 +130,13 @@ static STATUS kvs_applyNewIceServersCallback(UINT64 callerData, PHashEntry pHash
     CHK(client != NULL && pHashEntry != NULL, STATUS_NULL_ARG);
 
     session = (kvs_pc_session_t*)HANDLE_TO_POINTER(pHashEntry->value);
-    CHK(session != NULL && !session->terminated && session->peer_connection != NULL, STATUS_NULL_ARG);
+    CHK(session != NULL, STATUS_NULL_ARG);
+
+    // A session that is being torn down gets no new servers. Skip it, so the
+    // iteration goes on to the other sessions.
+    if (session->terminated || session->peer_connection == NULL) {
+        CHK(FALSE, retStatus);
+    }
 
     // Extract only TURN servers for dynamic update (STUN servers are typically already applied)
     if (client->config.ice_servers != NULL && client->config.ice_server_count > 0) {
@@ -196,6 +202,7 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
     STATUS retStatus = STATUS_SUCCESS;
     kvs_pc_client_t *client_data = NULL;
     UINT32 activeSessionCount = 0;
+    BOOL statsLocked = FALSE;
 
     CHK(pPeerConnectionClient != NULL, STATUS_NULL_ARG);
 
@@ -248,12 +255,12 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
     // CRITICAL: Use statsLock to synchronize with metrics timer to prevent deadlock
     if (client_data->activeSessions != NULL && IS_VALID_MUTEX_VALUE(client_data->statsLock)) {
         MUTEX_LOCK(client_data->statsLock);
+        statsLocked = TRUE;
         CHK_STATUS(hashTableGetCount(client_data->activeSessions, &activeSessionCount));
         if (activeSessionCount > 0) {
             DLOGI("Progressive ICE: applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
             CHK_STATUS(hashTableIterateEntries(client_data->activeSessions, POINTER_TO_HANDLE(client_data), kvs_applyNewIceServersCallback));
         }
-        MUTEX_UNLOCK(client_data->statsLock);
     } else if (client_data->activeSessions != NULL) {
         // Fallback without synchronization if statsLock is invalid
         CHK_STATUS(hashTableGetCount(client_data->activeSessions, &activeSessionCount));
@@ -264,6 +271,11 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
     }
 
 CleanUp:
+    // statsLock is recursive, so a lock left held here would let this task go
+    // on while every other task (session destroy, metrics) blocks for good.
+    if (statsLocked) {
+        MUTEX_UNLOCK(client_data->statsLock);
+    }
     if (STATUS_FAILED(retStatus)) {
         ESP_LOGE(TAG, "Failed to update ICE servers: 0x%08" PRIx32, (UINT32) retStatus);
     }
@@ -922,11 +934,6 @@ static WEBRTC_STATUS kvs_pc_free(void *pPeerConnectionClient)
     // Stop and cleanup ICE stats timer properly
     kvs_stopIceStats(client_data);  // This handles the timer cancellation safely
 
-    // Cleanup stats lock
-    if (IS_VALID_MUTEX_VALUE(client_data->statsLock)) {
-        MUTEX_FREE(client_data->statsLock);
-    }
-
     // Cleanup timer queue
     if (IS_VALID_TIMER_QUEUE_HANDLE(client_data->timer_queue)) {
         timerQueueFree(&client_data->timer_queue);
@@ -947,6 +954,12 @@ static WEBRTC_STATUS kvs_pc_free(void *pPeerConnectionClient)
             hashTableFree(client_data->activeSessions);
             client_data->activeSessions = NULL;
         }
+    }
+
+    // Free the stats lock only now: the session table cleanup above still takes it
+    if (IS_VALID_MUTEX_VALUE(client_data->statsLock)) {
+        MUTEX_FREE(client_data->statsLock);
+        client_data->statsLock = INVALID_MUTEX_VALUE;
     }
 
     // Free ICE servers (always heap-allocated or NULL)
