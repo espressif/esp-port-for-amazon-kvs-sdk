@@ -76,6 +76,9 @@ typedef struct __IotCredentialProvider {
 
     // Service call functionality
     BlockingServiceCallFunc serviceCallFn;
+
+    // Set by iotCredentialProviderAbort(). A refresh makes no further fetch attempt.
+    volatile ATOMIC_BOOL aborted;
 } IotCredentialProvider, *PIotCredentialProvider;
 
 /******************************************************************************

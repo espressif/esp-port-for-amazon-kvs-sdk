@@ -68,6 +68,15 @@ STATUS createIotCredentialProvider(PCHAR, PCHAR, PCHAR, PCHAR, PCHAR, PCHAR, PCH
  * @return STATUS code of the execution.
  */
 STATUS freeIotCredentialProvider(PAwsCredentialProvider*);
+
+/**
+ * Stops further credential fetches, for a client that is being torn down
+ *
+ * A fetch already in flight runs to its end. Later refreshes fail at once. Does not block.
+ *
+ * @param[in] PAwsCredentialProvider The IoT credential provider
+ */
+VOID iotCredentialProviderAbort(PAwsCredentialProvider);
 #ifdef __cplusplus
 }
 #endif

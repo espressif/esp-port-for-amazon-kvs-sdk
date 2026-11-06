@@ -57,6 +57,7 @@ static void kvs_refresh_ice_task(void *arg);
 STATUS createKvsSignalingClient(kvs_signaling_config_t *pConfig, PVOID *ppSignalingClient);
 STATUS connectKvsSignalingClient(PVOID pSignalingClient);
 STATUS disconnectKvsSignalingClient(PVOID pSignalingClient);
+STATUS abortKvsSignalingClient(PVOID pSignalingClient);
 STATUS sendKvsSignalingMessage(PVOID pSignalingClient, webrtc_message_t *pMessage);
 STATUS kvsSignalingPurgePeerCandidates(PVOID pSignalingClient, const char *peerId);
 STATUS freeKvsSignalingClient(PVOID pSignalingClient);
@@ -102,6 +103,8 @@ typedef struct {
     PAwsCredentialProvider pCredentialProvider;
     BOOL initialized;
     BOOL connected;
+    // Set by a terminate on another task; connect gives up at its next step
+    volatile ATOMIC_BOOL aborting;
     MUTEX signalingSendMessageLock;
 
     // Callback data
@@ -1078,6 +1081,7 @@ STATUS connectKvsSignalingClient(PVOID pSignalingClient)
     KvsSignalingClientData *pClientData = (KvsSignalingClientData *)pSignalingClient;
 
     CHK(pClientData != NULL, STATUS_NULL_ARG);
+    CHK(!ATOMIC_LOAD_BOOL(&pClientData->aborting), STATUS_SIGNALING_FREE_IN_PROGRESS);
 
     // Create KVS signaling client if not already created
     if (pClientData->signalingClientHandle == INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
@@ -1093,9 +1097,11 @@ STATUS connectKvsSignalingClient(PVOID pSignalingClient)
     }
 
     // Fetch the signaling client
+    CHK(!ATOMIC_LOAD_BOOL(&pClientData->aborting), STATUS_SIGNALING_FREE_IN_PROGRESS);
     CHK_STATUS(signalingClientFetchSync(pClientData->signalingClientHandle));
 
     // Connect the signaling client
+    CHK(!ATOMIC_LOAD_BOOL(&pClientData->aborting), STATUS_SIGNALING_FREE_IN_PROGRESS);
     CHK_STATUS(signalingClientConnectSync(pClientData->signalingClientHandle));
 
     // Get metrics
@@ -1109,6 +1115,46 @@ STATUS connectKvsSignalingClient(PVOID pSignalingClient)
     ESP_LOGI(TAG, "[Signaling Connect] %" PRIu64 " ms", pClientData->metrics.signalingClientStats.connectCallTime);
 
     pClientData->initialized = TRUE;
+
+CleanUp:
+    return retStatus;
+}
+
+/**
+ * @brief Stop a connect or reconnect running on another task, without waiting
+ *
+ * For a terminate during an outage: the task that owns the teardown can sit in
+ * connect() for minutes (fetch retries, state backoffs, the network wait). This
+ * sets the SDK client's shutdown flag early, as freeSignaling() would, so those
+ * waits end and connect() returns STATUS_SIGNALING_FREE_IN_PROGRESS. The caller
+ * must keep the client alive until it returns; it takes no lock the connecting
+ * task may hold. The client is only good for freeing afterwards.
+ */
+STATUS abortKvsSignalingClient(PVOID pSignalingClient)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    KvsSignalingClientData *pClientData = (KvsSignalingClientData *)pSignalingClient;
+    PSignalingClient pClient;
+
+    CHK(pClientData != NULL, STATUS_NULL_ARG);
+    ATOMIC_STORE_BOOL(&pClientData->aborting, TRUE);
+    pClient = (PSignalingClient) pClientData->signalingClientHandle;
+    if (pClient != NULL) {
+        ATOMIC_STORE_BOOL(&pClient->shutdown, TRUE);
+        CVAR_BROADCAST(pClient->connectedCvar);
+    }
+#ifdef CONFIG_IOT_CORE_ENABLE_CREDENTIALS
+    // A GET_TOKEN refresh retries its fetch. Stop it at the next attempt.
+    // Same provider-type order as the free in freeKvsSignalingClient().
+    if (pClientData->pCredentialProvider != NULL && pClientData->config.fetch_credentials_cb == NULL &&
+        pClientData->config.useIotCredentials) {
+        iotCredentialProviderAbort(pClientData->pCredentialProvider);
+    }
+#endif
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    // After the store: a woken wait re-checks shutdown
+    wakeEspSignalingWaits();
+#endif
 
 CleanUp:
     return retStatus;
@@ -1763,6 +1809,12 @@ static WEBRTC_STATUS kvsFreeWrapper(void *pSignalingClient)
     return (retStatus == STATUS_SUCCESS) ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INTERNAL_ERROR;
 }
 
+static WEBRTC_STATUS kvsAbortWrapper(void *pSignalingClient)
+{
+    STATUS retStatus = abortKvsSignalingClient(pSignalingClient);
+    return (retStatus == STATUS_SUCCESS) ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INTERNAL_ERROR;
+}
+
 /**
  * @brief Wrapper for purge_peer_candidates to convert return types
  */
@@ -2066,7 +2118,8 @@ webrtc_signaling_client_if_t* kvs_signaling_client_if_get(void)
         .refresh_ice_configuration = kvsRefreshIceConfigurationWrapper,
         .set_ice_update_callback = kvsSetIceUpdateCallbackWrapper,
         .get_state = kvsGetStateWrapper,
-        .purge_peer_candidates = kvsPurgePeerCandidatesWrapper
+        .purge_peer_candidates = kvsPurgePeerCandidatesWrapper,
+        .abort = kvsAbortWrapper
     };
 
     return &kvs_signaling_client_if;

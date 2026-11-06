@@ -85,19 +85,9 @@ STATUS createIotCredentialProviderWithTime(PCHAR iotGetCredentialEndpoint, PCHAR
 
     pIotCredentialProvider->serviceCallFn = serviceCallFn;
 
-    // Initial credential fetch with simple retry policy
-    {
-        const UINT32 maxRetries = 3;
-        STATUS fetchStatus = STATUS_SUCCESS;
-        UINT32 attempt = 0;
-        for (attempt = 0; attempt < maxRetries; attempt++) {
-            fetchStatus = http_api_getIotCredential(pIotCredentialProvider);
-            if (STATUS_SUCCEEDED(fetchStatus)) {
-                break;
-            }
-        }
-        CHK_STATUS(fetchStatus);
-    }
+    // Initial credential fetch, one attempt. The caller retries the create: app_webrtc's
+    // init loop does, and it checks for a terminate between attempts.
+    CHK_STATUS(http_api_getIotCredential(pIotCredentialProvider));
 
 CleanUp:
 
@@ -177,6 +167,8 @@ STATUS priv_iot_credential_provider_get(PAwsCredentialProvider pCredentialProvid
         STATUS fetchStatus = STATUS_SUCCESS;
         UINT32 attempt = 0;
         for (attempt = 0; attempt < maxRetries; attempt++) {
+            // An abort means the client is being torn down: stop before the next attempt
+            CHK(!ATOMIC_LOAD_BOOL(&pIotCredentialProvider->aborted), STATUS_INVALID_OPERATION);
             fetchStatus = http_api_getIotCredential(pIotCredentialProvider);
             if (STATUS_SUCCEEDED(fetchStatus)) {
                 break;
@@ -206,4 +198,13 @@ STATUS createIotCredentialProvider(PCHAR iotGetCredentialEndpoint, PCHAR awsRegi
     return createIotCredentialProviderWithTime(iotGetCredentialEndpoint, awsRegion, certPath, privateKeyPath, caCertPath,
                                                roleAlias, thingName, commonDefaultGetCurrentTimeFunc,
                                                POINTER_TO_HANDLE(NULL), NULL, ppCredentialProvider);
+}
+
+VOID iotCredentialProviderAbort(PAwsCredentialProvider pCredentialProvider)
+{
+    PIotCredentialProvider pIotCredentialProvider = (PIotCredentialProvider) pCredentialProvider;
+
+    if (pIotCredentialProvider != NULL) {
+        ATOMIC_STORE_BOOL(&pIotCredentialProvider->aborted, TRUE);
+    }
 }

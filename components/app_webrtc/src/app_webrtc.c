@@ -846,6 +846,10 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
     BOOL sampleConfigurationObjLockLocked = FALSE, streamingSessionListReadLockLocked = FALSE;
     PAppWebRTCSession pAppWebRTCSession = NULL;
     UINT32 i, clientIdHash;
+    // Signaling reconnect retry state. It starts fresh on every run.
+    UINT32 retryCount = 0;
+    UINT64 lastRetryTime = 0, connectionStartTime = 0;
+    BOOL connectionInProgress = FALSE;
 
     CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
 
@@ -895,11 +899,6 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
             gWebRtcAppConfig.signaling_client_if != NULL &&
             gSignalingClientData != NULL) {
 
-            // Static variables to track retry attempts and timing
-            static UINT32 retryCount = 0;
-            static UINT64 lastRetryTime = 0;
-            static UINT64 connectionStartTime = 0;
-            static BOOL connectionInProgress = FALSE;
             UINT64 currentTime = GETTIME();
 
             // Exponential backoff: 5s, 10s, 20s, 40s, 60s (max)
@@ -982,6 +981,8 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                 // now rather than carrying on against a context about to be freed.
                 if (ATOMIC_LOAD_BOOL(&pSampleConfiguration->appTerminateFlag)) {
                     DLOGI("Terminate requested during signaling reconnect - leaving cleanup loop");
+                    // A connect cut short by the terminate is not an error
+                    retStatus = STATUS_SUCCESS;
                     MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
                     sampleConfigurationObjLockLocked = FALSE;
                     break;
@@ -1051,6 +1052,15 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
         if (!isSignalingOnly) {
             // Check if any lingering pending message queues (don't abort loop on failure)
             CHK_LOG_ERR(removeExpiredMessageQueues(pSampleConfiguration->pPendingSignalingMessageForRemoteClient));
+        }
+        // A terminate raises the flag and broadcasts, but this pass can be busy for seconds
+        // (freeing a session that just closed), so the broadcast finds nobody waiting. Check
+        // before sleeping, or the terminate waits out the whole period. The check and the
+        // wait are one step under the lock, which wakeCleanupLoop() relies on.
+        if (ATOMIC_LOAD_BOOL(&pSampleConfiguration->appTerminateFlag)) {
+            MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+            sampleConfigurationObjLockLocked = FALSE;
+            break;
         }
         // periodically wake up and clean up terminated streaming session
         CVAR_WAIT(pSampleConfiguration->cvar, pSampleConfiguration->sampleConfigurationObjLock, SAMPLE_SESSION_CLEANUP_WAIT_PERIOD);
@@ -1919,6 +1929,9 @@ static void app_webrtc_runTask(void *pvParameters)
             CHK(!ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag), STATUS_SUCCESS);
             init_delay_ms = MIN(init_delay_ms * 2, 60000);
         }
+        // A terminate during a successful init() found no client to abort. Stop before
+        // the first connect. The teardown frees the client.
+        CHK(!ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag), STATUS_SUCCESS);
 
         DLOGI("Signaling client initialized successfully");
 
@@ -1975,7 +1988,10 @@ static void app_webrtc_runTask(void *pvParameters)
             DLOGD("Connecting signaling client");
             retStatus = gWebRtcAppConfig.signaling_client_if->connect(gSignalingClientData);
 
-            if (STATUS_FAILED(retStatus)) {
+            if (STATUS_FAILED(retStatus) && ATOMIC_LOAD_BOOL(&gSampleConfiguration->appTerminateFlag)) {
+                DLOGI("Initial signaling connect stopped by terminate");
+                retStatus = STATUS_SUCCESS;
+            } else if (STATUS_FAILED(retStatus)) {
                 DLOGE("Initial signaling client connection failed: 0x%08x", retStatus);
                 DLOGI("Connection failure will be handled by retry logic in sessionCleanupWait");
 
@@ -2180,6 +2196,28 @@ WEBRTC_STATUS app_webrtc_close_all_sessions(void)
     return WEBRTC_STATUS_SUCCESS;
 }
 
+/* Wake sessionCleanupWait() for a raised appTerminateFlag without losing the wakeup.
+ * The loop checks the flag and enters CVAR_WAIT under sampleConfigurationObjLock, so
+ * once this takes that lock after the flag store, the loop has either seen the flag
+ * or is waiting and gets the broadcast. Only a try-lock: whoever holds the context
+ * lock may be a callback calling app_webrtc_terminate(), which needs gRunTaskLock.
+ * FALSE while the lock is busy; the caller tries again. */
+static BOOL wakeCleanupLoop(void)
+{
+    BOOL woken = TRUE;
+
+    pthread_mutex_lock(&gRunTaskLock);
+    if (!gRunTaskTearingDown && gSampleConfiguration != NULL) {
+        woken = MUTEX_TRYLOCK(gSampleConfiguration->sampleConfigurationObjLock);
+        if (woken) {
+            MUTEX_UNLOCK(gSampleConfiguration->sampleConfigurationObjLock);
+            CVAR_BROADCAST(gSampleConfiguration->cvar);
+        }
+    }
+    pthread_mutex_unlock(&gRunTaskLock);
+    return woken;
+}
+
 /* Upper bound for app_webrtc_terminate() waiting on the run task's own teardown:
  * the teardown may first wait out a signaling reconnect for up to
  * APP_WEBRTC_RECONNECT_DRAIN_TIMEOUT_MS, then disconnect and free the clients */
@@ -2217,14 +2255,26 @@ WEBRTC_STATUS app_webrtc_terminate(void)
         pthread_mutex_lock(&gRunTaskLock);
         if (!gRunTaskTearingDown && gSampleConfiguration != NULL) {
             ATOMIC_STORE_BOOL(&gSampleConfiguration->appTerminateFlag, TRUE);
-            CVAR_BROADCAST(gSampleConfiguration->cvar);
+            /* The run task may be inside a signaling connect, which only checks
+             * the flag when it returns: minutes, during an outage. Cut it short.
+             * Safe here: the run task frees the client only after setting
+             * gRunTaskTearingDown under this lock. */
+            if (gSignalingClientData != NULL && gWebRtcAppConfig.signaling_client_if != NULL &&
+                gWebRtcAppConfig.signaling_client_if->abort != NULL) {
+                gWebRtcAppConfig.signaling_client_if->abort(gSignalingClientData);
+            }
         }
         pthread_mutex_unlock(&gRunTaskLock);
+        /* On the run task itself the loop is not waiting: it checks the flag before it sleeps */
         if (xTaskGetCurrentTaskHandle() == gWebRtcRunTaskHandle) {
             goto CleanUp;
         }
+        BOOL woken = FALSE;
         UINT32 waited_ms = 0;
         while (!gRunTaskDone && waited_ms < APP_WEBRTC_TERMINATE_WAIT_MS) {
+            if (!woken) {
+                woken = wakeCleanupLoop();
+            }
             vTaskDelay(pdMS_TO_TICKS(20));
             waited_ms += 20;
         }

@@ -36,7 +36,7 @@ others:
 - #2425: fetch, disconnect and delete refused while a free runs, and messages received
   during a free dropped.
 
-Both patches apply cleanly against this base (`git am`, no fuzz). 0001's
+All three patches apply cleanly against this base (`git am`, no fuzz). 0001's
 `LwsApiCalls.c` part sits on top of #2401's reconnect and receive-worker code and #2425's
 message drop. The SDP-renegotiation patches were dropped earlier (that flow is upstream
 as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392, 0004 as
@@ -51,6 +51,7 @@ unchanged.
 | ~~0003~~ | Ice: accept already-connected TCP in `socketConnectionIsConnected` via `getpeername` | n/a | **dropped**: not needed; upstream's check works on lwIP (see note) |
 | ~~0004~~ | Crypto: take the RNG from PSA when mbedTLS has no entropy module (ESP-IDF 6 / TF-PSA-Crypto builds) | aligned | **upstream** as [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385); dropped |
 | ~~0005~~ | Crypto: hash the DTLS certificate through `mbedtls_md()` | portability | **upstream** as [awslabs#2392](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2392); dropped |
+| 0010 | Signaling: end the fetch and GET_TOKEN back-offs on shutdown | aligned | not yet raised upstream |
 | ~~0006~~ | SessionDescription: initialise `pSeenTransceivers` before the first `CHK` in `findTransceiversByRemoteDescription` (early-exit paths reach `hashTableFree()` on an indeterminate pointer) | aligned | **upstream** as [awslabs#2415](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2415); dropped |
 
 > **Not carried as patches:** the upstream `Network.c` uses POSIX `getifaddrs()`,
@@ -110,6 +111,15 @@ on `isOffer` so the answer path applies the cap too. On bench this drops
 per-frame Opus decode from ~21 ms to ~5 ms at session start and eliminates
 queue-full / mem errors during the first ~15 s of bidir. ESP-specific
 because narrow Opus is a P4 capability trade; keep long-term.
+
+**0010: End the fetch and GET_TOKEN back-offs on shutdown.** A free sets the
+client's `shutdown` flag, and so does `app_webrtc_terminate()` through the signaling
+`abort` op. Two sleeps ignored it: the back-off between `signalingClientFetchSync()`
+attempts (up to about 32 s with full jitter) and the GET_TOKEN state's retry sleep (up
+to 10 s). Both now sleep in 100 ms steps and stop on `shutdown`. The fetch then returns
+`STATUS_SIGNALING_FREE_IN_PROGRESS`, as for a fetch refused during a free (#2425).
+GET_TOKEN fetches no token, and the state machine stops at its next `shutdown` check.
+A candidate for upstream, next to #2425.
 
 **0003: Accept already-connected TCP in `socketConnectionIsConnected`** (dropped).
 It added a `getpeername()` check after upstream's re-`connect()` probe, on the
