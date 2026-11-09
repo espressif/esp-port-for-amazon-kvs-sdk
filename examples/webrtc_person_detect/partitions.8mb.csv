@@ -1,0 +1,10 @@
+# Name,           Type,  SubType,   Offset,    Size,      Flags
+# 8 MB flash (ESP32-S3-EYE). Same shape as partitions.16mb.csv minus the co-processor
+# image: one app slot sized for esp-dl, the 'pedestrian_det' partition the component
+# writes its model into (the name is hardcoded there), and SPIFFS for certificates.
+# Partition table itself at 0x8000 (CONFIG_PARTITION_TABLE_OFFSET).
+nvs,              data,  nvs,       0x9000,    0x6000,
+phy_init,         data,  phy,       0xF000,    0x1000,
+factory,          app,   factory,   0x10000,   0x640000,
+pedestrian_det,   data,  spiffs,    0x650000,  0xA0000,
+storage,          data,  spiffs,    0x6F0000,  0x100000,

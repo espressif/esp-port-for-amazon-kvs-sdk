@@ -6,17 +6,14 @@
 
 #include "sdkconfig.h"
 
-/* esp_video (V4L2-style capture) here is wired specifically for
- * P4 MIPI-CSI + the bundled board configs in esp_video_if_cam_sel.h.
- * On other targets either the headers (<sys/mman.h>) don't exist
- * (plain ESP32, no xtensa-newlib mman) or the CSI types do not
- * (S3 uses DVP, not CSI). Compile to empty on non-P4 — callers
- * already gate their use of esp_video_if_* behind
- * CONFIG_IDF_TARGET_ESP32P4 in MJPEGFrameGrabber / video_capture_adapter. */
+/* esp_video (V4L2-style capture): MIPI-CSI and UVC on the P4, DVP on the S3, per the
+ * board configs in esp_video_if_cam_sel.h. Compiles to empty on targets without
+ * MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE, where callers do not use esp_video_if_* either. */
 #include "media_stream_caps.h"
+#include "media_stream.h"
 #if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
 
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
 #include "bsp/esp-bsp.h"
 #endif
 #include <assert.h>
@@ -836,6 +833,27 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
         uint32_t height;
     } resolution_t;
 
+#if MEDIA_STREAM_CAM_IS_DVP
+    /* The DVP device answers S_FMT only for the size the sensor is already set to, which
+     * comes from the sensor's default-format choice in menuconfig, so that is the only
+     * candidate. A different size asked for by the app cannot be honoured here. */
+    struct v4l2_format sensor_fmt = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
+    if (ioctl(v4l2->cap_fd, VIDIOC_G_FMT, &sensor_fmt) != 0) {
+        ESP_LOGE(TAG, "Failed to query the DVP sensor's format, errno: %d", errno);
+        return ESP_FAIL;
+    }
+    if (g_desired_resolution.width &&
+        (g_desired_resolution.width != sensor_fmt.fmt.pix.width ||
+         g_desired_resolution.height != sensor_fmt.fmt.pix.height)) {
+        ESP_LOGW(TAG, "DVP sensor runs at %dx%d, not the requested %dx%d; pick another default "
+                      "format for the sensor in menuconfig to change it",
+                 (int)sensor_fmt.fmt.pix.width, (int)sensor_fmt.fmt.pix.height,
+                 (int)g_desired_resolution.width, (int)g_desired_resolution.height);
+    }
+    resolution_t fallback_resolutions[] = {
+        {sensor_fmt.fmt.pix.width, sensor_fmt.fmt.pix.height},
+    };
+#else
     resolution_t fallback_resolutions[] = {
 #if MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264
         /* Uncompressed capture is bounded by the USB isochronous budget, not by the
@@ -858,6 +876,7 @@ static esp_err_t configure_camera_format(v4l2_src_t *v4l2, uint32_t pixelformat)
         {320, 240}
 #endif
     };
+#endif /* MEDIA_STREAM_CAM_IS_DVP */
     int num_fallbacks = sizeof(fallback_resolutions) / sizeof(fallback_resolutions[0]);
 
     for (int i = 0; i < num_fallbacks; i++) {
@@ -1046,8 +1065,18 @@ esp_err_t esp_video_if_start(void)
      * takes it directly (ESP_H264_RAW_FMT_YUYV), so nothing has to convert. */
     uint32_t capture_fmt = V4L2_PIX_FMT_YUYV;
 #endif
+#elif MEDIA_STREAM_CAM_IS_DVP
+    /* Take whatever the sensor emits. There is no ISP to produce YUV420, and esp_video's DVP
+     * device accepts a YUV420 request for a YUV422 sensor without converting anything, so
+     * asking for it would label YUYV data as YUV420 and corrupt every frame silently. */
+    struct v4l2_format sensor_fmt = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
+    if (ioctl(v4l2->cap_fd, VIDIOC_G_FMT, &sensor_fmt) != 0) {
+        ESP_LOGE(TAG, "Failed to query the DVP sensor's format, errno: %d", errno);
+        return ESP_FAIL;
+    }
+    uint32_t capture_fmt = sensor_fmt.fmt.pix.pixelformat;
 #else
-    /* CSI/DVP/SPI sensors deliver raw frames for the hardware encoder. */
+    /* CSI/SPI sensors deliver raw frames through the ISP for the hardware encoder. */
     uint32_t capture_fmt = V4L2_PIX_FMT_YUV420;
 #endif
 
@@ -1077,16 +1106,19 @@ esp_err_t esp_video_if_start(void)
  * also sits on, so esp_video must not own it. Without a BSP there is nobody
  * else to open it, so we do, from the pins the board header exports. */
 #if CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
 #define SCCB_I2C_HANDLE()   bsp_i2c_get_handle()
 #else
+/* Opened below from the pins the board header exports — or handed in first by
+ * media_stream_set_sccb_i2c_bus(), when the application already owns the bus. */
 static i2c_master_bus_handle_t s_sccb_i2c_handle;
+static bool s_sccb_i2c_opened;
 #define SCCB_I2C_HANDLE()   s_sccb_i2c_handle
 #endif
 
 static esp_err_t sccb_i2c_bus_init(void)
 {
-#if !CONFIG_BSP_SELECT_NONE
+#if !CONFIG_MEDIA_STREAM_NO_BSP
     /* media_stream_init() already brought the BSP I2C bus up; bsp_i2c_init()
      * itself is idempotent, so call it again defensively in case this path
      * is reached without media_stream_init() running first. */
@@ -1112,11 +1144,30 @@ static esp_err_t sccb_i2c_bus_init(void)
     esp_err_t ret = i2c_new_master_bus(&bus_config, &s_sccb_i2c_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "failed to open the SCCB I2C bus: %s", esp_err_to_name(ret));
+    } else {
+        s_sccb_i2c_opened = true;
     }
     return ret;
 #endif
 }
 #endif /* CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP */
+
+esp_err_t media_stream_set_sccb_i2c_bus(void *i2c_master_bus)
+{
+#if CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP && CONFIG_MEDIA_STREAM_NO_BSP
+    if (i2c_master_bus == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_sccb_i2c_opened) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_sccb_i2c_handle = (i2c_master_bus_handle_t)i2c_master_bus;
+    return ESP_OK;
+#else
+    (void)i2c_master_bus;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
 
 #if defined(MEDIA_STREAM_MIPI_CSI_XCLK_PIN) && MEDIA_STREAM_MIPI_CSI_XCLK_PIN > 0
 #if !CONFIG_CAMERA_XCLK_USE_ESP_CLOCK_ROUTER
@@ -1181,10 +1232,10 @@ static esp_err_t esp_video_hw_init(void)
 #endif
 
 /* The pin-based CSI config only compiles when Kconfig defines the pins, which it does
- * only under BSP_SELECT_NONE (Kconfig.projbuild: `if BSP_SELECT_NONE`). With a BSP
+ * only without a BSP (Kconfig.projbuild: `if MEDIA_STREAM_NO_BSP`). With a BSP
  * selected the board owns power, reset, XCLK and SCCB, and bsp_camera_start() below
  * performs the bring-up instead. */
-#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
     const esp_video_init_csi_config_t csi_config = {
         .sccb_config = {
 #if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
@@ -1230,7 +1281,8 @@ static esp_err_t esp_video_hw_init(void)
 #endif /* MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR */
 #endif /* MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR */
 
-#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR
+#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
+    /* Pins exist only without a BSP; with one, bsp_camera_start() brings the sensor up. */
     const esp_video_init_dvp_config_t dvp_config = {
         .sccb_config = {
 #if !CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
@@ -1375,13 +1427,13 @@ enumeration fails with \"Configuration descriptor larger than control transfer m
 #endif /* MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR */
 
     const esp_video_init_config_t cam_config = {
-#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_BSP_SELECT_NONE
+#if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
         .csi = &csi_config,
 #if MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_MOTOR
         .cam_motor = &cam_motor_config,
 #endif
 #endif
-#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR
+#if MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR && CONFIG_MEDIA_STREAM_NO_BSP
         .dvp = &dvp_config,
 #endif
 #if MEDIA_STREAM_ENABLE_SPI_CAM_SENSOR
@@ -1404,16 +1456,26 @@ enumeration fails with \"Configuration descriptor larger than control transfer m
      * be undone — so a retry must never call it again. */
     s_esp_video_registered = true;
 
-#if !CONFIG_BSP_SELECT_NONE && !MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
+#if !CONFIG_MEDIA_STREAM_NO_BSP && !MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR
     /* BSP path: the selected board's BSP owns the camera pins, power and XCLK and
      * registers the CSI sensor with esp_video itself. Boards whose camera enable sits
      * behind an I2C IO expander (M5Stack Tab5) or a power switch (P4-EYE) only come up
      * through that sequencing, so the generic pin-based init below cannot replace it.
-     * UVC needs the generic path: there is no BSP camera to start. */
+     * UVC needs the generic path: there is no BSP camera to start.
+     *
+     * Off the P4 only a BSP that advertises a camera has bsp_camera_start() (the
+     * ESP32-S3-EYE does, the ESP-BOX-3 does not). */
+#if CONFIG_IDF_TARGET_ESP32P4 || (defined(BSP_CAPS_CAMERA) && BSP_CAPS_CAMERA)
     esp_err_t ret = bsp_camera_start(NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "bsp_camera_start failed: %s", esp_err_to_name(ret));
+        return ret;
     }
+#else
+    ESP_LOGE(TAG, "The selected BSP has no camera; select a board with one "
+                  "(e.g. BSP_SELECT_ESP32_S3_EYE), or BSP_SELECT_ESP_BSP_DEVKIT with the camera pins");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 #else
     esp_err_t ret = esp_video_init(&cam_config);
     if (ret != ESP_OK) {
@@ -1611,3 +1673,11 @@ esp_err_t esp_video_if_cleanup(void)
 }
 
 #endif /* MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE */
+
+#if !MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
+esp_err_t media_stream_set_sccb_i2c_bus(void *i2c_master_bus)
+{
+    (void)i2c_master_bus;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+#endif

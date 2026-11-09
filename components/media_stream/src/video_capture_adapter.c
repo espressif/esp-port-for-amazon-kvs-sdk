@@ -22,10 +22,10 @@
 
 #include "media_stream_caps.h"
 #if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
-#include "driver/jpeg_encode.h"
 #include "esp_video_if.h"
 #include "esp_cache.h"
-#if MEDIA_STREAM_HAS_IMG_EFFECTS
+#if MEDIA_STREAM_HAS_JPEG_SNAPSHOT
+#include "driver/jpeg_encode.h"
 #include "esp_imgfx_color_convert.h"
 #include "esp_imgfx_scale.h"
 #endif
@@ -315,6 +315,16 @@ __attribute__((weak)) esp_err_t video_capture_request_keyframe(void)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/* The capture pump defines the real one; backends without it report nothing measured. */
+__attribute__((weak)) esp_err_t video_capture_get_live_stats(video_capture_live_stats_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t video_capture_get_active_resolution(video_resolution_t *resolution)
 {
     if (resolution == NULL) {
@@ -391,9 +401,9 @@ esp_err_t video_capture_deinit(video_capture_handle_t handle)
 /*  JPEG Snapshot                                                             */
 /* -------------------------------------------------------------------------- */
 
-/* The JPEG snapshot path is built on esp_image_effects, a P4-only dependency.
- * Targets without it fall through to the ESP_ERR_NOT_SUPPORTED stubs below. */
-#if MEDIA_STREAM_HAS_IMG_EFFECTS
+/* The JPEG snapshot path needs esp_image_effects and the hardware JPEG encoder.
+ * Targets without both fall through to the ESP_ERR_NOT_SUPPORTED stubs below. */
+#if MEDIA_STREAM_HAS_JPEG_SNAPSHOT
 
 /**
  * Convert O_UYY_E_VYY (ESP32-P4 ISP native YUV420) to RGB565 using esp_image_effects.
@@ -686,7 +696,7 @@ void video_capture_snapshot_free(uint8_t *jpeg_buf)
     }
 }
 
-#else /* !MEDIA_STREAM_HAS_IMG_EFFECTS */
+#else /* !MEDIA_STREAM_HAS_JPEG_SNAPSHOT */
 
 esp_err_t video_capture_get_snapshot_scaled(uint8_t **jpeg_buf, size_t *jpeg_len,
                                             uint8_t quality, uint16_t out_width,
@@ -715,4 +725,4 @@ void video_capture_snapshot_free(uint8_t *jpeg_buf)
     }
 }
 
-#endif /* MEDIA_STREAM_HAS_IMG_EFFECTS */
+#endif /* MEDIA_STREAM_HAS_JPEG_SNAPSHOT */

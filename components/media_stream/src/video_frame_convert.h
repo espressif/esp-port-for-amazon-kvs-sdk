@@ -5,7 +5,12 @@
  */
 
 /**
- * @brief Hardware frame conversion for raw sinks: colour convert + crop + scale in one PPA pass.
+ * @brief Frame conversion for raw sinks: colour convert + crop + scale in one pass.
+ *
+ * On a target with a PPA (video_frame_convert.c) the pass is a hardware one and costs no CPU.
+ * Without one (video_frame_convert_imgfx.c, the ESP32-S3) the same API runs it through
+ * esp_image_effects on the sink's own task, from YUYV, UYVY, RGB565 or RGB24 to RGB565, RGB24
+ * or I420 (the software H.264 encoder's input, for a camera it cannot read directly).
  *
  * This is what makes VIDEO_RAW_MODE_CONVERTED worth having. A consumer that wants a small RGB
  * image does not have to pin a 3 MiB camera buffer for the length of its work: the PPA writes a small

@@ -21,6 +21,7 @@ else()
     set(srcs
         "src/esp_video_if.c"
         "src/esp_h264_hw_enc.c"
+        "src/esp_h264_sw_enc.c"
         "src/app_camera_esp.c"
         "src/esp32p4_frame_grabber.c"
         "src/video_rate_ctrl.c"
@@ -33,6 +34,7 @@ else()
         "src/video_sink.c"
         "src/video_raw_bus.c"
         "src/video_frame_convert.c"
+        "src/video_frame_convert_imgfx.c"
         "src/video_capture_adapter.c"
         "src/audio_capture_adapter.c"
         "src/audio_player_adapter.c"
@@ -44,7 +46,9 @@ else()
     )
 endif()
 
-set(priv_reqs pthread)
+# The drivers its own sources include. A board BSP brings them; esp_bsp_devkit
+# (a board esp-bsp does not carry) does not.
+set(priv_reqs pthread esp_driver_i2s esp_driver_i2c esp_driver_gpio)
 if(CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER)
     list(APPEND priv_reqs espressif__esp_h264)
 endif()

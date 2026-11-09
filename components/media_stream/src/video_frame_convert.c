@@ -29,8 +29,8 @@
 #include "sdkconfig.h"
 
 /* Gated on the PPA itself rather than on a target, so VIDEO_RAW_MODE_CONVERTED follows
- * the hardware wherever it turns up. A target without one compiles this to empty, and
- * the bus refuses a CONVERTED registration. */
+ * the hardware wherever it turns up. A target without one compiles this to empty and
+ * gets the esp_image_effects converter in video_frame_convert_imgfx.c instead. */
 #include "media_stream_caps.h"
 #if MEDIA_STREAM_HAS_PPA
 

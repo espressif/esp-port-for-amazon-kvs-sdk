@@ -650,6 +650,10 @@ esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
         ESP_LOGE(TAG, "'%s': inline sinks must supply on_frame", cfg->name);
         return ESP_ERR_INVALID_ARG;
     }
+    if (cfg->task_core != VIDEO_RAW_SINK_CORE_ANY && cfg->task_core > portNUM_PROCESSORS) {
+        ESP_LOGE(TAG, "'%s': task_core %u is not a core on this chip", cfg->name, cfg->task_core - 1);
+        return ESP_ERR_INVALID_ARG;
+    }
     if (cfg->mode == VIDEO_RAW_MODE_CONVERTED) {
         if (cfg->want_fourcc == 0 || cfg->want_width == 0 || cfg->want_height == 0) {
             ESP_LOGE(TAG, "'%s': converted sinks must set want_fourcc/width/height", cfg->name);
@@ -751,9 +755,10 @@ esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
                     return ESP_ERR_NO_MEM;
                 }
                 s->task_run = true;
-                s->task = xTaskCreateStatic(sink_task, s->name, stack, s,
+                s->task = xTaskCreateStaticPinnedToCore(sink_task, s->name, stack, s,
                                             cfg->task_prio ? cfg->task_prio : SINK_TASK_PRIO,
-                                            s->task_stack, s->task_tcb);
+                                            s->task_stack, s->task_tcb,
+                                            cfg->task_core ? cfg->task_core - 1 : tskNO_AFFINITY);
                 if (s->task == NULL) {
                     s->task_run = false;
                     sink_free_resources(s);

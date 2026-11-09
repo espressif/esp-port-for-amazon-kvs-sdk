@@ -49,11 +49,21 @@ menu "Person Detection Example"
             pedestrian_detect takes roughly 60 ms per frame on the P4, so the
             model itself tops out near 16 fps. 5 is a sensible default: it keeps
             detection responsive while leaving the CPU to the encoder and the
-            preview.
+            preview. On the ESP32-S3 it takes about 120 ms and shares the chip with
+            the software encoder, so 2 is the S3 default.
 
             This costs nothing in camera buffers - the inference sink is a
-            converted sink, so the PPA hands it a small private frame and the
-            camera buffer goes straight back.
+            converted sink, so the converter (the PPA on the P4, esp_image_effects
+            on the S3) hands it a small private frame and the camera buffer goes
+            straight back.
+
+    config PERSON_DETECT_TASK_CORE
+        int "Inference task core (-1 = any)"
+        range -1 1
+        default -1
+        help
+            Core the detector runs on. On the ESP32-S3 the software H.264 encoder takes
+            most of core 1, so inference is better kept on core 0.
 
     config PERSON_DETECT_PREVIEW_FPS
         int "LCD preview rate (frames per second)"

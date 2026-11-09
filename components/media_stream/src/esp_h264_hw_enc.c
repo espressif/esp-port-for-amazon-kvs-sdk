@@ -5,8 +5,9 @@
  */
 
 #include "sdkconfig.h"
+#include "media_stream_caps.h"
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -73,6 +74,8 @@ static enc_data_t enc_data;
  * frame or the next. Set from the RTCP task (PLI handler), consumed in the
  * encode task. */
 static volatile bool s_idr_requested = false;
+/* Set with s_idr_requested when the request must not wait out the cooldown below. */
+static volatile bool s_idr_now = false;
 static bool s_gop_overridden = false;
 /* PLI on a lossy link arrives in storms; an unthrottled keyframe-per-PLI response
  * floods large IDRs, worsening the congestion that caused the loss (feedback collapse).
@@ -91,6 +94,13 @@ static void hw_enc_set_gop(uint8_t gop)
 
 esp_err_t esp_h264_hw_enc_request_idr(void)
 {
+    s_idr_requested = true;
+    return ESP_OK;
+}
+
+esp_err_t esp_h264_hw_enc_request_idr_now(void)
+{
+    s_idr_now = true;
     s_idr_requested = true;
     return ESP_OK;
 }
@@ -205,8 +215,10 @@ esp_err_t esp_h264_hw_enc_encode_frame_borrow(uint8_t *frame, size_t frame_len,
 
     if (s_idr_requested && !s_gop_overridden) {
         s_idr_requested = false;
+        const bool unthrottled = s_idr_now;
+        s_idr_now = false;
         int64_t now_us = esp_timer_get_time();
-        if (now_us - s_last_idr_force_us >= IDR_FORCE_MIN_INTERVAL_US) {
+        if (unthrottled || now_us - s_last_idr_force_us >= IDR_FORCE_MIN_INTERVAL_US) {
             s_last_idr_force_us = now_us;
             hw_enc_set_gop(1);
             s_gop_overridden = true;

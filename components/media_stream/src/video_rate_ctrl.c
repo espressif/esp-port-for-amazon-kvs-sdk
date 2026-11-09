@@ -31,8 +31,9 @@ static const char *TAG = "vrate";
  * degrade/recover are symmetric and the two can't drift into a nonsensical
  * combination.
  *
- * fps is absolute (clamped to [FPS_FLOOR, camera_fps]); bitrate is a percentage
- * of the resolution-derived max so the ladder scales across 720p/1080p. */
+ * fps is written for a VRATE_REF_FPS camera, scaled down for an encoder capped below its
+ * camera's rate, then clamped to [FPS_FLOOR, camera_fps]; bitrate is a percentage of the
+ * resolution-derived max so the ladder scales across 720p/1080p. */
 typedef struct {
     uint8_t fps;
     uint8_t pct;   /* bitrate as % of max_bitrate_bps */
@@ -52,6 +53,12 @@ static const vrate_rung_t LADDER[] = {
     { 12,  10 },  /* L7 - survival floor */
 };
 #define LADDER_N             (sizeof(LADDER) / sizeof(LADDER[0]))
+
+/* The camera rate LADDER's fps column is written for. An encoder capped below its camera's
+ * rate, like the S3's software encoder at 10 fps, gets the rungs scaled by its rate /
+ * VRATE_REF_FPS; without that every rung clamps to the cap and the ladder can only move
+ * bitrate. A camera that is itself slower keeps the rungs as written, clamped to its rate. */
+#define VRATE_REF_FPS        25
 
 /* Start mid-ladder, not at the top: slamming full bitrate into a link that
  * hasn't settled (ICE/TURN still negotiating) is what triggers the initial
@@ -243,6 +250,8 @@ static struct {
     /* False when the frame rate is not ours to change like when the camera hands us
      * already-encoded H.264 */
     bool     fps_actuable;
+    /* camera_fps is an encoder cap below the sensor's rate: scale the ladder's fps rungs. */
+    bool     fps_capped;
     uint32_t camera_fps;
     uint32_t width;
     uint32_t height;
@@ -417,6 +426,8 @@ static uint32_t vrate_rung_fps(uint32_t level)
     uint32_t f = LADDER[level].fps;
     if (f == 0) {
         f = s_agg.camera_fps;   /* L0 sentinel: run at whatever the sensor delivers */
+    } else if (s_agg.fps_capped && s_agg.camera_fps < VRATE_REF_FPS) {
+        f = f * s_agg.camera_fps / VRATE_REF_FPS;
     }
     /* Raise to the floor BEFORE clamping to the camera, not after. The other
      * order can return target_fps > camera_fps on a slow sensor, which makes the
@@ -705,7 +716,7 @@ static void vrate_reset_healthy(struct video_rate_ctrl_s *h)
 /* ------------------------------------------------------------------------- */
 
 void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
-                          uint32_t width, uint32_t height, bool fps_actuable)
+                          uint32_t width, uint32_t height, bool fps_actuable, bool fps_capped)
 {
     if (vrate_lock_init() != ESP_OK) {
         return;
@@ -715,6 +726,7 @@ void video_rate_ctrl_init(uint32_t camera_fps, uint32_t max_bitrate_bps,
     vrate_lock();
     s_agg.camera_fps      = camera_fps ? camera_fps : 25;
     s_agg.fps_actuable    = fps_actuable;
+    s_agg.fps_capped      = fps_capped;
     s_agg.width           = width;
     s_agg.height          = height;
     s_agg.max_bitrate_bps = max_bitrate_bps;

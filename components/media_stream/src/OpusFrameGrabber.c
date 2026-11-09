@@ -30,6 +30,13 @@ static volatile bool s_mic_muted = false;  /* TEMP: was true (push-to-talk via G
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "bsp/esp-bsp.h"
 #include "esp_codec_dev.h"
+/* The P4 reads its microphone through the board BSP's codec. A board without one - any
+ * board on esp_bsp_devkit (MEDIA_STREAM_NO_BSP) - sends no audio. */
+#if defined(BSP_CAPS_AUDIO_MIC) && BSP_CAPS_AUDIO_MIC
+#define P4_BSP_MIC  1
+#else
+#define P4_BSP_MIC  0
+#endif
 #endif
 
 /* Mic open rate. Must match the Opus encoder's sample_rate passed in via
@@ -68,7 +75,7 @@ typedef struct {
 
 static opus_encoder_data_t s_enc_data = {0};
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4 && P4_BSP_MIC
 static esp_codec_dev_handle_t mic_codec_dev = NULL;
 #endif
 
@@ -139,7 +146,7 @@ static void i2s_init(void)
 }
 #endif
 
-#if CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4 && P4_BSP_MIC
 /* High-priority I/O task: pulls raw PCM from the mic codec into the ring buffer.
  * Decoupled from Opus encode so I/O timing isn\'t held hostage by CPU work or
  * audio playback priority spikes. */
@@ -237,7 +244,8 @@ static void audio_encoder_task(void *arg)
                 continue;
             }
         } else {
-            ESP_LOGE(TAG, "Mic PCM ring not initialized");
+            /* No microphone on this board: init left the ring out (a mic that fails to come
+             * up fails init instead), so there is nothing to encode. */
             vTaskDelay(pdMS_TO_TICKS(I2S_READ_WAIT_MS));
             continue;
         }
@@ -427,7 +435,7 @@ void *opus_encoder_init_internal(audio_capture_config_t *config)
     }
 
     // Initialize audio hardware
-#if CONFIG_IDF_TARGET_ESP32P4
+#if CONFIG_IDF_TARGET_ESP32P4 && P4_BSP_MIC
     if (mic_codec_dev == NULL) {
         /* bsp_audio_codec_microphone_init() runs bsp_i2c_init() internally
          * (idempotent); media_stream_init() also brings the bus up once before
@@ -490,6 +498,8 @@ void *opus_encoder_init_internal(audio_capture_config_t *config)
             NULL, I2S_READ_TASK_PRIO,
             s_enc_data.i2s_read_task_stack, s_enc_data.i2s_read_task_buffer);
     }
+#elif CONFIG_IDF_TARGET_ESP32P4
+    ESP_LOGW(TAG, "The board's BSP has no microphone; audio capture sends nothing");
 #else
     i2s_init();
 #endif

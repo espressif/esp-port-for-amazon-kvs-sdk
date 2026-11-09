@@ -312,6 +312,26 @@ media_stream_audio_capture_t* media_stream_get_audio_capture_if(void);
 media_stream_video_capture_t* media_stream_get_video_capture_if(void);
 
 /**
+ * @brief Use an I2C bus the application already opened for the camera's sensor
+ *        control (SCCB)
+ *
+ * Without an esp-bsp board (MEDIA_STREAM_NO_BSP) and with
+ * CONFIG_MEDIA_STREAM_SCCB_I2C_INIT_BY_APP, media_stream opens its own bus from
+ * the configured pins — unless one is handed in here first. A board whose camera
+ * shares its bus with other devices (a codec, a touch panel, an IO expander)
+ * then keeps a single master on it. Call before the camera starts.
+ *
+ * @param i2c_master_bus  an i2c_master_bus_handle_t
+ *
+ * @return
+ *       - ESP_OK                 the camera will use this bus
+ *       - ESP_ERR_INVALID_ARG    NULL bus
+ *       - ESP_ERR_INVALID_STATE  the camera already opened its bus
+ *       - ESP_ERR_NOT_SUPPORTED  this build takes the bus from a BSP, or opens it itself
+ */
+esp_err_t media_stream_set_sccb_i2c_bus(void *i2c_master_bus);
+
+/**
  * @brief Get file-based video capture interface
  *
  * This interface reads video frames from files on disk (e.g., /spiffs/samples/frame-XXXX.h264)

@@ -1,0 +1,36 @@
+#
+# ESP32-S3-EYE: OV2640 over DVP, ST7789 240x240 LCD, 8 MB flash, 8 MB octal PSRAM.
+# Use on top of sdkconfig.defaults and sdkconfig.defaults.esp32s3 (see README).
+#
+
+#
+# S3-EYE BSP. Without it bsp_selector falls back to the ESP-BOX-3, which has no camera.
+# The BSP brings the sensor up and owns the LCD. Its default LVGL draw buffers
+# (2 x 100 lines) are internal DMA RAM the S3 cannot spare next to Wi-Fi and DTLS.
+#
+CONFIG_BSP_SELECT_ESP32_S3_EYE=y
+CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=40
+# CONFIG_BSP_LCD_DRAW_BUF_DOUBLE is not set
+
+# ST7789 SPI panel: MSB-first RGB565.
+CONFIG_LV_COLOR_16_SWAP=y
+
+#
+# Camera: YUYV at QVGA, which the software H.264 encoder takes as-is. On DVP the sensor's
+# default format sets the capture size, not PERSON_DETECT_VIDEO_WIDTH/HEIGHT.
+#
+CONFIG_CAMERA_OV2640=y
+CONFIG_CAMERA_OV2640_AUTO_DETECT_DVP_INTERFACE_SENSOR=y
+CONFIG_CAMERA_OV2640_DVP_YUV422_YUYV_320x240_25FPS=y
+# CONFIG_CAMERA_OV2640_DVP_YUV422_YUYV_640X480_6FPS is not set
+CONFIG_CAMERA_OV2640_DVP_DEFAULT_FMT_YUV422_YUYV_320x240_25FPS=y
+
+# Same orientation as the S3-EYE BSP's own camera settings: vertical flip, no mirror.
+# CONFIG_ESP_VIDEO_IF_HOR_FLIP is not set
+CONFIG_ESP_VIDEO_IF_VER_FLIP=y
+
+# SD card slot (1-bit), per the BSP.
+CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_1=y
+CONFIG_EXAMPLE_PIN_CMD=38
+CONFIG_EXAMPLE_PIN_CLK=39
+CONFIG_EXAMPLE_PIN_D0=40

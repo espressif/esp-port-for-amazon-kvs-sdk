@@ -1,4 +1,22 @@
 menu "Media Stream Configuration"
+    config MEDIA_STREAM_NO_BSP
+        bool
+        default y if BSP_SELECT_NONE || BSP_SELECT_ESP_BSP_DEVKIT
+        help
+            No esp-bsp board drives the hardware. For a board esp-bsp does not
+            carry, select ESP_BSP_DEVKIT under bsp_selector (it refuses
+            BSP_SELECT_NONE at configure), with BSP_SELECT_GLIB and BSP_ERROR_CHECK
+            off: the camera is then brought up from the pins set below (sensor,
+            SCCB bus, XCLK, reset/power-down). Every no-BSP path keys on this.
+
+    config MEDIA_STREAM_NO_BSP_SEL
+        int
+        default 1 if MEDIA_STREAM_NO_BSP
+        default 0
+        help
+            MEDIA_STREAM_NO_BSP for idf_component.yml conditions, which need a
+            symbol that is always set (a hidden bool that is n is not).
+
     menu "Video Interface"
         config USE_ESP_VIDEO_IF
             bool "Use ESP Video Interface"
@@ -82,10 +100,11 @@ menu "Media Stream Configuration"
     endmenu
 
     menu "Camera Configuration"
+        depends on IDF_TARGET_ESP32
+        comment "esp32-camera pinout. The ESP32-P4 and ESP32-S3 capture through esp_video; see Video Initialization Configuration."
         choice CAMERA_MODULE
             bool "Select Camera Pinout"
-            default CAMERA_MODULE_ESP_S3_EYE if IDF_TARGET_ESP32S3
-            default CAMERA_MODULE_WROVER_KIT if IDF_TARGET_ESP32
+            default CAMERA_MODULE_WROVER_KIT
             help
                 Select Camera Pinout.
 
@@ -95,8 +114,6 @@ menu "Media Stream Configuration"
                 bool "ESP-EYE DevKit"
             config CAMERA_MODULE_ESP_S2_KALUGA
                 bool "ESP32-S2-Kaluga-1 V1.3"
-            config CAMERA_MODULE_ESP_S3_EYE
-                bool "ESP-S3-EYE DevKit"
             config CAMERA_MODULE_ESP32_CAM_BOARD
                 bool "ESP32 Camera Development Board"
             config CAMERA_MODULE_M5STACK_PSRAM
@@ -439,21 +456,15 @@ menu "Media Stream Configuration"
         config VIDEO_RATE_CTRL_FPS_FLOOR
             int "Rate control: lowest frame rate the ladder may schedule"
             range 1 30
+            default 5 if IDF_TARGET_ESP32S3
             default 12
             help
                 The ladder never asks for fewer frames per second than this, whatever
                 the link is doing. Its rungs are clamped up to it, so raising this
-                shortens the ladder rather than changing its shape.
-
-                12 is the historical default, measured on a contended 2.4 GHz uplink
-                where a single frame took ~70 ms to send: a 15-fps budget (67 ms) stays
-                under water and the controller cannot catch up, while 12 fps (~83 ms)
-                has the headroom to match those sends.
-
-                Raise it when a consumer has a hard frame-rate requirement and would
-                rather lose quality than smoothness - an archive upload that must stay
-                at 20 fps, say. The bitrate floor rises with it in effect, since fewer
-                bits per frame at more frames is what the encoder is then asked for.
+                shortens the ladder rather than changing its shape. The rungs are written
+                for a 25 fps camera and scaled down for a slower one (or a capped
+                encoder), so the floor has to sit below that rate for frame rate to move
+                at all.
 
         config VIDEO_RATE_CTRL_MIN_MBPS_PER_PX
             int "Rate control: bitrate floor in milli-bits per pixel per second"
@@ -613,6 +624,51 @@ menu "Media Stream Configuration"
             help
                 Priority of the video encoder task (higher number = higher priority).
 
+        config VIDEO_ENCODER_TASK_CORE
+            int "Video Encoder Task Core (-1 = any)"
+            range -1 1
+            default 1 if IDF_TARGET_ESP32S3
+            default -1
+            help
+                Core the H.264 encoder sink runs on. -1 lets the scheduler pick.
+
+                On the ESP32-S3 the software encoder takes most of a core, so it is
+                pinned to core 1 by default and Wi-Fi keeps core 0.
+
+        menu "Software H.264 encoder"
+            depends on IDF_TARGET_ESP32S3
+
+            config MEDIA_STREAM_SW_H264_MAX_FPS
+                int "Maximum encoded frame rate"
+                range 1 30
+                default 10
+                help
+                    Cap on the encoder's frame rate. The software encoder manages about
+                    11 fps at QVGA on an ESP32-S3, so frames beyond this are dropped on
+                    the pump rather than queued behind a busy encoder.
+
+            config MEDIA_STREAM_SW_H264_GOP
+                int "Keyframe interval (frames)"
+                range 1 255
+                default 20
+                help
+                    Frames between periodic IDRs. There is no forced-IDR API for the
+                    software encoder, so this also bounds how long a viewer that lost a
+                    frame waits if the GOP=1 fallback cannot help.
+
+            config MEDIA_STREAM_SW_H264_QP_MIN
+                int "Minimum QP"
+                range 10 51
+                default 26
+
+            config MEDIA_STREAM_SW_H264_QP_MAX
+                int "Maximum QP"
+                range 10 51
+                default 42
+                help
+                    Must be above the minimum for bitrate control to have any effect.
+        endmenu
+
         config AUDIO_ENCODER_TASK_PRIORITY
             int "Audio Encoder Task Priority"
             range 1 10
@@ -698,7 +754,7 @@ menu "Media Stream Configuration"
                             cause issues with some sensors or longer cable connections.
                 endif
 
-                if BSP_SELECT_NONE
+                if MEDIA_STREAM_NO_BSP
                     config MEDIA_STREAM_MIPI_CSI_SCCB_I2C_SCL_PIN
                         int "SCCB(I2C) SCL Pin"
                         default 8
@@ -854,13 +910,14 @@ menu "Media Stream Configuration"
                     default 10000000 if IDF_TARGET_ESP32S3
                     default 20000000
                     help
-                        Master clock frequency for DVP camera sensor.
+                        Master clock frequency for DVP camera sensor. Used only without a
+                        BSP (MEDIA_STREAM_NO_BSP); a BSP drives XCLK itself.
 
                         Common values:
                         - 20000000 Hz (20MHz): Standard for most DVP sensors
                         - 24000000 Hz (24MHz): Alternative for some sensors
 
-                if BSP_SELECT_NONE
+                if MEDIA_STREAM_NO_BSP
                     config MEDIA_STREAM_DVP_SCCB_I2C_SCL_PIN
                         int "SCCB(I2C) SCL Pin"
                         default 8 if IDF_TARGET_ESP32P4
@@ -1154,7 +1211,7 @@ menu "Media Stream Configuration"
                             LEDC timer channel for camera clock output.
                 endif
 
-                if BSP_SELECT_NONE
+                if MEDIA_STREAM_NO_BSP
                     config MEDIA_STREAM_SPI_CAM_0_SCCB_I2C_SCL_PIN
                         int "SCCB(I2C) SCL Pin"
                         default 8 if IDF_TARGET_ESP32P4
@@ -1565,7 +1622,7 @@ menu "Media Stream Configuration"
                             LEDC timer channel for camera clock output.
                 endif
 
-                if BSP_SELECT_NONE
+                if MEDIA_STREAM_NO_BSP
                     config MEDIA_STREAM_SPI_CAM_1_SCCB_I2C_SCL_PIN
                         int "SCCB(I2C) SCL Pin"
                         default 5 if IDF_TARGET_ESP32P4
@@ -1646,7 +1703,7 @@ menu "Media Stream Configuration"
 
         menuconfig MEDIA_STREAM_SCCB_I2C_INIT_BY_APP
             bool "Use Pre-initialized SCCB(I2C) Bus for All Camera Sensors And Motors"
-            default y if !BSP_SELECT_NONE
+            default y if !MEDIA_STREAM_NO_BSP
             help
                 Enable this option to use an I2C bus that has been explicitly
                 initialized by your application before camera initialization.
@@ -1681,7 +1738,7 @@ menu "Media Stream Configuration"
                 range 0 30 if IDF_TARGET_ESP32C6
                 range 0 29 if IDF_TARGET_ESP32C61
                 range 0 28 if IDF_TARGET_ESP32C5
-                depends on BSP_SELECT_NONE
+                depends on MEDIA_STREAM_NO_BSP
                 help
                     GPIO pin for I2C clock signal to all camera sensors and motors.
 
@@ -1695,7 +1752,7 @@ menu "Media Stream Configuration"
                 range 0 30 if IDF_TARGET_ESP32C6
                 range 0 29 if IDF_TARGET_ESP32C61
                 range 0 28 if IDF_TARGET_ESP32C5
-                depends on BSP_SELECT_NONE
+                depends on MEDIA_STREAM_NO_BSP
                 help
                     GPIO pin for I2C data signal to all camera sensors and motors.
         endif

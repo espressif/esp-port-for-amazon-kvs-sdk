@@ -113,6 +113,10 @@ typedef enum {
  */
 typedef void (*video_raw_sink_fn_t)(const video_raw_frame_t *frame, void *user);
 
+/* task_core values. Zero means "any core" so that a zero-initialised config keeps working. */
+#define VIDEO_RAW_SINK_CORE_ANY   0
+#define VIDEO_RAW_SINK_CORE(n)    ((uint8_t)((n) + 1))
+
 /**
  * @brief Sink registration parameters
  *
@@ -133,6 +137,7 @@ typedef struct {
     video_raw_sink_fn_t on_frame;
     uint32_t            task_stack; /* Push mode only; 0 for the default */
     uint8_t             task_prio;  /* Push mode only; 0 for the default */
+    uint8_t             task_core;  /* Push mode only; VIDEO_RAW_SINK_CORE_ANY or VIDEO_RAW_SINK_CORE(n) */
 
     /* Backpressure. All per sink - nothing here is shared with any other sink.
      *

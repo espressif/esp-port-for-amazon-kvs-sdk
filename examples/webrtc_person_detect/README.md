@@ -36,6 +36,9 @@ property the example exists to demonstrate.
 camera on the same die as the encoder. Wi-Fi comes from the on-board ESP32-C6 over SDIO
 (`esp_hosted`).
 
+**ESP32-S3-EYE.** Same 240x240 ST7789 LCD, with an OV2640 on DVP and native Wi-Fi. The S3 has no
+H.264 hardware and no PPA, so the same pipeline runs on the CPU instead.
+
 ## Build
 
 The P4-EYE overlay sets `CONFIG_SLAVE_FLASHER_ENABLE=y`, so the P4 programs the C6 in-system from a
@@ -62,6 +65,22 @@ idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkc
 idf.py menuconfig      # Wi-Fi credentials + AWS credentials
 idf.py -p <PORT> flash monitor
 ```
+
+On the **ESP32-S3-EYE** there is no co-processor image. `sdkconfig.defaults.esp32s3` holds what any S3
+needs for this example (8 MB flash, octal PSRAM, pipeline sizing); the board comes from its own
+overlay, passed in the same invocation as `set-target` for the same reason as above:
+
+```bash
+cd examples/webrtc_person_detect
+idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.s3_eye.esp32s3" \
+       set-target esp32s3
+idf.py menuconfig      # Wi-Fi credentials + AWS credentials
+idf.py -p <PORT> flash monitor
+```
+
+A board with no stored Wi-Fi credentials starts BLE provisioning and waits there before the
+camera starts. Either provision it, or set the network from the console with
+`wifi-set <ssid> <password>` and `reboot`.
 
 The detection model is written to its own flash partition, not linked into the app — the app slot
 has nowhere near 435 KB spare. `idf.py flash` writes it along with everything else; there is no

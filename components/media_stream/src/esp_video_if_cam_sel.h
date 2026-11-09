@@ -6,7 +6,7 @@
  * reset/pwdn/xclk/power). Only the no-BSP case needs a static pin table, which
  * lives in the customized board header — edit it for a bare/custom board. The
  * interface-common macros below (device path, SCCB freq) are board-agnostic. */
-#if CONFIG_BSP_SELECT_NONE
+#if CONFIG_MEDIA_STREAM_NO_BSP
 #include "boards/customized/example_video_common_board.h"
 #endif
 
@@ -166,3 +166,13 @@
 #else
 #define MEDIA_STREAM_CAM_DEV_PATH                            ESP_VIDEO_SPI_DEVICE_NAME
 #endif /* CONFIG_MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR */
+
+/* The camera actually opened is a DVP sensor (the device path above picks UVC and CSI
+ * first). A DVP sensor has no ISP behind it: it delivers exactly one format, the one it
+ * was configured with, and esp_video's DVP device cannot resize it through S_FMT. */
+#if !MEDIA_STREAM_ENABLE_USB_UVC_CAM_SENSOR && !MEDIA_STREAM_ENABLE_MIPI_CSI_CAM_SENSOR && \
+    MEDIA_STREAM_ENABLE_DVP_CAM_SENSOR
+#define MEDIA_STREAM_CAM_IS_DVP                              1
+#else
+#define MEDIA_STREAM_CAM_IS_DVP                              0
+#endif

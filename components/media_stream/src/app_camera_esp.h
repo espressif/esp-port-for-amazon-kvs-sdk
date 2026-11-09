@@ -8,11 +8,10 @@
 
 #include "sdkconfig.h"
 
-/* esp32-camera is gated to `target in [esp32, esp32s3]` in media_stream's
- * idf_component.yml. On every other target these headers are not on the
- * include path; callers that compile on non-esp32/non-s3 (e.g. P4 path
- * via esp_video) never reach the prototypes we'd export here. */
-#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S3
+/* esp32-camera is gated to plain ESP32 in media_stream's idf_component.yml (the P4 and
+ * S3 capture through esp_video). On every other target these headers are not on the
+ * include path, and nothing reaches the prototypes exported here. */
+#if CONFIG_IDF_TARGET_ESP32
 #include "sensor.h"
 #include "esp_camera.h"
 #endif
@@ -104,28 +103,6 @@
 #define CAMERA_PIN_VSYNC 2
 #define CAMERA_PIN_HREF 3
 #define CAMERA_PIN_PCLK 33
-
-#elif CONFIG_CAMERA_MODULE_ESP_S3_EYE
-#define CAMERA_MODULE_NAME "ESP-S3-EYE"
-#define CAMERA_PIN_PWDN -1
-#define CAMERA_PIN_RESET -1
-
-#define CAMERA_PIN_VSYNC 6
-#define CAMERA_PIN_HREF 7
-#define CAMERA_PIN_PCLK 13
-#define CAMERA_PIN_XCLK 15
-
-#define CAMERA_PIN_SIOD 4
-#define CAMERA_PIN_SIOC 5
-
-#define CAMERA_PIN_D0 11
-#define CAMERA_PIN_D1 9
-#define CAMERA_PIN_D2 8
-#define CAMERA_PIN_D3 10
-#define CAMERA_PIN_D4 12
-#define CAMERA_PIN_D5 18
-#define CAMERA_PIN_D6 17
-#define CAMERA_PIN_D7 16
 
 #elif CONFIG_CAMERA_MODULE_ESP32_CAM_BOARD
 #define CAMERA_MODULE_NAME "ESP-DEVCAM"

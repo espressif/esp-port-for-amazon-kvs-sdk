@@ -26,13 +26,11 @@ static const char *TAG __attribute__((unused)) = "H264FrameGrabber";
 #include "H264FrameGrabber.h"
 #include "video_sink_priv.h"
 
-#if CONFIG_IDF_TARGET_ESP32S3 || MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
-#if CONFIG_IDF_TARGET_ESP32S3
-#include "app_camera_esp.h"
-#include "esp_h264_enc_single_sw.h"
-#include "esp_h264_enc_single.h"
-#else
-#include "esp_h264_hw_enc.h"
+#if MEDIA_STREAM_HAS_ESP_VIDEO_CAPTURE
+/* The capture pump in esp32p4_frame_grabber.c serves every target with esp_video
+ * capture: the P4 (MIPI-CSI or UVC, hardware encoder) and the S3 (DVP, software
+ * encoder). */
+#include "h264_enc.h"
 #if MEDIA_STREAM_HAS_HW_H264_ENC
 #include "esp_h264_enc_single.h"
 #endif
@@ -52,333 +50,7 @@ extern esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
                                                size_t *len, uint16_t *width,
                                                uint16_t *height,
                                                uint32_t timeout_ms);
-#endif
 
-#if CONFIG_IDF_TARGET_ESP32S3
-
-typedef struct {
-    TaskHandle_t encoder_task_handle;
-    StaticTask_t *task_buffer;
-    void *task_stack;
-    bool encoder_initialized;
-    bool running;
-    SemaphoreHandle_t run_semaphore;
-    volatile int curr_cnt;
-    int frame_count;
-    esp_h264_enc_handle_t handle;
-    esp_h264_enc_out_frame_t out_frame;
-    esp_h264_enc_in_frame_t in_frame;
-    esp_h264_enc_cfg_t cfg;
-} h264_encoder_data_t;
-
-static h264_encoder_data_t s_h264_enc_data = {0};
-static esp_h264_enc_handle_t initialize_h264_encoder();
-
-
-
-/* -------------------------------------------------------------------------- */
-/*  Sink plumbing (S3)                                                        */
-/*                                                                            */
-/*  Mirrors the P4 grabber: the encoder publishes each frame to every enabled  */
-/*  sink with a BORROWED buffer. Consumers register with video_sink_register() */
-/*  and own whatever buffering their own work requires.                       */
-/* -------------------------------------------------------------------------- */
-
-static inline video_frame_type_t h264_to_video_frame_type(esp_h264_frame_type_t t)
-{
-    switch (t) {
-        case ESP_H264_FRAME_TYPE_IDR:
-        case ESP_H264_FRAME_TYPE_I:
-            return VIDEO_FRAME_TYPE_I;
-        case ESP_H264_FRAME_TYPE_P:
-            return VIDEO_FRAME_TYPE_P;
-        default:
-            return VIDEO_FRAME_TYPE_OTHER;
-    }
-}
-
-/* `buffer` is BORROWED by the sinks for the duration of this call. */
-static void publish_encoded_frame(uint8_t *buffer, uint32_t len, esp_h264_frame_type_t type)
-{
-    video_frame_t frame = {
-        .buffer    = buffer,
-        .len       = len,
-        /* Stamped once, so every sink sees an identical PTS for this frame. */
-        .timestamp = esp_timer_get_time(),
-        .type      = h264_to_video_frame_type(type),
-    };
-    video_sink_dispatch(&frame);
-}
-
-static void video_encoder_task(void *arg)
-{
-    static uint8_t fill_val = 0;
-    ESP_LOGD(TAG, "H264 encoder task started (singleton mode - runs continuously)");
-    (void)arg;
-
-    s_h264_enc_data.frame_count = 0;
-    int one_image_size = s_h264_enc_data.cfg.res.height * s_h264_enc_data.cfg.res.width * 2;
-
-    while(1) {
-        // Check if encoding should be running
-        if (!s_h264_enc_data.running) {
-            ESP_LOGD(TAG, "H264 encoder paused, waiting for start signal...");
-            // Wait for start signal (blocking)
-            xSemaphoreTake(s_h264_enc_data.run_semaphore, portMAX_DELAY);
-            ESP_LOGD(TAG, "H264 encoder resumed");
-        }
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (fb) {
-            memcpy(s_h264_enc_data.in_frame.raw_data.buffer, fb->buf, one_image_size);
-            esp_camera_fb_return(fb);
-        } else {
-            memset(s_h264_enc_data.in_frame.raw_data.buffer, fill_val++, one_image_size);
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
-        s_h264_enc_data.in_frame.pts = s_h264_enc_data.frame_count++ * (1000 / s_h264_enc_data.cfg.fps);
-
-        esp_h264_err_t ret = esp_h264_enc_process(s_h264_enc_data.handle, &s_h264_enc_data.in_frame, &s_h264_enc_data.out_frame);
-        if (ret != ESP_H264_ERR_OK) {
-            printf("Process failed. ret %d \r\n", ret);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        /* Skip empty encoder output — calloc(_, 0) returns a tiny pointer
-         * that NULL-checks pass and later free() corrupts TLSF (same crash
-         * family as the Opus zero-frame bug seen in writeFrame heap fault).
-         */
-        if (s_h264_enc_data.out_frame.length == 0) {
-            continue;
-        }
-
-        /* Publish the encoder's own output buffer. Sinks borrow it for the duration
-         * of the dispatch and copy whatever they need, which removes the alloc +
-         * memcpy this loop used to do on every frame. */
-        publish_encoded_frame(s_h264_enc_data.out_frame.raw_data.buffer,
-                              s_h264_enc_data.out_frame.length,
-                              (esp_h264_frame_type_t)s_h264_enc_data.out_frame.frame_type);
-    }
-
-    ESP_LOGE(TAG, "H264 encoder task unexpectedly exited!");
-}
-
-esp_err_t camera_and_encoder_init(video_capture_config_t *config)
-{
-    // Singleton pattern: return if already initialized
-    if (s_h264_enc_data.encoder_initialized) {
-        ESP_LOGD(TAG, "H264 encoder already initialized (singleton)");
-        return ESP_OK;
-    }
-
-    app_camera_init();
-    printf("camera init done\n");
-
-    if (initialize_h264_encoder() == NULL) {
-        ESP_LOGE(TAG, "Failed to initialize H264 encoder");
-        goto cleanup;
-    }
-    webrtc_mem_utils_print_stats(TAG);
-
-    // Create semaphore for start/stop control
-    s_h264_enc_data.run_semaphore = xSemaphoreCreateBinary();
-    if (!s_h264_enc_data.run_semaphore) {
-        ESP_LOGE(TAG, "Failed to create run semaphore");
-        goto cleanup;
-    }
-
-#define ENC_TASK_STACK_SIZE     CONFIG_VIDEO_ENCODER_TASK_STACK_SIZE
-#define ENC_TASK_PRIO           CONFIG_VIDEO_ENCODER_TASK_PRIORITY
-    s_h264_enc_data.task_buffer = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
-    s_h264_enc_data.task_stack = heap_caps_malloc(ENC_TASK_STACK_SIZE, MALLOC_CAP_SPIRAM);
-    if (!s_h264_enc_data.task_buffer || !s_h264_enc_data.task_stack) {
-        ESP_LOGE(TAG, "Failed to allocate task buffers");
-        goto cleanup;
-    }
-
-    s_h264_enc_data.running = false;  // Start in stopped state
-
-    s_h264_enc_data.encoder_task_handle = xTaskCreateStatic(video_encoder_task, "video_encoder", ENC_TASK_STACK_SIZE,
-                                                            NULL, ENC_TASK_PRIO, s_h264_enc_data.task_stack, s_h264_enc_data.task_buffer);
-    if (s_h264_enc_data.encoder_task_handle == NULL) {
-        ESP_LOGE(TAG, "failed to create encoder task!");
-        goto cleanup;
-    }
-
-    s_h264_enc_data.encoder_initialized = true;
-
-    ESP_LOGD(TAG, "H264 encoder initialized as singleton (stopped, use start() to begin)");
-    return ESP_OK;
-
-cleanup:
-    // Conditional cleanup based on what was allocated
-    if (s_h264_enc_data.task_buffer != NULL) {
-        heap_caps_free(s_h264_enc_data.task_buffer);
-        s_h264_enc_data.task_buffer = NULL;
-    }
-    if (s_h264_enc_data.task_stack != NULL) {
-        heap_caps_free(s_h264_enc_data.task_stack);
-        s_h264_enc_data.task_stack = NULL;
-    }
-    if (s_h264_enc_data.run_semaphore != NULL) {
-        vSemaphoreDelete(s_h264_enc_data.run_semaphore);
-        s_h264_enc_data.run_semaphore = NULL;
-    }
-    ESP_LOGE(TAG, "H264 encoder initialization failed");
-    return ESP_ERR_NO_MEM;
-}
-
-/* The H.264 pull path is gone: encoded frames are delivered through the
- * video_sink registry instead. Kept as a stub so the codec-dispatching adapter
- * still links; it reports the migration rather than failing silently. */
-esp_h264_out_buf_t *get_h264_encoded_frame(void)
-{
-    static bool warned;
-    if (!warned) {
-        warned = true;
-        ESP_LOGE(TAG, "H.264 pull API removed - register a sink with video_sink_register()");
-    }
-    return NULL;
-}
-
-static esp_h264_enc_handle_t initialize_h264_encoder()
-{
-    esp_h264_err_t ret = ESP_H264_ERR_OK;
-    int one_image_size = 0;
-    s_h264_enc_data.cfg.fps = 10;//DEFAULT_FPS_VALUE;
-    s_h264_enc_data.cfg.gop = 30;
-    s_h264_enc_data.cfg.res.width = 320;
-    s_h264_enc_data.cfg.res.height = 240;
-    s_h264_enc_data.cfg.rc.bitrate = s_h264_enc_data.cfg.res.width * s_h264_enc_data.cfg.res.height * s_h264_enc_data.cfg.fps / 20;
-    s_h264_enc_data.cfg.rc.qp_min = 30;
-    s_h264_enc_data.cfg.rc.qp_max = 30;
-    s_h264_enc_data.cfg.pic_type = ESP_H264_RAW_FMT_YUYV;
-    one_image_size = s_h264_enc_data.cfg.res.height * s_h264_enc_data.cfg.res.width * 2; // 1.5 : Pixel is 1.5 on ESP_H264_RAW_FMT_I420.
-    s_h264_enc_data.in_frame.raw_data.buffer = (uint8_t *) heap_caps_aligned_alloc(16, one_image_size, MALLOC_CAP_SPIRAM);
-    if (s_h264_enc_data.in_frame.raw_data.buffer == NULL) {
-        printf("in_frame.raw_data.buffer allocation failed\n");
-        goto h264_example_exit;
-    }
-    s_h264_enc_data.out_frame.raw_data.len = one_image_size;
-    s_h264_enc_data.out_frame.raw_data.buffer = (uint8_t *) heap_caps_aligned_alloc(16, one_image_size, MALLOC_CAP_SPIRAM);
-    if (s_h264_enc_data.out_frame.raw_data.buffer == NULL) {
-        printf("out_frame.raw_data.buffer allocation failed\n");
-        goto h264_example_exit;
-    }
-    ret = esp_h264_enc_sw_new(&s_h264_enc_data.cfg, &s_h264_enc_data.handle);
-    if (ret != ESP_H264_ERR_OK) {
-        printf("esp_h264_enc_sw_new failed ret %d, handle %p\n", (int) ret, (void *) s_h264_enc_data.handle);
-        goto h264_example_exit;
-    }
-
-    ret = esp_h264_enc_open(s_h264_enc_data.handle);
-    if (ret != ESP_H264_ERR_OK) {
-        printf("Open failed. ret %d, handle %p\n", (int) ret, (void *) s_h264_enc_data.handle);
-        goto h264_example_exit;
-    }
-
-    return s_h264_enc_data.handle;
-
-h264_example_exit:
-    if (s_h264_enc_data.in_frame.raw_data.buffer) {
-        heap_caps_free(s_h264_enc_data.in_frame.raw_data.buffer);
-        s_h264_enc_data.in_frame.raw_data.buffer = NULL;
-    }
-
-    esp_h264_enc_close(s_h264_enc_data.handle);
-    esp_h264_enc_del(s_h264_enc_data.handle);
-    return NULL;
-}
-
-esp_err_t h264_encoder_start(void)
-{
-    if (!s_h264_enc_data.encoder_initialized) {
-        ESP_LOGE(TAG, "H264 encoder not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (s_h264_enc_data.running) {
-        ESP_LOGD(TAG, "H264 encoder already running");
-        return ESP_OK;
-    }
-
-    s_h264_enc_data.running = true;
-    xSemaphoreGive(s_h264_enc_data.run_semaphore);  // Signal encoder to start
-    ESP_LOGD(TAG, "H264 encoder started");
-
-    return ESP_OK;
-}
-
-esp_err_t h264_encoder_stop(void)
-{
-    if (!s_h264_enc_data.encoder_initialized) {
-        ESP_LOGE(TAG, "H264 encoder not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (!s_h264_enc_data.running) {
-        ESP_LOGD(TAG, "H264 encoder already stopped");
-        return ESP_OK;
-    }
-
-    s_h264_enc_data.running = false;
-    ESP_LOGD(TAG, "H264 encoder stopped");
-
-    return ESP_OK;
-}
-
-esp_err_t h264_encoder_deinit(void)
-{
-    if (!s_h264_enc_data.encoder_initialized) {
-        ESP_LOGD(TAG, "H264 encoder not initialized, nothing to deinitialize");
-        return ESP_OK;
-    }
-
-    // Stop encoding first
-    h264_encoder_stop();
-
-    // Singleton pattern: encoder task remains running but paused
-    ESP_LOGD(TAG, "H264 encoder is singleton - task remains paused until start() is called");
-
-    return ESP_OK;
-}
-
-esp_err_t video_capture_set_bitrate(video_capture_handle_t handle, uint32_t bitrate_kbps)
-{
-    (void) handle;
-    s_h264_enc_data.cfg.rc.bitrate = bitrate_kbps * 1000;
-    /* Note: For ESP32-S3 software encoder, bitrate changes may require encoder restart */
-    return ESP_OK;
-}
-
-esp_err_t video_capture_get_bitrate(video_capture_handle_t handle, uint32_t *bitrate_kbps)
-{
-    (void) handle;
-    if (bitrate_kbps == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    *bitrate_kbps = s_h264_enc_data.cfg.rc.bitrate / 1000;
-    return ESP_OK;
-}
-
-esp_h264_out_buf_t *get_h264_encoded_frame_putmedia()
-{
-    return NULL;
-}
-
-bool h264_encoder_is_running(void)
-{
-    return s_h264_enc_data.running;
-}
-
-bool h264_encoder_is_initialized(void)
-{
-    return s_h264_enc_data.encoder_initialized;
-}
-
-#else /* CONFIG_IDF_TARGET_ESP32P4 */
 /* File-scope variable to track camera initialization state (reset on deinit) */
 static bool camera_enc_init_done = false;
 
@@ -429,8 +101,7 @@ esp_err_t camera_and_encoder_init(video_capture_config_t *config)
     return ESP_OK;
 }
 
-/* See the S3 stub above: the H.264 pull path is replaced by the video_sink
- * registry. */
+/* The H.264 pull path is replaced by the video_sink registry. */
 esp_h264_out_buf_t *get_h264_encoded_frame(void)
 {
     static bool warned;
@@ -444,8 +115,8 @@ esp_h264_out_buf_t *get_h264_encoded_frame(void)
 esp_err_t video_capture_set_bitrate(video_capture_handle_t handle, uint32_t bitrate_kbps)
 {
     (void) handle;
-#if MEDIA_STREAM_HAS_HW_H264_ENC
-    return esp_h264_hw_enc_set_bitrate(bitrate_kbps * 1000);
+#if MEDIA_STREAM_HAS_ESP_H264
+    return h264_enc_set_bitrate(bitrate_kbps * 1000);
 #else
     /* The camera encodes and owns its own bitrate; the UVC host driver exposes no
      * encoding-unit control to change it. */
@@ -460,8 +131,8 @@ esp_err_t video_capture_get_bitrate(video_capture_handle_t handle, uint32_t *bit
     if (bitrate_kbps == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-#if MEDIA_STREAM_HAS_HW_H264_ENC
-    *bitrate_kbps = esp_h264_hw_enc_get_bitrate() / 1000;
+#if MEDIA_STREAM_HAS_ESP_H264
+    *bitrate_kbps = h264_enc_get_bitrate() / 1000;
     return ESP_OK;
 #else
     *bitrate_kbps = 0;
@@ -496,7 +167,6 @@ bool h264_encoder_is_initialized(void)
 {
     return esp32p4_is_encoder_initialized();
 }
-#endif
 #else /* all other targets */
 esp_err_t camera_and_encoder_init(video_capture_config_t *config)
 {

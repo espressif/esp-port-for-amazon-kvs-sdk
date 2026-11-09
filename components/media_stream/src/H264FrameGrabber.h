@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include "video_capture.h"
 #include "media_stream_caps.h"
-#if MEDIA_STREAM_HAS_HW_H264_ENC || CONFIG_IDF_TARGET_ESP32S3
+#if MEDIA_STREAM_HAS_ESP_H264
 #include <esp_h264_types.h>
 #else
 /**

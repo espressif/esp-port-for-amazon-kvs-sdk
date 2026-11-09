@@ -1,11 +1,10 @@
 dependencies:
-  # esp32-camera supports esp32 + esp32s3 (Wrover-Kit and ESP-S3-EYE
-  # board pinouts). H264FrameGrabber.c and MJPEGFrameGrabber.c both have
-  # an explicit `#if CONFIG_IDF_TARGET_ESP32S3` arm that uses esp_camera_*.
+  # esp32-camera is plain ESP32 only (MJPEGFrameGrabber.c). The P4 and S3 capture
+  # through esp_video instead.
   espressif/esp32-camera:
     version: ^2.0.2
     rules:
-      - if: "target in [esp32, esp32s3]"
+      - if: "target in [esp32]"
 
   # Require esp_video >= 2.0.1 for the AWB subwindow zero-init fix (upstream
   # MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon; also auto-climbs the
@@ -46,21 +45,32 @@ dependencies:
   # 1.6.1 and silently walk the BSP down to 4.0.1 (the first version with no
   # codec_dev dep) — which predates bsp_audio_codec_microphone_init and the
   # hw_cfg-based display config this component uses. Keep in lockstep with the BSP.
+  # Without a board BSP (MEDIA_STREAM_NO_BSP: esp_bsp_devkit or none) no codec is
+  # brought up here at all, so the pin does not apply — a board manager driving
+  # the board's codec needs 2.x.
   espressif/esp_codec_dev:
-    version: "~1.5"
+    version: "*"
+    matches:
+      - if: "$CONFIG{MEDIA_STREAM_NO_BSP_SEL} == 0"
+        version: "~1.5"
+      - if: "$CONFIG{MEDIA_STREAM_NO_BSP_SEL} == 1"
     rules:
       - if: "target != linux"
 
-  # BSP component from component manager
+  # BSP component from component manager. It refuses to configure with no board
+  # selected, so a board esp-bsp does not carry selects esp_bsp_devkit and sets
+  # the camera pins (MEDIA_STREAM_NO_BSP).
   espressif/bsp_selector:
     version: "^1.0.0"
     rules:
       - if: "target not in [esp32c5, esp32c6, linux]"
 
+  # P4: the JPEG snapshot path. S3: VIDEO_RAW_MODE_CONVERTED sinks, which have no PPA
+  # there (video_frame_convert_imgfx.c).
   espressif/esp_image_effects:
     version: "^1.0.1"
     rules:
-      - if: "target in [esp32p4]"
+      - if: "target in [esp32p4, esp32s3]"
 
   # LVGL is required when the video player receive path is enabled;
   # the render backend targets an LVGL canvas on the BSP's display.
