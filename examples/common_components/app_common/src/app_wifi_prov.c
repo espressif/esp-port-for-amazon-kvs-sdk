@@ -21,6 +21,9 @@
 #if CONFIG_APP_BLE_RELEASE_AFTER_PROV
 #include "esp_bt.h"
 #endif
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL
+#include "esp_private/esp_modem_clock.h"
+#endif
 #endif
 
 static const char *TAG = "app_wifi_prov";
@@ -127,6 +130,12 @@ static esp_err_t start_provisioning(const app_wifi_prov_config_t *cfg)
      * internal semaphore that wait() blocks on, causing a deadlock. */
     network_prov_mgr_wait();
     network_prov_mgr_deinit();
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL
+    /* BLE init keeps the main XTAL on through light sleep for its low-power clock. The C5
+     * BLE controller does not release it at deinit (the C6 one does), so every light sleep
+     * after provisioning would cost about 4-5 mA more. */
+    modem_clock_deselect_lp_clock_source(PERIPH_BT_MODULE);
+#endif
     ESP_LOGI(TAG, "BLE provisioning complete, resources released");
 
     /* Call post-provisioning callback (e.g. to deinit BT controller on coprocessor) */

@@ -121,6 +121,10 @@ static void on_ready_cb(void)
 
 #ifdef CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_ENABLE
 	stop_cli_for_light_sleep();
+	/* While the host sleeps, esp_hosted logs two INFO lines for each host-bound
+	 * packet it drops (about one a second). At 115200 baud each costs
+	 * milliseconds awake. Keep the warnings. */
+	esp_log_level_set("ehcp_host_ps", ESP_LOG_WARN);
 	(void)cp_light_sleep_controller_start();
 #else
 	ESP_EARLY_LOGW(TAG, "Light sleep not enabled in menuconfig");
@@ -146,6 +150,7 @@ static void off_ready_cb(void)
 	optional_debug_log_heap_snapshot("off_ready_before");
 
 	start_cli_after_light_sleep();
+	esp_log_level_set("ehcp_host_ps", ESP_LOG_INFO);
 	optional_debug_cycle_end();
 
 	optional_debug_log_heap_snapshot("off_ready_after");
