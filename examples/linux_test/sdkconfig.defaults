@@ -29,7 +29,7 @@ CONFIG_MBEDTLS_SSL_KEYING_MATERIAL_EXPORT=y
 CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
 
 # Use upstream KVS Tls_mbedtls.c on Linux. The Tls_esp.c variant needs
-# esp_tls.h + esp_crt_bundle.h, which are ESP-only.
+# esp_crt_bundle.h, which is ESP-only.
 CONFIG_USE_ESP_TLS_FOR_KVS=n
 
 

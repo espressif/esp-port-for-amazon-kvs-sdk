@@ -76,7 +76,7 @@ REQUIRES "app_webrtc" "kvs_signaling"  # No kvs_webrtc
 ## Configuration
 
 The component supports various ESP-IDF configuration options:
-- `CONFIG_USE_ESP_TLS_FOR_KVS` - Use ESP-TLS instead of direct mbedTLS
+- `CONFIG_USE_ESP_TLS_FOR_KVS` - Verify TURN-over-TLS servers with the ESP-IDF certificate bundle (no CA file needed)
 - `CONFIG_ENABLE_DATA_CHANNEL` - Enable data channel support
 - `CONFIG_PREFER_DYNAMIC_ALLOCS` - Use dynamic memory allocation
 
