@@ -13,7 +13,7 @@ notes.
   (or other JTAG/UART adapter) — see [Dual-chip setup](#dual-chip-setup-esp32-p4--esp32-c6).
 
 ### Software
-- **ESP-IDF v5.4 or v5.5** (`release/v5.4` or `release/v5.5`).
+- **ESP-IDF v5.5 or later** (`release/v5.5` or newer). esp_hosted 3.x needs v5.5.
 - On Linux, `pkg-config`.
 
 ## Clone

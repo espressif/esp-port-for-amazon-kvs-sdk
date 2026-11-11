@@ -100,6 +100,16 @@ if(CONFIG_USE_ESP_WEBSOCKET_CLIENT)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC -DUSE_ESP_WEBSOCKET -DESP_PLATFORM)
 endif()
 
+# One cadence for both signaling backends. LwsApiCalls_esp.c reads the Kconfig
+# symbol directly. The libwebsockets sources read the SDK macro instead, so
+# define it here from the same value; patch 0006 makes the SDK header yield to
+# it. Signaling.c derives secs_since_valid_ping from that macro, so a mismatch
+# would make the client treat its own pings as stale.
+if(NOT CONFIG_USE_ESP_WEBSOCKET_CLIENT)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        -DSIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS=${CONFIG_KVS_SIGNALING_WSS_PING_INTERVAL_SEC})
+endif()
+
 # Add the necessary compile definitions for KVS signaling
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DKVS_USE_MBEDTLS

@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `app_webrtc_set_log_level(3)`. The SDK PROFILE timings print at DEBUG under the
   `kvs_profile` tag (`KVS_PROFILE_LOG_TAG`). `app_webrtc_set_log_level(8)` turns
   them on. Log lines no longer show the TURN username.
+- **esp_hosted 3.x:** `network_adapter`, `webrtc_classic`, `esp_camera` and the WebRTC
+  bridge use the registry component `espressif/esp_hosted` 3.x in place of the
+  in-tree 2.x submodule. ESP-IDF 5.5 is the minimum. `webrtc_person_detect` stays on
+  the in-tree 2.x.
+- **Split mode on esp_hosted 3.x:** `signaling_only` and `streaming_only` use esp_hosted
+  3.x and its network split.
+- **Co-processor console without the flasher:** `CONFIG_SLAVE_CONSOLE_ENABLE` forwards the
+  co-processor log and registers `write_slave` on its own. It replaces
+  `CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR`, and `sdkconfig.rename` maps the old name.
+  `write_slave` now needs `CONFIG_SLAVE_CONSOLE_ENABLE=y`. A project that set
+  `CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR=n` loses it. After flashing, the host
+  releases the co-processor UART, so without the console there is no line to send on.
 - `KVS_SDK_PATH` pointing at a directory that does not exist (or one with no
   `components/kvs_webrtc`) is now a configure-time `FATAL_ERROR` instead of a warning
   that scrolled past while every `kvs_*` component silently resolved elsewhere.
@@ -58,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames. It lets the player run under ESP-EMU, which models no display
   (`webrtc_classic/sdkconfig.ci.player_headless`). CI builds it on its own and in
   the emulator chain.
+- **P4 core boards and the P4X-C5 Function EV Board:** board overlays for the ESP32-P4
+  core boards with a C5 or C6 co-processor, and for the ESP32-P4X-C5 Function EV Board.
+- **Host deep sleep with co-processor light sleep:** with `CONFIG_EXAMPLE_ENABLE_POWER_SAVE`,
+  the `streaming_only` host deep-sleeps when no viewer is connected. The `signaling_only`
+  co-processor stays in light sleep, holds the Wi-Fi link and the signaling session, and
+  wakes the host for an offer or for traffic addressed to it.
 - **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
   with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
   master.

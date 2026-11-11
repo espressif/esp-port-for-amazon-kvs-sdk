@@ -1,12 +1,16 @@
 #Name,Type,SubType,Offset,Size,Flags
 #Note:Firmware partition offset needs to be 64K aligned,initial 36K(9 sectors)are reserved for bootloader and partition table
+#
+# Single app partition, no OTA. A NimBLE host is needed on the co-processor for
+# BLE provisioning, and that image does not fit a dual-OTA 4MB layout: it needs
+# 0x209F40, while two slots plus storage leave 0x1A0000 each. Even deleting
+# storage only reaches 0x1E8000. Table offset 0xC000 and app offset 0x20000 are
+# unchanged, so the host slave_flasher config still matches.
 esp_secure_cert,0x3F,,0xD000,0x2000,encrypted
 nvs_key,data,nvs_keys,0xF000,0x1000,encrypted
 nvs,data,nvs,0x10000,0x6000,
-otadata,data,ota,,0x2000
 phy_init,data,phy,,0x1000,
-ota_0,app,ota_0,0x20000,0x1A0000,
-ota_1,app,ota_1,0x1C0000,0x1A0000,
+factory,app,factory,0x20000,0x340000,
 storage,data,spiffs,0x360000,0x90000,
 reserved,0x06,,0x3F0000,0xA000,
 fctry,data,nvs,0x3FA000,0x6000

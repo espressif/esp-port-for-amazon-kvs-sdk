@@ -162,7 +162,11 @@ CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
 # ESP-Hosted : Host component
 #
 CONFIG_FREERTOS_HZ=1000
-CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED=y
+CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT=y
+# esp_hosted re-posts each received peer-data chunk to the default event loop
+# without waiting. A full queue drops the chunk and with it the whole bridge
+# message, so give a wake or reconnect burst of Wi-Fi and IP events more room.
+CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE=64
 
 #
 # Misc

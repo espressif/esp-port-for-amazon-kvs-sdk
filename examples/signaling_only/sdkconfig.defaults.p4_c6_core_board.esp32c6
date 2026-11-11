@@ -1,0 +1,4 @@
+# ESP32-P4 + ESP32-C6 Core Board, co-processor (C6) side.
+# Pairs with the esp32p4 overlay of the same name; one board symbol drives both
+# sides' GPIO maps.
+CONFIG_ESP_HOSTED_P4_C6_CORE_BOARD=y

@@ -1,0 +1,9 @@
+# ESP32-P4X-C5-Function-EV-Board, co-processor (C5) side of the split pair.
+#
+# Pairs with examples/streaming_only/sdkconfig.defaults.p4x_c5_func_board.esp32p4.
+# Both halves select the same board symbol and esp_hosted resolves it to each
+# side's own GPIO map, so the SDIO lines and the reset GPIO cannot drift apart.
+#
+# The C5 has its own USB port on this board, but it only answers once the P4 is
+# held in download mode -- the two share lines.
+CONFIG_ESP_HOSTED_P4X_C5_DEV_BOARD_FUNC_BOARD=y

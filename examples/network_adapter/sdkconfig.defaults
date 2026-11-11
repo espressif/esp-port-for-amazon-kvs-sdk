@@ -1,8 +1,22 @@
+# This build IS the ESP-Hosted co-processor.
+CONFIG_ESP_HOSTED=y
+CONFIG_ESP_HOSTED_CP=y
+CONFIG_ESP_HOSTED_CP_FOR_MCU=y
+CONFIG_ESP_HOSTED_CP_RPC_V2=y
+
+# Features this co-processor offers the host. A pure network adapter needs Wi-Fi
+# and the BT controller relay; the bridge's peer-data channel belongs to the
+# split-mode co-processor, and nothing here queries the memory monitor.
+CONFIG_ESP_HOSTED_CP_FEAT_WIFI=y
+CONFIG_ESP_HOSTED_CP_FEAT_BT=y
+
+# app_main owns init ordering: NVS and the event loop come up first, then
+# eh_cp_init(). The constructor-based auto-init would race that.
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+
 # BT Configuration
 CONFIG_BT_ENABLED=y
 CONFIG_BT_CONTROLLER_ONLY=y
-CONFIG_NW_COPROC_BT_ENABLED=y
-CONFIG_ESP_HOSTED_COPROCESSOR_BT_ENABLED=y
 
 CONFIG_ESP32_WIFI_NVS_ENABLED=
 
@@ -13,15 +27,5 @@ CONFIG_PARTITION_TABLE_TWO_OTA=y
 # OS
 CONFIG_FREERTOS_HZ=1000
 
-# Enable network only capabilities
-CONFIG_ADAPTER_ONLY_MODE=y
-
 #Disable enterprise support by default
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
-
-# Disable ESP-Hosted coprocessor app_main (we provide our own)
-CONFIG_ESP_HOSTED_COPROCESSOR_APP_MAIN=n
-
-# Build network_coprocessor as the SDIO/SPI slave-side firmware: this
-# example IS the coprocessor.
-CONFIG_NETWORK_COPROCESSOR_BUILD_FIRMWARE=y

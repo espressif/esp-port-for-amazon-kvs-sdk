@@ -1,0 +1,36 @@
+# ESP32-P4 + ESP32-C6 Core Board, host (P4) side.
+#
+# esp_hosted defines ESP_HOSTED_P4_C6_CORE_BOARD on both the host and the
+# co-processor and resolves it to each side's own GPIO map, so the SDIO lines
+# (CLK 51, CMD 52, D0-D3 50/49/48/47) and the reset GPIO (54) come from one name.
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# Chip revision: rev >= 3 silicon. Two independent reasons, both hard:
+#   - esp_audio_codec v2.6+ refuses to build for P4 < 3.0 ("requires ESP32-P4
+#     chip version >= 3.0"), so a rev < 3 image does not compile at all.
+#   - revisions >= 3.0 and < 3.0 are mutually exclusive; the wrong one dies in
+#     the second-stage bootloader with no message.
+# If this board ever ships rev < 3 silicon, pin esp_audio_codec < 2.6 as well.
+#
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+CONFIG_ESP32P4_REV_MIN_301=y
+
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+
+#
+# Co-processor selection.
+#
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_P4_C6_CORE_BOARD=y
+
+#
+# 16 MB flash + slave partition for in-system co-processor flashing.
+#
+# CONFIG_ESPTOOLPY_FLASHSIZE_8MB is not set
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

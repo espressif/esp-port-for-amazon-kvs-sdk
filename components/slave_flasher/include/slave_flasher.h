@@ -18,3 +18,10 @@
 #include "driver/gpio.h"
 
 esp_err_t flash_slave(void);
+
+/* Forward the co-processor console ([SLAVE] log, write_slave) without touching its
+ * reset or GPIO0 lines. Idempotent; flash_slave() calls it when done. */
+esp_err_t slave_console_attach(void);
+
+/* Write a line to the co-processor console. */
+int slave_write_string(const char *str);

@@ -16,7 +16,7 @@ dependencies:
     version: '*'
 
   espressif/esp_hosted:
-    override_path: ${KVS_SDK_PATH}/components/esp_hosted
-    version: '*'
+    # Any 3.1.x from 3.1.0. The examples pin the exact version.
+    version: "~3.1.0"
     rules:
-    - if: target in [esp32p4]
+      - if: "target in [esp32p4]"

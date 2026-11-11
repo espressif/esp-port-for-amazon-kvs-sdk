@@ -1,0 +1,12 @@
+# ESP32-P4 + ESP32-C5 core board — co-processor (C5) side.
+#
+# Pairs with examples/streaming_only/sdkconfig.defaults.p4_c5_core_board.esp32p4.
+# Both halves select the same board symbol; esp_hosted resolves it to each
+# side's own GPIO map, so the SDIO lines and the host-wake GPIO cannot drift
+# apart. Mirrors esp_hosted's
+# examples/power_save/host+cp/network_split__host_deep_sleep_cp_light_sleep/cp
+# overlay of the same name.
+CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
+
+#
+# This board's C5 carries PSRAM, so sdkconfig.defaults.esp32c5 keeps SPIRAM on.

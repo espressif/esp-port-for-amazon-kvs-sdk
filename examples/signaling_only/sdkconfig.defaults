@@ -118,14 +118,25 @@ CONFIG_ENABLE_DATA_CHANNEL=n
 #
 # ESP-Hosted - Network coprocessor
 #
-CONFIG_SLAVE_LWIP_ENABLED=y
-CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED=y
-CONFIG_ESP_HOSTED_CP_WIFI=y
-CONFIG_ESP_HOSTED_CP_BT=n
+# CONFIG_SLAVE_LWIP_ENABLED=y   # no Kconfig defines this in 2.x or 3.x
+CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT=y
+# Packets that match no rule go to the host. esp_hosted defaults them to the
+# co-processor. Here the co-processor runs only signaling, whose sockets sit in
+# its own port range and still match. The host runs WebRTC: inbound DNS and
+# STUN/TURN replies and media go to its ephemeral ports, which match no rule.
+# With the co-processor default, the host saw 6 packets instead of 248, DNS
+# never resolved and createIceAgent() failed with
+# STATUS_RESOLVE_HOSTNAME_FAILED.
+CONFIG_ESP_HOSTED_DEFAULT_NETWORK_STACK_HOST=y
+CONFIG_ESP_HOSTED_CP_FEAT_WIFI=y
+CONFIG_ESP_HOSTED_CP_FEAT_BT=n
 
 #
 # BLE Provisioning
 #
+# BT is handled entirely by the co-processor
+# Hosted doesn't handle BT (CONFIG_ESP_HOSTED_CP_FEAT_BT=n above)
+CONFIG_APP_BLE_ON_COPROCESSOR=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_APP_NETWORK_PROV_BLE=y
@@ -134,16 +145,29 @@ CONFIG_APP_NETWORK_PROV_BLE=y
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 
 # Disable ESP-Hosted coprocessor app_main (we provide our own)
-CONFIG_ESP_HOSTED_COPROCESSOR_APP_MAIN=n
+# CONFIG_ESP_HOSTED_COPROCESSOR_APP_MAIN=n   # no Kconfig defines this in 2.x or 3.x
 
 # Create wifi sta in example, instead of internal slave code base
-CONFIG_ESP_HOSTED_REUSE_WIFI_STA_DEF_NETIF_INSTANCE=y
+# CONFIG_ESP_HOSTED_REUSE_WIFI_STA_DEF_NETIF_INSTANCE=y   # no Kconfig defines this in 2.x or 3.x
 
 # Hosted - Re-use CLI instance
-CONFIG_ESP_HOSTED_CLI_NEW_INSTANCE=n
+CONFIG_ESP_HOSTED_CP_CLI_NEW_INSTANCE=n
 
 #
 # BLE provisioning security v1 (x25519 + PoP); IDF v6 gates the
 # NETWORK_PROV_SECURITY_1 enum behind this (default off).
 #
 CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1=y
+
+# This build IS the ESP-Hosted co-processor: it runs signaling locally and
+# serves the P4 host over SDIO.
+CONFIG_ESP_HOSTED=y
+CONFIG_ESP_HOSTED_CP=y
+CONFIG_ESP_HOSTED_CP_FOR_MCU=y
+CONFIG_ESP_HOSTED_CP_RPC_V2=y
+
+# The bridge carries signaling and commands over the peer-data channel.
+CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA=y
+
+# app_main owns init ordering: the netif is created before eh_cp_init().
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n

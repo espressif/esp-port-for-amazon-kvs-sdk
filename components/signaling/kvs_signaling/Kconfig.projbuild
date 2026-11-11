@@ -15,4 +15,19 @@ menu "KVS Signaling Configuration"
             When enabled, use dynamic memory allocation for signaling payloads and URLs.
             This can reduce static memory usage but may increase heap fragmentation.
             Enable this option on platforms with limited memory to avoid large static allocations.
+
+    config KVS_SIGNALING_WSS_PING_INTERVAL_SEC
+        int "WebSocket keep-alive ping interval (seconds)"
+        range 5 300
+        default 10
+        help
+            Keep-alive cadence on the signaling WebSocket. Each ping is a radio
+            transmit, so a longer interval costs less power.
+
+            If the interval is too long, an idle NAT or AWS can drop the
+            channel. The failure appears later, when a viewer offer does not
+            arrive.
+
+            The value also sets secs_since_valid_ping in the libwebsockets
+            build, so both paths use one cadence.
 endmenu

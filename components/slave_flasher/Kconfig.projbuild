@@ -57,7 +57,7 @@ menu "Slave Flasher Configuration"
     config SLAVE_UART_RX_PIN
         int "UART RX Pin"
         default 22
-        depends on SLAVE_FLASHER_ENABLE
+        depends on SLAVE_FLASHER_ENABLE || SLAVE_CONSOLE_ENABLE
         help
             GPIO pin number for UART RX.
             Default is 22.
@@ -65,7 +65,7 @@ menu "Slave Flasher Configuration"
     config SLAVE_UART_TX_PIN
         int "UART TX Pin"
         default 21
-        depends on SLAVE_FLASHER_ENABLE
+        depends on SLAVE_FLASHER_ENABLE || SLAVE_CONSOLE_ENABLE
         help
             GPIO pin number for UART TX.
             Default is 21.
@@ -78,17 +78,16 @@ menu "Slave Flasher Configuration"
             GPIO pin number for GPIO0 trigger.
             Default is 20.
 
-    config SLAVE_FLASHER_POST_FLASH_MONITOR
-        bool "Stream slave UART output to host console after flashing"
-        default y
-        depends on SLAVE_FLASHER_ENABLE
+    config SLAVE_CONSOLE_ENABLE
+        bool "Forward the co-processor console to the host"
+        default y if SLAVE_FLASHER_ENABLE
+        default n
         help
-            After the slave is flashed and reset, spawn a task that pipes
-            the slave's UART output back to the host log prefixed with
-            "[SLAVE]". Useful when bringing up a new slave firmware or
-            debugging post-reset boot issues. Disable in production — the
-            slave's normal runtime UART can include framing/garbage bytes
-            that clutter the host log without adding value.
+            Pipe the co-processor's UART output to the host log behind a "[SLAVE]"
+            prefix, and register the write_slave command. Independent of
+            SLAVE_FLASHER_ENABLE, so a co-processor programmed another way keeps
+            its console. TX is driven only while write_slave sends, so a
+            co-processor with its own USB-UART bridge on the same lines is safe.
 
 endmenu
 

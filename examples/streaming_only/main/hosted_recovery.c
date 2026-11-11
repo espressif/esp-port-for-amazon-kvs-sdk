@@ -24,11 +24,19 @@
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
-#include "esp_hosted_misc.h"
+#include "eh_host_heartbeat.h"
+#include "eh_host_event.h"
 
 #include "hosted_recovery.h"
 
 #define TAG "hosted_recovery"
+
+/* The co-processor only emits ESP_HOSTED_EVENT_CP_HEARTBEAT when esp_hosted
+ * builds its heartbeat feature. Without it the monitor below would arm a timer
+ * that nothing ever restarts, and declare the link dead on the first timeout. */
+#if !CONFIG_ESP_HOSTED_HOST_FEAT_HEARTBEAT
+#error "hosted_recovery watches the co-processor heartbeat; enable CONFIG_ESP_HOSTED_HOST_FEAT_HEARTBEAT."
+#endif
 
 #define HEARTBEAT_INTERVAL_SEC   CONFIG_STREAMING_HEARTBEAT_INTERVAL_SEC
 #if CONFIG_STREAMING_ENABLE_HEARTBEAT_MONITOR
@@ -83,6 +91,13 @@ static esp_err_t hb_timer_create(void)
     return err;
 }
 
+static void hb_timer_disarm(void)
+{
+    if (s_hb_timer && esp_timer_is_active(s_hb_timer)) {
+        esp_timer_stop(s_hb_timer);
+    }
+}
+
 static void hb_timer_arm(void)
 {
     if (!s_hb_timer) {
@@ -116,7 +131,7 @@ static void hosted_event_handler(void *arg, esp_event_base_t base, int32_t id, v
         request_reset();
         break;
     case ESP_HOSTED_EVENT_CP_HEARTBEAT: {
-        uint32_t hb = ((esp_hosted_event_heartbeat_t *) data)->heartbeat;
+        uint32_t hb = ((eh_host_event_heartbeat_t *) data)->heartbeat;
 #if CONFIG_STREAMING_ENABLE_HEARTBEAT_MONITOR
         hb_timer_arm();
 #endif
@@ -134,7 +149,16 @@ static void hosted_event_handler(void *arg, esp_event_base_t base, int32_t id, v
 
 static esp_err_t enable_heartbeat(void)
 {
-    esp_err_t err = esp_hosted_configure_heartbeat(true, HEARTBEAT_INTERVAL_SEC);
+#if CONFIG_EXAMPLE_ENABLE_POWER_SAVE
+    /* The heartbeat is traffic addressed to the host, so hosted wakes the host to
+     * deliver it. With host deep sleep on it would pull the host back out within
+     * one interval and take the co-processor out of light sleep with it, so the
+     * two features cannot both run. Power save wins; a co-processor reboot is
+     * then caught by the bridge instead. */
+    ESP_LOGI(TAG, "power save enabled: leaving the co-processor heartbeat off");
+    return ESP_OK;
+#else
+    esp_err_t err = eh_host_heartbeat_configure(true, HEARTBEAT_INTERVAL_SEC);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to enable co-processor heartbeat: %s", esp_err_to_name(err));
     }
@@ -142,6 +166,7 @@ static esp_err_t enable_heartbeat(void)
     hb_timer_arm();
 #endif
     return err;
+#endif
 }
 
 #if CONFIG_STREAMING_DO_HOSTED_RECOVERY
@@ -243,6 +268,30 @@ static void recovery_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(delay_sec * 1000));
         xEventGroupSetBits(s_events, RESET_BIT);
     }
+}
+
+esp_err_t hosted_recovery_pause(void)
+{
+#if CONFIG_STREAMING_ENABLE_HEARTBEAT_MONITOR
+    hb_timer_disarm();
+#endif
+#if CONFIG_EXAMPLE_ENABLE_POWER_SAVE
+    /* enable_heartbeat() never turns it on with power save, so skip the RPC:
+     * it is synchronous, and callers run on the event loop and under app_webrtc
+     * callbacks. */
+    return ESP_OK;
+#else
+    esp_err_t err = eh_host_heartbeat_configure(false, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not stop the heartbeat: %s", esp_err_to_name(err));
+    }
+    return err;
+#endif
+}
+
+esp_err_t hosted_recovery_resume(void)
+{
+    return enable_heartbeat();
 }
 
 esp_err_t hosted_recovery_start(hosted_recovery_teardown_cb_t teardown,

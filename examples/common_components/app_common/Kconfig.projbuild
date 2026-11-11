@@ -24,15 +24,81 @@ menu "App Common Configs (Wi-Fi, SD-Card, Camera)"
         help
             Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
 
+    choice APP_BLE_STACK_LOCATION
+        prompt "Bluetooth stack location"
+        default APP_BLE_VIA_HOSTED_ON_HOST if BT_NIMBLE_ENABLED
+        default APP_BLE_DISABLED
+        help
+            Declares where the BLE host stack runs. esp_hosted supports both
+            placements and they are mutually exclusive: either the co-processor
+            passes HCI up to the host, or it runs the whole stack itself.
+
+            This states intent. The warnings below report what a mode still
+            needs, so a half-configured build is visible instead of silently
+            losing Bluetooth. With NimBLE enabled the default is the host, so
+            a build that already has BLE provisioning keeps it.
+
+        config APP_BLE_DISABLED
+            bool "Disabled"
+            help
+                No Bluetooth. Wi-Fi credentials come from NVS or from
+                ESP_WIFI_SSID / ESP_WIFI_PASSWORD. Saves the most space.
+
+        config APP_BLE_VIA_HOSTED_ON_HOST
+            bool "Host, over hosted HCI"
+            help
+                Standalone solution: the co-processor runs the BT controller
+                only and passes HCI over the hosted transport; the host runs
+                the BLE host stack.
+
+                Host needs ESP_HOSTED_HOST_FEAT_BT and its own NimBLE.
+                Co-processor needs ESP_HOSTED_CP_FEAT_BT and BT_CONTROLLER_ONLY.
+
+        config APP_BLE_ON_COPROCESSOR
+            bool "Co-processor, outside hosted"
+            help
+                The co-processor runs both controller and host stack itself and
+                hosted's BT feature stays off, so the host does not use hosted
+                Bluetooth at all. This is how RainMaker and Matter do BLE
+                provisioning.
+
+                Needs BT_NIMBLE_ENABLED on the co-processor, and therefore
+                BT_CONTROLLER_ONLY must be off there.
+    endchoice
+
+    comment "⚠️  APP_BLE_VIA_HOSTED_ON_HOST needs ESP_HOSTED_HOST_FEAT_BT=y"
+        depends on APP_BLE_VIA_HOSTED_ON_HOST && !ESP_HOSTED_HOST_FEAT_BT
+
+    comment "⚠️  Selected BLE location needs a local host stack: BT_NIMBLE_ENABLED=y (BT_CONTROLLER_ONLY must be off)"
+        depends on !APP_BLE_DISABLED && !BT_NIMBLE_ENABLED
+
     config APP_NETWORK_PROV_BLE
         bool "Enable BLE provisioning for WiFi credentials"
         default n
-        depends on BT_ENABLED && BT_NIMBLE_ENABLED
+        depends on !APP_BLE_DISABLED && BT_ENABLED && BT_NIMBLE_ENABLED
         help
             Enable BLE-based WiFi provisioning using the network_provisioning component.
             When enabled, if the device has no stored WiFi credentials, it will start
             a BLE provisioning service. Use the "ESP BLE Provisioning" phone app to
             provide WiFi credentials.
+
+    config APP_BLE_RELEASE_AFTER_PROV
+        bool "Release the BT controller once provisioning is done"
+        default y
+        depends on APP_BLE_ON_COPROCESSOR && APP_NETWORK_PROV_BLE
+        help
+            Frees the BT controller and its memory once provisioning has
+            completed, and on every later boot where the device is already
+            provisioned and Bluetooth is therefore never needed.
+
+            The provisioning path itself is already covered by the scheme's
+            FREE_BTDM handler; this also covers the already-provisioned path,
+            which that handler never reaches.
+
+            This recovers runtime memory only. The BLE host stack is still
+            linked into the image, so its static cost (~28 KB on ESP32-C5)
+            remains. To avoid that, use "Disabled" or run the stack on the
+            host over hosted HCI.
 
     config APP_NETWORK_PROV_POP
         string "Proof of Possession (PoP) string"

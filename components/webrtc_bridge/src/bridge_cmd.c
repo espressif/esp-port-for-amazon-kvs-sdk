@@ -38,13 +38,7 @@
 #include "bridge_cmd.pb-c.h"
 
 #if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
-/* Coprocessor (slave) uses peer_data API; host uses esp_hosted */
-#if CONFIG_ESP_HOSTED_COPROCESSOR
-#include "esp_hosted_peer_data.h"
-#elif CONFIG_ESP_HOSTED_ENABLED
-#include "esp_hosted.h"
-#include "esp_hosted_misc.h"
-#endif
+#include "bridge_peer_data.h"
 #endif
 
 static const char *TAG = "bridge_cmd";
@@ -309,7 +303,7 @@ static esp_err_t bridge_cmd_send_one(Bridge__BridgeCommand *msg)
     bridge__bridge_command__pack(msg, buf);
 
 #if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
-    esp_err_t ret = esp_hosted_send_custom_data(BRIDGE_CMD_MSG_ID, buf, packed_size);
+    esp_err_t ret = bridge_peer_data_send(BRIDGE_CMD_MSG_ID, buf, packed_size);
 #else
     esp_err_t ret = ESP_ERR_NOT_SUPPORTED;
 #endif
@@ -456,7 +450,7 @@ esp_err_t bridge_cmd_init(void)
 
 #if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
     ESP_LOGI(TAG, "Registering bridge_cmd callback with msg_id: 0x%" PRIx32, BRIDGE_CMD_MSG_ID);
-    esp_err_t ret = esp_hosted_register_custom_callback(BRIDGE_CMD_MSG_ID, bridge_cmd_receive_cb, NULL);
+    esp_err_t ret = bridge_peer_data_register(BRIDGE_CMD_MSG_ID, bridge_cmd_receive_cb, NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register callback (msg_id 0x%" PRIx32 "): %s", BRIDGE_CMD_MSG_ID, esp_err_to_name(ret));
         vSemaphoreDelete(s_event_handler_mutex);
@@ -758,22 +752,6 @@ esp_err_t bridge_cmd_send_event(uint32_t cmd_id,
 /* -------------------------------------------------------------------------- */
 /*  Receive callback (called from RPC RX thread)                               */
 /* -------------------------------------------------------------------------- */
-
-/**
- * Re-register the RX callback after the peer chip has rebooted and the esp_hosted
- * transport has been re-established.
- */
-esp_err_t bridge_cmd_rearm_rx(void)
-{
-#if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
-    if (s_handler_mutex == NULL) {
-        return ESP_ERR_INVALID_STATE; /* bridge_cmd_init() has not run on this device */
-    }
-    return esp_hosted_register_custom_callback(BRIDGE_CMD_MSG_ID, bridge_cmd_receive_cb, NULL);
-#else
-    return ESP_OK;
-#endif
-}
 
 /**
  * esp_hosted RX callback.  Each incoming message is a self-contained

@@ -1,0 +1,23 @@
+# Restore the co-processor configuration that measured the lowest power.
+# EXAMPLE_SPI_CAM_* were renamed to MEDIA_STREAM_SPI_CAM_*; mapped here.
+# Credentials are deliberately not here. They belong in the gitignored
+# test_e2e/sdkconfig.creds, or in NVS via the wifi-set console command.
+# Apply LAST in SDKCONFIG_DEFAULTS.
+# The host must apply streaming_only/sdkconfig.defaults.lowpower too. It carries
+# the same Wi-Fi buffer counts, so the host's Wi-Fi init config still matches.
+
+CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU=y
+CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=4
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_VIDEO_FRAME_QUEUE_SIZE=3
+CONFIG_VIDEO_QUEUE_SEND_WAIT_MS=100
+
+# Only in the current build, and boolean: turn off.
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_SOFTAP=n
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+# SoftAP support itself stays: esp_hosted 3.x wraps esp_netif_create_default_wifi_ap(),
+# which IDF compiles out without it, and the link then fails.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n

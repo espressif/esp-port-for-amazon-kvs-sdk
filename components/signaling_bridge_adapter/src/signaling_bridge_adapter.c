@@ -15,18 +15,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <sys/time.h>
+#include "sdkconfig.h"
 
-#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5
-#define NETWORK_SPLIT_ENABLED 1
+/* Waking the host on an incoming OFFER needs eh_cp_feat_host_ps, which not every
+ * co-processor target builds. Without it the bridge still works; it just cannot
+ * wake a sleeping host. */
+#if CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS
+#define HOST_WAKEUP_ENABLED 1
+#include "eh_cp_feat_host_ps_apis.h"
 #else
-#define NETWORK_SPLIT_ENABLED 0
-#endif
-
-#if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED && NETWORK_SPLIT_ENABLED
-#include "esp_hosted_coprocessor.h"
-#endif
-#if NETWORK_SPLIT_ENABLED
-#include "host_power_save.h"
+#define HOST_WAKEUP_ENABLED 0
 #endif
 
 static const char *TAG = "signaling_bridge_adapter";
@@ -488,11 +486,11 @@ int signaling_bridge_adapter_send_message(webrtc_message_t *signalingMessage)
     // Check if this is an OFFER - always wake P4 and queue messages
     // This is the simplest and most robust approach: assume P4 needs waking
     // even if it appears awake (handler might not be ready yet)
-#if NETWORK_SPLIT_ENABLED
+#if HOST_WAKEUP_ENABLED
     if (signalingMessage->message_type == WEBRTC_MESSAGE_TYPE_OFFER) {
         ESP_LOGI(TAG, "Received OFFER - triggering wake-up sequence (harmless if P4 already awake)");
         set_queue_state(QUEUE_STATE_WAITING_FOR_WAKEUP);
-        wakeup_host(2 * 1000);  // Physical wake-up (harmless if P4 already awake)
+        eh_cp_feat_host_ps_wakeup_host(2 * 1000);  // Physical wake-up (harmless if P4 already awake)
         send_ready_query_to_p4();  // Query readiness (P4 will respond with READY if already initialized)
         ESP_LOGI(TAG, "Enqueueing OFFER message, waiting for P4 READY signal");
         return enqueue_message(serializedMsg, serializedMsgLen);

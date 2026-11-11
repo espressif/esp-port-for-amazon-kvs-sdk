@@ -1,0 +1,32 @@
+From 610f285336b07cf676b3492e6d1119c7fc562c9e Mon Sep 17 00:00:00 2001
+From: Apply Patches <apply-patches@espressif.local>
+Date: Mon, 28 Sep 2026 14:22:48 +0800
+Subject: [PATCH] Signaling: let the build override the WSS ping interval
+
+The interval is a power knob on battery targets: each ping is a radio
+transmit. Guard the default so a -D from the build system wins, and
+keep 10 s when nothing defines it.
+
+Signaling.c derives secs_since_valid_ping from the same constant, so
+both move together.
+---
+ src/source/Signaling/LwsApiCalls.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/source/Signaling/LwsApiCalls.h b/src/source/Signaling/LwsApiCalls.h
+index 85fba6b3de..f5c5bf2d87 100644
+--- a/src/source/Signaling/LwsApiCalls.h
++++ b/src/source/Signaling/LwsApiCalls.h
+@@ -18,7 +18,9 @@ extern "C" {
+ #define SIGNALING_SERVICE_TCP_KEEPALIVE_IN_SECONDS                15
+ #define SIGNALING_SERVICE_TCP_KEEPALIVE_PROBE_COUNT               15
+ #define SIGNALING_SERVICE_TCP_KEEPALIVE_PROBE_INTERVAL_IN_SECONDS 10
++#ifndef SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS
+ #define SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS       10
++#endif
+ #define SIGNALING_SERVICE_WSS_HANGUP_IN_SECONDS                   7200
+ 
+ // Protocol indexes
+-- 
+2.51.0
+

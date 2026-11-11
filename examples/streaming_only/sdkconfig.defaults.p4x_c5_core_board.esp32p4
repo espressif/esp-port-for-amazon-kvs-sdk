@@ -1,0 +1,41 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+
+#
+# Chip revision: rev >= 3 silicon (the P4X-C5 core board carries the latest P4).
+# Not optional -- esp_audio_codec v2.6+ refuses to build for P4 < 3.0
+# ("requires ESP32-P4 chip version >= 3.0"), so a rev < 3 image does not
+# compile at all. Revisions >= 3.0 and < 3.0 are also mutually exclusive: the
+# wrong one dies in the second-stage bootloader with no message. For genuinely
+# older silicon, pin esp_audio_codec < 2.6 as well as flipping these back.
+#
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set  # P4X: rev > v3 silicon
+CONFIG_ESP32P4_REV_MIN_301=y
+
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+
+#
+# Slave Flasher
+#
+CONFIG_SLAVE_FLASHER_ENABLE=y
+CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0xC000
+CONFIG_SLAVE_APPLICATION_ADDRESS=0x20000
+CONFIG_SLAVE_UART_RX_PIN=45
+CONFIG_SLAVE_UART_TX_PIN=46
+CONFIG_SLAVE_GPIO0_TRIGGER_PIN=47
+
+#
+# Select Hosted Board
+#
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
+
+#
+# This board flashes its own co-processor. esp_hosted's auto-init is a C
+# constructor that runs before app_main, so it would reset the co-processor and
+# start SDIO enumeration while slave_flasher still holds it in ROM download
+# mode -- CMD5 times out and hosted never retries. The application brings
+# hosted up itself once flashing is done.
+#
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n

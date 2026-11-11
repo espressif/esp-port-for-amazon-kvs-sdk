@@ -12,6 +12,24 @@ menu "Example Configuration"
 
             This feature is only available for ESP32-P4 target.
 
+    config EXAMPLE_POWER_SAVE_DEFER_UNTIL_LINK_UP
+        bool "Hold off deep sleep while the host has no IP"
+        depends on EXAMPLE_ENABLE_POWER_SAVE
+        default y
+        help
+            Arm the idle deep-sleep timer only while the host holds an IP
+            address: defer it when there is no link, start it on the got-IP
+            event, and stand it down again if the address is lost.
+
+            Default y here, because a viewer offer is what this example sleeps
+            waiting for and it arrives over the network. A sleeping host does
+            still wake on serial, RPC, private and flow-control traffic from
+            the co-processor, and on a co-processor reboot, so this is not the
+            only way back.
+
+            Set n to arm the timer as soon as WebRTC is up, whatever the link
+            state.
+
     menu "Co-processor (C6) recovery"
 
         config STREAMING_HEARTBEAT_INTERVAL_SEC

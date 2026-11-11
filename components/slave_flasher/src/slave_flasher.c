@@ -7,6 +7,8 @@
 #include "esp_loader.h"
 #include "esp32_port.h"
 #include "slave_flasher.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
 #include "loader_utils.h"
 
 #if CONFIG_SLAVE_FLASHER_IMAGE_SPIFFS
@@ -15,8 +17,6 @@
 #include "esp_heap_caps.h"
 #include "mbedtls/md.h"
 
-#include "esp_console.h"
-#include "argtable3/argtable3.h"
 
 static const char *TAG = "slave_flasher";
 
@@ -24,150 +24,8 @@ static const char *TAG = "slave_flasher";
 #define PARTITION_TABLE_ADDRESS  CONFIG_SLAVE_PARTITION_TABLE_ADDRESS
 #define APPLICATION_ADDRESS      CONFIG_SLAVE_APPLICATION_ADDRESS
 
-#if CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
-// Max line size
-#define BUF_LEN 128
-#define SLAVE_BUFFER_SIZE 512
-static uint8_t buf[BUF_LEN] = {0};
-static char slave_line_buffer[SLAVE_BUFFER_SIZE] = {0};
-static size_t slave_line_pos = 0;
-#endif
 
-/**
- * CLI command argument structure for write_slave command
- */
-static struct {
-    struct arg_str *data;
-    struct arg_end *end;
-} write_slave_args;
 
-/**
- * Write data to slave console via UART
- * @param data Pointer to data buffer
- * @param len Length of data to write
- * @return Number of bytes written, or negative on error
- */
-static int slave_write(const uint8_t *data, size_t len)
-{
-    if (!data || len == 0) {
-        return -1;
-    }
-
-    int written = uart_write_bytes(UART_NUM_1, (const char *)data, len);
-    if (written > 0) {
-        uart_wait_tx_done(UART_NUM_1, portMAX_DELAY);
-    }
-    return written;
-}
-
-/**
- * Write a string to slave console via UART
- * @param str Null-terminated string to write
- * @return Number of bytes written, or negative on error
- */
-int slave_write_string(const char *str)
-{
-    if (!str) {
-        return -1;
-    }
-    return slave_write((const uint8_t *)str, strlen(str));
-}
-
-/**
- * CLI command handler: write_slave
- * Writes data to the slave device console
- */
-static int cmd_write_slave(int argc, char **argv)
-{
-    int nerrors = arg_parse(argc, argv, (void **)&write_slave_args);
-    if (nerrors != 0) {
-        arg_print_errors(stderr, write_slave_args.end, argv[0]);
-        return 1;
-    }
-
-    const char *data = write_slave_args.data->sval[0];
-    if (!data) {
-        printf("Error: No data provided\n");
-        return 1;
-    }
-
-    int written = slave_write_string(data);
-    if (written < 0) {
-        printf("Error: Failed to write to slave\n");
-        return 1;
-    }
-
-    // Optionally add newline if not present
-    if (data[strlen(data) - 1] != '\n') {
-        slave_write_string("\n");
-    }
-
-    printf("Sent %d bytes to slave: %s\n", written, data);
-    return 0;
-}
-
-#if CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
-static void slave_print_line(const char* line)
-{
-    if (!line) return;
-
-    // Skip leading whitespace
-    while (*line == ' ' || *line == '\t') line++;
-
-    if (*line != '\0') {
-        printf("\033[1;33m[SLAVE]\033[0m %s\n", line);
-        fflush(stdout);
-    }
-}
-
-static void slave_monitor(void *arg)
-{
-#if (HIGHER_BAUDRATE != 115200)
-    uart_flush_input(UART_NUM_1);
-    uart_flush(UART_NUM_1);
-    uart_set_baudrate(UART_NUM_1, 115200);
-#endif
-
-    slave_line_pos = 0;
-
-    while (1) {
-        int rxBytes = uart_read_bytes(UART_NUM_1, buf, BUF_LEN - 1, 100 / portTICK_PERIOD_MS);
-        if (rxBytes <= 0) continue;
-
-        buf[rxBytes] = '\0';
-
-        // Process received data line by line
-        for (char *p = (char *)buf; *p; ) {
-            char *line_end = strpbrk(p, "\n\r");
-
-            if (line_end) {
-                // Complete line found - append to buffer and print
-                size_t chunk_len = line_end - p;
-                if (slave_line_pos + chunk_len < SLAVE_BUFFER_SIZE) {
-                    memcpy(&slave_line_buffer[slave_line_pos], p, chunk_len);
-                    slave_line_buffer[slave_line_pos + chunk_len] = '\0';
-                    slave_print_line(slave_line_buffer);  // slave_print_line now handles newline
-                    slave_line_pos = 0;
-                }
-                p = line_end + 1;  // Skip line break
-            } else {
-                // Partial line - append remainder to buffer
-                size_t remaining = strlen(p);
-                if (slave_line_pos + remaining >= SLAVE_BUFFER_SIZE - 1) {
-                    // Buffer overflow - print and reset
-                    slave_line_buffer[SLAVE_BUFFER_SIZE - 1] = '\0';
-                    slave_print_line(slave_line_buffer);
-                    slave_line_pos = 0;
-                }
-                memcpy(&slave_line_buffer[slave_line_pos], p, remaining);
-                slave_line_pos += remaining;
-                slave_line_buffer[slave_line_pos] = '\0';
-                break;
-            }
-        }
-    }
-}
-#endif // CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
 
 #define MD5_MAX_LEN     16
 #define MD5_CHUNK_SIZE  4096
@@ -413,25 +271,13 @@ static esp_err_t image_source_init(void)
 }
 #endif
 
-/**
- * Register CLI commands for slave console interaction
- */
-static void register_slave_commands(void)
+/* Flashing is done: give back the UART and the boot pin, so the host drives
+ * nothing on them while the co-processor runs, sleeps or wakes. The reset pin
+ * stays with esp_hosted, which configures it itself. */
+static void release_loader(void)
 {
-    // Register write_slave command
-    write_slave_args.data = arg_str1(NULL, NULL, "<data>", "Data string to write to slave device");
-    write_slave_args.end = arg_end(1);
-
-    const esp_console_cmd_t write_slave_cmd = {
-        .command = "write_slave",
-        .help = "Write data string to slave device console",
-        .hint = NULL,
-        .func = &cmd_write_slave,
-        .argtable = &write_slave_args
-    };
-
-    ESP_ERROR_CHECK(esp_console_cmd_register(&write_slave_cmd));
-    ESP_LOGI(TAG, "Registered CLI command: write_slave");
+    loader_port_esp32_deinit();
+    gpio_reset_pin(CONFIG_SLAVE_GPIO0_TRIGGER_PIN);
 }
 
 esp_err_t flash_slave()
@@ -441,8 +287,13 @@ esp_err_t flash_slave()
         return ret;
     }
 
-#if CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
-    #define CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
+/* esp_hosted 3.x names the co-processor reset pin ESP_HOSTED_HOST_RESET_GPIO.
+ * webrtc_person_detect still builds against the in-tree esp_hosted 2.x, which
+ * names it ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE. */
+#if defined(CONFIG_ESP_HOSTED_HOST_RESET_GPIO)
+#define SLAVE_RESET_GPIO CONFIG_ESP_HOSTED_HOST_RESET_GPIO
+#else
+#define SLAVE_RESET_GPIO CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE
 #endif
 
     const loader_esp32_config_t config = {
@@ -450,7 +301,7 @@ esp_err_t flash_slave()
         .uart_port = UART_NUM_1,
         .uart_rx_pin = CONFIG_SLAVE_UART_RX_PIN,
         .uart_tx_pin = CONFIG_SLAVE_UART_TX_PIN,
-        .reset_trigger_pin = CONFIG_ESP_GPIO_SLAVE_RESET_SLAVE,
+        .reset_trigger_pin = SLAVE_RESET_GPIO,
         .gpio0_trigger_pin = CONFIG_SLAVE_GPIO0_TRIGGER_PIN,
     };
 
@@ -478,6 +329,7 @@ esp_err_t flash_slave()
                 image_close(&src);
             }
             if (ret != ESP_OK) {
+                release_loader();
                 return ret;
             }
         }
@@ -487,12 +339,20 @@ esp_err_t flash_slave()
         // Delay for skipping the boot message of the targets
         vTaskDelay(500 / portTICK_PERIOD_MS);
 
+    } else {
+        /* connect_to_target() drives reset together with GPIO0 to force serial
+         * download mode. A co-processor that does not answer -- it is in light
+         * sleep with its UART powered down, say -- is then left sitting in the
+         * bootloader, so it never runs its app and SDIO never enumerates. Reset
+         * it without GPIO0 so it boots normally. */
+        ESP_LOGW(TAG, "co-processor did not answer the loader; resetting it to run its app");
+        esp_loader_reset_target();
+        vTaskDelay(500 / portTICK_PERIOD_MS);
     }
+    release_loader();
 
-#if CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR
-    xTaskCreate(slave_monitor, "slave_monitor", 2048, NULL, configMAX_PRIORITIES - 1, NULL);
+#if CONFIG_SLAVE_CONSOLE_ENABLE
+    slave_console_attach();
 #endif
-    // Register CLI commands for slave console interaction
-    register_slave_commands();
     return ESP_OK;
 }

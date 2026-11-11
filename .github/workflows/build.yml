@@ -7,69 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  build_idf_v5_4:
-    name: "v5.4 | ${{ matrix.example }} | ${{ matrix.target }}"
-    runs-on: ubuntu-22.04
-    container: espressif/idf:release-v5.4
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # webrtc_classic: esp32, esp32s3, esp32p4
-          - { example: webrtc_classic, target: esp32 }
-          - { example: webrtc_classic, target: esp32s3 }
-          - { example: webrtc_classic, target: esp32p4 }
-          # esp_camera: esp32, esp32s3, esp32p4
-          - { example: esp_camera, target: esp32 }
-          - { example: esp_camera, target: esp32s3 }
-          - { example: esp_camera, target: esp32p4 }
-          # signaling_only: esp32c6
-          - { example: signaling_only, target: esp32c6 }
-          # streaming_only: esp32p4
-          - { example: streaming_only, target: esp32p4 }
-          # webrtc_person_detect: esp32p4 and esp32s3 (esp_video capture + esp-dl). The S3
-          # build is the ESP32-S3-EYE: without its overlay the S3 BSP has no camera.
-          - { example: webrtc_person_detect, target: esp32p4 }
-          - { example: webrtc_person_detect, target: esp32s3, overlay: s3_eye }
-          # network_adapter: esp32c6
-          - { example: network_adapter, target: esp32c6 }
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      # No manual `git am`: rely on the SDK's auto-apply (CONFIG_KVS_AUTO_APPLY_PATCHES,
-      # default y) so CI exercises the exact patch path downstream consumers use.
-      - name: Allow git to operate on the CI checkout
-        shell: bash
-        run: git config --global --add safe.directory "*"
-
-      - name: Build ${{ matrix.example }} for ${{ matrix.target }}
-        env:
-          IDF_TARGET: ${{ matrix.target }}
-        shell: bash
-        run: |
-          . ${IDF_PATH}/export.sh
-          cd examples/${{ matrix.example }}
-          OVERLAY="${{ matrix.overlay }}"
-          if [ -n "$OVERLAY" ]; then
-            idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.${IDF_TARGET};sdkconfig.defaults.${OVERLAY}.${IDF_TARGET}" set-target ${IDF_TARGET}
-          else
-            idf.py set-target ${IDF_TARGET}
-          fi
-          idf.py build
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: "${{ matrix.example }}-${{ matrix.target }}-idf5.4"
-          path: |
-            examples/${{ matrix.example }}/build/*.bin
-            examples/${{ matrix.example }}/build/*.elf
-            examples/${{ matrix.example }}/build/*.map
-          retention-days: 30
-
+  # esp_hosted 3.x requires IDF >= 5.5, so 5.5 is the floor.
   build_idf_v5_5:
     name: "v5.5 | ${{ matrix.example }} | ${{ matrix.target }}"
     runs-on: ubuntu-22.04

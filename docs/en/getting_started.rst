@@ -8,7 +8,7 @@ Prerequisites
 
 Before you begin, ensure you have the following:
 
-* ESP-IDF v5.4 or later installed and configured
+* ESP-IDF v5.5 or later installed and configured
 * An AWS account with access to Kinesis Video Streams
 * One of the supported ESP32 development boards:
 
@@ -41,11 +41,11 @@ Install the ESP-IDF
 
 Please follow the `Espressif instructions <https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html>`_ to set up the IDF environment.
 
-Clone the IDF branch with ``release/v5.4``:
+Clone the IDF branch with ``release/v5.5``:
 
 .. code-block:: bash
 
-   git clone -b release/v5.4 --recursive https://github.com/espressif/esp-idf.git esp-idf
+   git clone -b release/v5.5 --recursive https://github.com/espressif/esp-idf.git esp-idf
 
 SDK patches (auto-applied)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

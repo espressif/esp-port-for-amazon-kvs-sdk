@@ -5,15 +5,14 @@ dependencies:
 
   # local components
   espressif/esp_hosted:
-    override_path: ${KVS_SDK_PATH}/components/esp_hosted
-    version: '*'
+    version: "3.1.0"
     rules:
-    - if: target in [esp32p4]
+      - if: "target in [esp32p4]"
 
   espressif/esp_wifi_remote:
-    version: '*'
+    version: ">=1.3.1"
     rules:
-    - if: target in [esp32p4]
+      - if: "target in [esp32p4]"
 
   esp_webrtc_utils:
     path: ${KVS_SDK_PATH}/components/esp_webrtc_utils

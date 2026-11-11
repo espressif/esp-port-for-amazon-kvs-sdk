@@ -40,27 +40,32 @@
 
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
 #include "slave_flasher.h"
+#if !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
+#include "esp_hosted.h"
+#endif
 #endif
 
 static const char *TAG = "esp_webrtc_camera";
 
-#if CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE
+#if CONFIG_ESP_HOSTED_HOST_FEAT_BT
 #include "esp_check.h"
-#include "esp_hosted_misc.h"
+#include "esp_hosted_bt_host_stack.h"
 
 static esp_err_t hosted_bt_prov_start(void *ctx)
 {
     ESP_LOGI(TAG, "Initializing BT controller on coprocessor for provisioning");
-    ESP_RETURN_ON_ERROR(esp_hosted_bt_controller_init(), TAG, "BT controller init failed");
-    ESP_RETURN_ON_ERROR(esp_hosted_bt_controller_enable(), TAG, "BT controller enable failed");
+    /* Brings the co-processor controller up and binds the HCI pipe to the stack
+     * selected by the IDF BT Kconfig. Runs after esp_hosted_connect_to_slave()
+     * and before the stack's own init, which app_wifi_prov_init() drives. */
+    esp_hosted_bt_host_stack_cfg_t cfg = ESP_HOSTED_BT_HOST_STACK_CONFIG_DEFAULT();
+    ESP_RETURN_ON_ERROR(esp_hosted_bt_host_stack_setup(&cfg), TAG, "BT host stack setup failed");
     return ESP_OK;
 }
 
 static void hosted_bt_prov_end(void *ctx)
 {
     ESP_LOGI(TAG, "Deinitializing BT controller on coprocessor");
-    esp_hosted_bt_controller_disable();
-    esp_hosted_bt_controller_deinit(true);
+    esp_hosted_bt_host_stack_teardown();
 }
 #endif
 
@@ -234,13 +239,21 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP32 WebRTC Camera Example");
 
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
-    /* P4-EYE: flash the on-board C6 (network_adapter) from the slave SPIFFS
-     * partition before bringing up Wi-Fi, which runs over that co-processor. */
+    /* P4-EYE: flash the on-board C6 from the slave SPIFFS partition before
+     * bringing up Wi-Fi, which runs over that co-processor. */
     ret = flash_slave();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to flash slave co-processor: %s", esp_err_to_name(ret));
         return;
     }
+
+#if !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
+    /* hosted's auto-init is a constructor, so it would enumerate the CP while
+     * flash_slave() still holds it in ROM download mode, and give up after four
+     * tries. Boards that flash their own CP bring hosted up here instead. */
+    ESP_ERROR_CHECK(esp_hosted_init());
+    ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
+#endif
 #endif
 
     esp_cli_start();
@@ -250,7 +263,7 @@ void app_main(void)
     // Initialize WiFi (with BLE provisioning if enabled)
     app_wifi_prov_config_t net_cfg = APP_NETWORK_CONFIG_DEFAULT();
     net_cfg.wifi_connect_timeout_ms = 10000;
-#if CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE
+#if CONFIG_ESP_HOSTED_HOST_FEAT_BT
     net_cfg.prov_start_cb = hosted_bt_prov_start;
     net_cfg.prov_end_cb = hosted_bt_prov_end;
 #endif

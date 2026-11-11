@@ -1,7 +1,10 @@
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
 #
-# Chip revision
+# Chip revision: this board carries a P4 below rev 3. The P4X-C5 core board
+# carries rev >= 3.1 and needs CONFIG_ESP32P4_REV_MIN_301=y with
+# SELECTS_REV_LESS_V3 off. The two are mutually exclusive: an image built for
+# the wrong one dies in the second-stage bootloader with no message.
 #
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_REV_MIN_0=y
@@ -11,14 +14,32 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
 
 #
-# Slave Flasher
+# Slave Flasher: off.
 #
-CONFIG_SLAVE_FLASHER_ENABLE=y
-CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0xC000
-CONFIG_SLAVE_APPLICATION_ADDRESS=0x20000
+# The flasher drives the co-processor GPIO0 and reset lines to put it into
+# download mode, and it does that at every host boot. A deep-sleep wake is a
+# host boot, so with the flasher on the co-processor is reset on every wake and
+# never stays in light sleep.
+#
+# The C5 on this board has its own USB-UART bridge, so program it directly:
+#
+#   cd examples/signaling_only/<build dir>
+#   python -m esptool --chip esp32c5 -p /dev/cu.usbserial-XXXXX -b 460800 \
+#       write_flash 0x2000 bootloader/bootloader.bin \
+#                   0xc000 partition_table/partition-table.bin \
+#                   0x20000 <app>.bin
+#
+# Set CONFIG_SLAVE_FLASHER_ENABLE=y to flash the co-processor from the host
+# again. Set CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n as well if you
+# do, for the reason given below.
+CONFIG_SLAVE_FLASHER_ENABLE=n
+
+# The console is separate from flashing: keep the C5's log ([SLAVE]) and
+# write_slave on the host. Only RX is held; TX is driven per write, so the C5's
+# own USB-UART bridge can share these lines.
+CONFIG_SLAVE_CONSOLE_ENABLE=y
 CONFIG_SLAVE_UART_RX_PIN=45
 CONFIG_SLAVE_UART_TX_PIN=46
-CONFIG_SLAVE_GPIO0_TRIGGER_PIN=47
 
 #
 # Select Hosted Board
@@ -26,7 +47,25 @@ CONFIG_SLAVE_GPIO0_TRIGGER_PIN=47
 CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
 CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
 
+#
+# esp_hosted's auto-init is a C constructor that runs before app_main. It had to
+# be off while the slave flasher held the co-processor in ROM download mode:
+# CMD5 timed out and hosted never retried. The flasher is off now, so auto-init
+# takes the normal path. Turn this back to n if you re-enable the flasher.
+#
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=y
+
 # This board has no audio codec and no display. Both are capabilities, not a
 # board name: they decide the capture path and the players.
 CONFIG_MEDIA_STREAM_HAS_AUDIO_CODEC=n
 CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER=n
+
+# Match the C5's Wi-Fi init config. On a deep-sleep wake esp_wifi_init() goes to
+# the co-processor, which re-initialises Wi-Fi -- dropping the association and the
+# KVS session -- whenever the host's config differs from its own.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n
+
+# The Kconfig range for the host wake GPIO on this board is 2 to 2. Any other
+# value is clamped without a warning.
+CONFIG_ESP_HOSTED_HOST_FEAT_POWER_SAVE_WAKEUP_GPIO=2

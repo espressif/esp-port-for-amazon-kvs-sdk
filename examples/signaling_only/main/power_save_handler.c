@@ -8,11 +8,14 @@
 #include <esp_err.h>
 #include <esp_console.h>
 #include <esp_log.h>
-#include <slave_light_sleep.h>
 #include "app_webrtc.h"
 
 #define SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP (1)
+#ifdef CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_ENABLE
 #define SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP (1)
+#else
+#define SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP (0)
+#endif
 
 #define SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING (0)
 
@@ -32,47 +35,87 @@ static const char *TAG = "power_save";
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
-
-
-/* Part 1: Wi-Fi Modem sleep enforcement */
-/* Part 2: Mandate non critical tasks to suspend */
-
-/* Part 1 : Wi-Fi Modem sleep */
 #include "esp_wifi.h"
 #include "esp_pm.h"
+#include "esp_event.h"
+
+/* power_save_init() is reached only from signaling_pre_wifi_init(), which the
+ * example arms on the co-processor targets alone. Mirror that condition here,
+ * or these helpers are dead code on every other target. */
+#if defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C5)
+#define PS_WIFI_KNOBS_ENABLED 1
+#else
+#define PS_WIFI_KNOBS_ENABLED 0
+#endif
+
+#if PS_WIFI_KNOBS_ENABLED
 
 static esp_err_t configure_wifi_power_save(void)
 {
-    esp_err_t ret;
+#if CONFIG_EXAMPLE_WIFI_PS_NONE
+    const wifi_ps_type_t mode = WIFI_PS_NONE;
+    const char *mode_name = "NONE";
+#elif CONFIG_EXAMPLE_WIFI_PS_MAX_MODEM
+    const wifi_ps_type_t mode = WIFI_PS_MAX_MODEM;
+    const char *mode_name = "MAX_MODEM";
+#else
+    const wifi_ps_type_t mode = WIFI_PS_MIN_MODEM;
+    const char *mode_name = "MIN_MODEM";
+#endif
 
-    /* Enable WiFi modem sleep */
-    /* WIFI_PS_MIN_MODEM: Minimum modem power saving (better performance) */
-    /* WIFI_PS_MAX_MODEM: Maximum modem power saving (better power savings) */
-    ret = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    /* Read back rather than trust the write. Until this function was wired to
+     * an event it never ran, and the radio kept the driver default silently.
+     * Any power figure is only meaningful beside this line. */
+    wifi_ps_type_t before = WIFI_PS_NONE;
+    esp_wifi_get_ps(&before);
+
+    esp_err_t ret = esp_wifi_set_ps(mode);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set WiFi power save mode: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "esp_wifi_set_ps(%s) failed: %s", mode_name, esp_err_to_name(ret));
         return ret;
     }
 
-    ESP_LOGI(TAG, "WiFi modem sleep enabled");
+    wifi_ps_type_t after = WIFI_PS_NONE;
+    esp_wifi_get_ps(&after);
+    ESP_LOGI(TAG, "Wi-Fi power save mode: %s (was %d, now %d)",
+             mode_name, (int) before, (int) after);
 
-    /* Optional: Configure listen interval for better power savings */
+#if CONFIG_EXAMPLE_WIFI_PS_MAX_MODEM
+    /* Only MAX_MODEM honours listen_interval. Under MIN_MODEM the radio wakes
+     * at every DTIM, so the field is inert.
+     *
+     * `wifi-set` rebuilds wifi_config_t from zero and restarts the station, so
+     * a one-shot write at boot is lost at the first provisioning. Rewriting it
+     * on every WIFI_EVENT_STA_START keeps the value in the driver. The driver
+     * reads the field when the station associates, and esp_wifi_start() only
+     * posts the event, so a write may land after the association it was meant
+     * for. The value then applies from the next association. */
     wifi_config_t wifi_config = {};
     ret = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
     if (ret == ESP_OK) {
-        wifi_config.sta.listen_interval = 3; /* Listen every 3 beacons (default is 3) */
+        wifi_config.sta.listen_interval = CONFIG_EXAMPLE_WIFI_LISTEN_INTERVAL;
         ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "WiFi listen interval configured");
-        }
     }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "listen_interval not applied: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "Wi-Fi listen interval: %d beacons", CONFIG_EXAMPLE_WIFI_LISTEN_INTERVAL);
+#endif
 
-    return ret;
+    return ESP_OK;
 }
 
+static void on_sta_start(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    configure_wifi_power_save();
+}
 
-/* Part 2: Mandate non critical tasks to suspend */
+#endif /* PS_WIFI_KNOBS_ENABLED */
+
+#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
+
+/* Mandate non critical tasks to suspend */
 
 #if SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING
 
@@ -251,128 +294,26 @@ static void resume_application_tasks(void)
 
 
 
-#if !defined(CONFIG_ESP_HOSTED_LIGHT_SLEEP_ENABLE) && (ALLOW_SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP)
-#error "Incompatible config, check slave config"
-#endif
-
-#if CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5
-    #define IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION 1
+/* The host-sleep integration is a co-processor feature, not a chip property:
+ * eh_cp_feat_host_ps is what provides the callbacks and the wake path. */
+#if CONFIG_ESP_HOSTED_CP_FEAT_HOST_PS
+    #define HOST_PS_INTEGRATION_ENABLED 1
+    #include "host_ps_integration.h"
+    #include "eh_cp_feat_host_ps_apis.h"
 #else
-    #define IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION 0
+    #define HOST_PS_INTEGRATION_ENABLED 0
 #endif
 
-#if IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION
-#include "host_power_save.h"
-#include "slave_light_sleep.h"
-#include "esp_hosted_cli.h"
-#endif
+/* Milliseconds to wait for the host to come back up. eh_cp_feat_host_ps caps
+ * this internally; the value only bounds how long the caller blocks. */
+#define HOST_WAKEUP_TIMEOUT_MS 2000
 
-#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
+#if SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && HOST_PS_INTEGRATION_ENABLED
 
-/* Callback implementations for automatic light sleep on host power save events */
+/* The host-sleep callbacks live in host_ps_integration.c, vendored from
+ * esp_hosted's power_save example: they stop the CLI and enter CP light sleep
+ * when the host sleeps, and reverse it when the host wakes. */
 
-static void host_power_save_on_prepare_cb(void)
-{
-    ESP_EARLY_LOGI(TAG, "==> Host preparing to enter power save");
-    /* User can add custom pre-sleep cleanup here:
-    * - Save application state
-    * - Flush buffers
-    * - Stop non-essential tasks
-    * - etc.
-    */
-    esp_err_t err = configure_wifi_power_save();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "configure_wifi_power_save failed: %s", esp_err_to_name(err));
-    }
-
-#if SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING
-    // Get wifi task handle by name and suspend it
-    TaskHandle_t wifi_task = xTaskGetHandle("wifi");
-    if (wifi_task != NULL) {
-        ESP_EARLY_LOGI(TAG, "Suspending wifi task");
-        vTaskSuspend(wifi_task);
-    }
-
-    /* Suspend all non-critical tasks */
-    suspend_application_tasks();
-
-    /* Give tasks time to finish current operations */
-    vTaskDelay(pdMS_TO_TICKS(200));
-#endif /* SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING */
-}
-
-static void IRAM_ATTR host_power_save_on_ready_cb(void)
-{
-    ESP_EARLY_LOGI(TAG, "==> Host power save active - entering light sleep");
-
-#ifdef CONFIG_ESP_HOSTED_LIGHT_SLEEP_ENABLE
-
-    /* Handle CLI based on peripheral powerdown configuration */
-#if defined(CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP) && defined(CONFIG_ESP_HOSTED_LIGHT_SLEEP_PERIPHERAL_POWERDOWN)
-    /* Peripheral powerdown enabled - UART will die, stop CLI */
-    ESP_EARLY_LOGI(TAG, "Stopping CLI (UART powering down)");
-    esp_hosted_cli_stop();
-#else
-    /* Peripheral stays powered - CLI can remain active */
-    ESP_EARLY_LOGI(TAG, "CLI remains active (UART stays powered)");
-#endif
-
-    esp_err_t ret = slave_light_sleep_start();
-    if (ret == ESP_OK) {
-        ESP_EARLY_LOGI(TAG, "Light sleep started successfully");
-    } else {
-        ESP_EARLY_LOGW(TAG, "Failed to start light sleep: %s", esp_err_to_name(ret));
-    }
-#else
-    ESP_EARLY_LOGW(TAG, "Light sleep not enabled in menuconfig");
-#endif
-    // Resume wifi task
-    // TaskHandle_t wifi_task = xTaskGetHandle("wifi");
-    // if (wifi_task != NULL) {
-    //     ESP_EARLY_LOGI(TAG, "Resuming wifi task");
-    //     vTaskResume(wifi_task);
-    // }
-}
-
-static void IRAM_ATTR host_power_save_off_prepare_cb(void)
-{
-#ifdef CONFIG_ESP_HOSTED_LIGHT_SLEEP_ENABLE
-    esp_err_t ret = slave_light_sleep_stop();
-    if (ret == ESP_OK) {
-        /* ESP_EARLY_LOGI(TAG, "Light sleep stopped successfully"); */
-    } else {
-        /* ESP_EARLY_LOGW(TAG, "Failed to stop light sleep: %s", esp_err_to_name(ret)); */
-    }
-
-#endif
-}
-
-static void IRAM_ATTR host_power_save_off_ready_cb(void)
-{
-    ESP_EARLY_LOGI(TAG, "==> Host power save off - device fully ready");
-
-#if SUSPEND_NON_CRITICAL_TASKS_WHILE_LIGHT_SLEEPING
-    /* Resume all suspended tasks */
-    resume_application_tasks();
-#endif
-
-    /* Restart CLI if it was stopped due to peripheral powerdown */
-    /* This happens here (after ready) to ensure UART is fully powered up */
-#if defined(CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP) && defined(CONFIG_ESP_HOSTED_LIGHT_SLEEP_PERIPHERAL_POWERDOWN)
-    ESP_EARLY_LOGI(TAG, "Restarting CLI (UART now fully powered up)");
-    esp_hosted_cli_start();
-#endif
-
-    /* User can add custom post-wake initialization here:
-    * - Restore application state
-    * - Resume tasks
-    * - Re-initialize peripherals if needed
-    * - etc.
-    */
-}
-#endif /*ALLOW_SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP*/
-
-#if IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION
 static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *user_ctx)
 {
     if (event_data == NULL) {
@@ -382,84 +323,44 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
     switch (event_data->event_id) {
         case APP_WEBRTC_EVENT_RECEIVED_OFFER:
             ESP_LOGI(TAG, "Received offer, waking up host");
-            wakeup_host(portMAX_DELAY);
+            eh_cp_feat_host_ps_wakeup_host(HOST_WAKEUP_TIMEOUT_MS);
             break;
         case APP_WEBRTC_EVENT_STREAMING_STARTED:
             ESP_LOGI(TAG, "Streaming started, waking up host");
-            wakeup_host(portMAX_DELAY);
+            eh_cp_feat_host_ps_wakeup_host(HOST_WAKEUP_TIMEOUT_MS);
             break;
         default:
             break;
     }
 }
-#endif /* IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION */
+#endif /* SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && HOST_PS_INTEGRATION_ENABLED */
 
 esp_err_t power_save_init(void)
 {
     esp_err_t ret = ESP_OK;
-#if SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION
+
+#if PS_WIFI_KNOBS_ENABLED
+    /* Runs before esp_wifi_init(), so the Wi-Fi power-save mode cannot be set
+     * here. Register for the start event instead and apply it there. A failure
+     * costs power, not function, so it must not bring the co-processor down:
+     * a reboot here takes the host's wake path with it. */
+    esp_err_t evt_ret = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START,
+                                                   &on_sta_start, NULL);
+    if (evt_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi power save will stay at the driver default: %s",
+                 esp_err_to_name(evt_ret));
+    }
+#endif
+
+#if SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && HOST_PS_INTEGRATION_ENABLED
     ESP_LOGI(TAG, "Initializing power save API");
 
-#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
-    /*
-    * STEP 1: Initialize host power save infrastructure
-    * This enables monitoring of host power save events.
-    * Without this, callbacks won't be invoked.
-    */
-    host_power_save_config_t ps_config = HOST_POWER_SAVE_DEFAULT_CONFIG();
-    host_power_save_callbacks_t callbacks = {
-        .host_power_save_on_prepare_cb = host_power_save_on_prepare_cb,
-        .host_power_save_on_ready_cb = host_power_save_on_ready_cb,
-        .host_power_save_off_prepare_cb = host_power_save_off_prepare_cb,
-        .host_power_save_off_ready_cb = host_power_save_off_ready_cb
-    };
-    ps_config.callbacks = callbacks;
-    ret = host_power_save_init(&ps_config);
-    if (ret) {
-        ESP_LOGE(TAG, "Host power save init failed: %u", ret);
-    }
-
-#else /* SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP */
-    ret = host_power_save_init(NULL);
-    if (ret) {
-        ESP_LOGE(TAG, "Host power save init failed: %u", ret);
-    }
-#endif /*SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP*/
-
-
-#if SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP
-    /*
-    * STEP 2: Initialize slave light sleep (optional)
-    * This component can be used independently of host power save.
-    * Comment this out if you only want host event monitoring.
-    */
-#ifdef CONFIG_ESP_HOSTED_LIGHT_SLEEP_ENABLE
-    ESP_LOGI(TAG, "Step 2: Initializing slave light sleep component");
-    ret = slave_light_sleep_init();
+    ret = host_ps_integration_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "  ✗ Light sleep init failed: %s", esp_err_to_name(ret));
-        ESP_LOGE(TAG, "  Check menuconfig: PM_ENABLE and FREERTOS_USE_TICKLESS_IDLE");
-        ESP_LOGE(TAG, "  Continuing without light sleep...");
-    } else {
-        ESP_LOGI(TAG, "  ✓ Light sleep component ready");
+        ESP_LOGE(TAG, "Host power save integration failed: %s", esp_err_to_name(ret));
     }
-#else
-    ESP_LOGI(TAG, "Step 2: Light sleep component not enabled");
-    ESP_LOGI(TAG, "  ⓘ Enable in: Light Sleep Power Management menu");
-    ESP_LOGI(TAG, "  ⓘ Host power save callbacks will still work");
-#endif
-#endif /* SLAVE_LIGHT_SLEEP_ON_HOST_DEEP_SLEEP */
 
-#if IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION
-    /* Register WebRTC event handler to wake host on streaming start */
-    if (app_webrtc_register_event_callback(app_webrtc_event_handler, NULL) != 0) {
-        ESP_LOGE(TAG, "Failed to register WebRTC event callback for power save");
-    } else {
-        ESP_LOGI(TAG, "Registered WebRTC event callback for host wakeup");
-    }
-#endif /* IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION */
-
-#else /* SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION */
+#else /* SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && HOST_PS_INTEGRATION_ENABLED */
     /* esp_hosted's host_power_save API is C5/C6-only (it's the slave-side
      * mechanism that lets the co-processor sleep until the host wakes it
      * over SDIO). On other targets there's no host to coordinate with —
@@ -470,32 +371,15 @@ esp_err_t power_save_init(void)
     return ret;
 }
 
-/* CLI command handler for waking up host */
-static int wakeup_cli_handler(int argc, char *argv[])
+esp_err_t power_save_register_webrtc_events(void)
 {
-#if IS_VALID_SLAVE_CHIPSET_FOR_SLEEP_INTEGRATION
-    ESP_LOGI(TAG, "Waking up host...");
-    wakeup_host_mandate(portMAX_DELAY);
-#else
-    ESP_LOGI(TAG, "Wake-up only supported on ESP32-C6/C5");
+#if SLAVE_HOOKS_FOR_HOST_DEEP_SLEEP && HOST_PS_INTEGRATION_ENABLED
+    if (app_webrtc_register_event_callback(app_webrtc_event_handler, NULL) != 0) {
+        ESP_LOGE(TAG, "Failed to register WebRTC event callback for power save");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Registered WebRTC event callback for host wakeup");
 #endif
-    return 0;
+    return ESP_OK;
 }
 
-static esp_console_cmd_t power_save_cmds[] = {
-    {
-        .command = "wake-up",
-        .help = "Wake up host from deep sleep",
-        .func = wakeup_cli_handler,
-    }
-};
-
-int power_save_register_cli(void)
-{
-    int cmds_num = sizeof(power_save_cmds) / sizeof(esp_console_cmd_t);
-    for (int i = 0; i < cmds_num; i++) {
-        ESP_LOGI(TAG, "Registering command: %s", power_save_cmds[i].command);
-        esp_console_cmd_register(&power_save_cmds[i]);
-    }
-    return 0;
-}

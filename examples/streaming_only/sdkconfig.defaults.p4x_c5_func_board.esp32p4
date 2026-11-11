@@ -1,0 +1,28 @@
+# ESP32-P4X-C5-Function-EV-Board, host (P4) side of the split pair.
+#
+# Pairs with examples/signaling_only/sdkconfig.defaults.p4x_c5_func_board.esp32c5.
+
+#
+# Chip revision. P4X is rev >= 3 silicon (measured on this board: v3.2).
+# Revisions >= 3.0 and < 3.0 are mutually exclusive, so an image built for
+# rev < 3 dies in the second-stage bootloader with no message.
+#
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 is not set
+
+#
+# Console: the P4 enumerates as USB CDC, which is where the test writes
+# `wifi-set` and reads the signaling walk.
+#
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
+
+#
+# Co-processor. The C5 has its own USB port here, so it is flashed directly
+# rather than in-system. That also means the P4 does not forward the C5's UART:
+# pytest_split_mode.py's [SLAVE] oracle expects a one-port kit, so on this board
+# the co-processor log has to be read from its own port instead.
+#
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+CONFIG_ESP_HOSTED_P4X_C5_DEV_BOARD_FUNC_BOARD=y
+# CONFIG_SLAVE_FLASHER_ENABLE is not set

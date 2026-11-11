@@ -58,7 +58,7 @@
 #define HTTP_RESPONSE_MAX_BUFFER_SIZE (4 * 1024) // Buffer to hold complete response
 #define HTTP_RESPONSE_BUFFER_SIZE (1 * 1024) // Internal response buffer for http client
 #define HTTP_REQUEST_BUFFER_SIZE (4 * 1024) // Request buffer for http client
-#define HTTP_REQUEST_TIMEOUT_MS   5000 // 5 seconds
+#define HTTP_REQUEST_TIMEOUT_MS   15000 // 15 seconds
 
 /* WebSocket connect timeout. On an ESP32-C6 the TLS handshake plus the upgrade
  * takes about 9 s, so 10 s gave up on connects that were about to complete.
@@ -538,6 +538,7 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
      * (like close frames) are processed as signaling messages */
     if (event_id == WEBSOCKET_EVENT_DATA && data != NULL) {
         if (data->data_ptr == NULL || data->data_len == 0) {
+            /* A keep-alive PONG lands here every ping interval, forever. */
             ESP_LOGD(TAG, "WebSocket empty frame received, op_code: 0x%x, fin: %d",
                     data->op_code, data->fin);
         } else {
@@ -1405,8 +1406,9 @@ STATUS connectEspSignalingClient(PSignalingClient pSignalingClient)
     ws_cfg.task_prio = 5;
     ws_cfg.buffer_size = WS_BUFFER_SIZE;
 
-    // Set ping interval to match SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS (10 seconds)
-    ws_cfg.ping_interval_sec = 10;
+    // Keep-alive cadence. CMake drives SIGNALING_SERVICE_WSS_PING_PONG_INTERVAL_IN_SECONDS
+    // from the same Kconfig value, so the libwebsockets path matches.
+    ws_cfg.ping_interval_sec = CONFIG_KVS_SIGNALING_WSS_PING_INTERVAL_SEC;
 
     // Disable auto reconnect to let the state machine handle reconnection with fresh credentials
     // Auto-reconnect would fail after 5 minutes when the signed URL expires

@@ -1,0 +1,7 @@
+# Overlay for the emulated host power-save test. Appended after sdkconfig.ci.emu.
+#
+# The example's automatic deep-sleep timer is off by default, so the emu suite
+# never exercises it. esp-emu models P4 PMU deep sleep and carries the CP->host
+# wake line over the hosted bridge as OP_WAKE, so the whole sleep/wake cycle is
+# testable without a bench.
+CONFIG_EXAMPLE_ENABLE_POWER_SAVE=y

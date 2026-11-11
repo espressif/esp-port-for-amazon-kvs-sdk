@@ -16,6 +16,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 
 #include "esp_cli.h"
 #include "app_storage.h"
@@ -34,13 +35,13 @@
 #include "kvs_peer_connection.h"
 #include "esp_hosted.h"
 #include "power_save_handler.h"
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
+#if CONFIG_SLAVE_FLASHER_ENABLE || CONFIG_SLAVE_CONSOLE_ENABLE
 #include "slave_flasher.h"
 #endif
 /* Recovery is universal (called unconditionally in app_main), not gated on the
  * in-system slave flasher — EV builds the C6 as a separate bin (flasher off). */
 #include "hosted_recovery.h"
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
+#if CONFIG_SLAVE_CONSOLE_ENABLE
 static vprintf_like_t s_original_vprintf = NULL;
 
 static int custom_vprintf(const char* fmt, va_list args)
@@ -73,7 +74,7 @@ static data_channel_context_t g_data_channel_ctx;
 
 // WiFi event group
 static EventGroupHandle_t s_wifi_event_group;
-static char wifi_ip[72];
+static esp_ip4_addr_t s_sta_ip;
 
 // Data channel callbacks
 static void on_data_channel_open(uint64_t custom_data, void *p_data_channel, const char *peer_id)
@@ -156,15 +157,47 @@ static void on_data_channel_message(uint64_t custom_data, void *p_data_channel, 
 
 #define GOT_IP_BIT BIT0
 
-// WiFi event handler
+/* Set while hosted_recovery holds Wi-Fi down on purpose, so a disconnect is not
+ * answered with a reconnect. */
+static volatile bool s_wifi_held;
+
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
 {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        /* With network split too: the host starts Wi-Fi over RPC, usually before
+         * the co-processor's app is up, so this is the first connect on a
+         * provisioned co-processor. The co-processor also connects once it has
+         * applied its own config, and it owns reconnects (see STA_DISCONNECTED
+         * below). */
+        if (!s_wifi_held) {
+            esp_wifi_connect();
+        }
+        return;
+    }
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *d = event_data;
+        xEventGroupClearBits(s_wifi_event_group, GOT_IP_BIT);
+        if (s_wifi_held) {
+            return;
+        }
+#if !HOST_USES_STATIC_NETIF && CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT_NETIF_INTERNAL_STATIC
+        /* With network split the co-processor owns the link and reconnects on
+         * its own; a host esp_wifi_connect() here only races it. */
+        ESP_LOGW(TAG, "WiFi disconnected (reason %u), co-processor reconnects", d->reason);
+#else
+        /* The host drives the connection, so nothing retries unless it does. */
+        ESP_LOGW(TAG, "WiFi disconnected (reason %u), reconnecting", d->reason);
+        esp_wifi_connect();
+#endif
+        return;
+    }
+
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        memset(wifi_ip, 0, sizeof(wifi_ip)/sizeof(wifi_ip[0]));
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-        memcpy(wifi_ip, &event->ip_info.ip, 4);
+        s_sta_ip = event->ip_info.ip;
         xEventGroupSetBits(s_wifi_event_group, GOT_IP_BIT);
     }
 }
@@ -197,18 +230,51 @@ esp_netif_t *create_slave_sta_netif_with_static_ip(void)
 }
 #endif
 
-static void wifi_init_sta(void)
+/* Before esp_hosted_init() and esp_wifi_init(): a differing init config makes
+ * the co-processor re-initialise Wi-Fi, and those events must reach a handler. */
+static void wifi_events_init(void)
 {
     s_wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event_handler, NULL));
+}
+
+#if !HOST_USES_STATIC_NETIF && CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT_NETIF_INTERNAL_STATIC
+/* nw_split creates WIFI_STA_DEF from a task that starts when the co-processor
+ * reports ready, so esp_hosted_connect_to_slave() can return before it exists. */
+static esp_netif_t *wait_for_nw_split_netif(void)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    for (int i = 0; netif == NULL && i < 50; i++) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    }
+    return netif;
+}
+#endif
+
+static void wifi_init_sta(void)
+{
 	ESP_ERROR_CHECK(esp_hosted_init());
 	ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
 
 #if HOST_USES_STATIC_NETIF
     sta_netif = create_slave_sta_netif_with_static_ip();
+#elif CONFIG_ESP_HOSTED_HOST_FEAT_NW_SPLIT_NETIF_INTERNAL_STATIC
+    /* nw_split already created WIFI_STA_DEF. Creating a second returns NULL,
+     * which asserts in wifi_default.c, so take hosted's handle. */
+    sta_netif = wait_for_nw_split_netif();
+    if (sta_netif == NULL) {
+        /* Without the netif there is no Wi-Fi at all; reboot rather than run on. */
+        ESP_LOGE(TAG, "network split did not create WIFI_STA_DEF within 5 s");
+        abort();
+    }
+    ESP_LOGI(TAG, "Using WiFi STA netif from network split: %p", sta_netif);
 #else
     sta_netif = esp_netif_create_default_wifi_sta();
     if (sta_netif == NULL) {
@@ -220,24 +286,35 @@ static void wifi_init_sta(void)
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    /* Set the mode before any config. A device with no mode in its Wi-Fi NVS
+     * comes up in softAP after esp_wifi_init(), whatever esp_wifi.h says, and
+     * then rejects a station config with ESP_ERR_WIFI_MODE. */
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
-
+    /* The co-processor owns the Wi-Fi credentials: it provisions them and
+     * connects. The host sets no station config, so it cannot overwrite them. */
     ESP_ERROR_CHECK(esp_wifi_start());
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_wifi_connect();
-    // ESP_ERROR_CHECK(esp_hosted_wait_for_slave());
 
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-            GOT_IP_BIT,
-            pdFALSE,
-            pdFALSE,
-            pdMS_TO_TICKS(20000));
+    /* The address can predate the handler: hosted brings the transport up in
+     * the background, and on a wake network split posts GOT_IP from there. The
+     * handler is registered by now, so read the state once; anything after
+     * this is caught by the handler. */
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(sta_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+        s_sta_ip = ip_info.ip;
+        xEventGroupSetBits(s_wifi_event_group, GOT_IP_BIT);
+    }
+
+    int64_t t0 = esp_timer_get_time();
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, GOT_IP_BIT, pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(60000));
+    int waited_ms = (int)((esp_timer_get_time() - t0) / 1000);
 
     if (bits & GOT_IP_BIT) {
-        ESP_LOGI(TAG, "Connected to WiFi");
+        ESP_LOGI(TAG, "Connected to WiFi: " IPSTR " after %d ms",
+                 IP2STR(&s_sta_ip), waited_ms);
     } else {
-        ESP_LOGE(TAG, "Failed to connect to WiFi");
+        ESP_LOGE(TAG, "Failed to connect to WiFi: no GOT_IP after %d ms", waited_ms);
     }
 }
 
@@ -245,6 +322,11 @@ static void wifi_init_sta(void)
  * before the transport is torn down and bring it back after it re-establishes. */
 static esp_err_t on_hosted_teardown(void)
 {
+    /* Cleared here, not in on_hosted_restore(): network split can post GOT_IP as
+     * soon as the transport is back, before the restore runs, and that event must
+     * count. The netif keeps its old static address, so it can't be read instead. */
+    xEventGroupClearBits(s_wifi_event_group, GOT_IP_BIT);
+    s_wifi_held = true;
     esp_wifi_disconnect();
     esp_wifi_stop();
     return ESP_OK;
@@ -252,14 +334,12 @@ static esp_err_t on_hosted_teardown(void)
 
 static esp_err_t on_hosted_restore(void)
 {
-    xEventGroupClearBits(s_wifi_event_group, GOT_IP_BIT);
+    s_wifi_held = false;
     esp_err_t err = esp_wifi_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_start failed after transport recovery: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_wifi_connect();
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, GOT_IP_BIT, pdFALSE, pdFALSE,
                                            pdMS_TO_TICKS(20000));
     if (!(bits & GOT_IP_BIT)) {
@@ -498,14 +578,30 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-#ifdef CONFIG_SLAVE_FLASHER_ENABLE
-    s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "reset reason: %d%s", (int)reset_reason,
+             reset_reason == ESP_RST_DEEPSLEEP ? " (deep-sleep wake)" : "");
 
-    ret = flash_slave();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to flash slave: %s", esp_err_to_name(ret));
-        return;
+#if CONFIG_SLAVE_CONSOLE_ENABLE
+    /* [HOST] tells the host's own lines from the forwarded [SLAVE] ones. */
+    s_original_vprintf = esp_log_set_vprintf(custom_vprintf);
+#endif
+#if CONFIG_SLAVE_FLASHER_ENABLE
+    /* A deep-sleep wake re-runs app_main, but the co-processor kept running and
+     * still holds the Wi-Fi association and the signaling session. flash_slave()
+     * drives its reset pin, which would throw both away, so skip it on a wake. */
+    if (reset_reason == ESP_RST_DEEPSLEEP) {
+        ESP_LOGI(TAG, "deep-sleep wake: leaving the co-processor untouched");
+    } else {
+        ret = flash_slave();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to flash slave: %s", esp_err_to_name(ret));
+            return;
+        }
     }
+#endif
+#if CONFIG_SLAVE_CONSOLE_ENABLE
+    slave_console_attach();     /* no-op if flash_slave() already attached it */
 #endif
 
     ESP_LOGI(TAG, "ESP32 WebRTC Streaming Example");
@@ -517,6 +613,7 @@ void app_main(void)
     /* Register deep sleep command */
     power_save_cli_register();
 
+    wifi_events_init();
     esp_hosted_init();
     esp_hosted_connect_to_slave();
 

@@ -1,0 +1,3 @@
+# ESP32-P4 + ESP32-C6 Core Board, co-processor (C6) side.
+# Pairs with examples/webrtc_classic/sdkconfig.defaults.p4_c6_core_board.esp32p4.
+CONFIG_ESP_HOSTED_P4_C6_CORE_BOARD=y

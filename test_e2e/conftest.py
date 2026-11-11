@@ -41,7 +41,7 @@ def pytest_addoption(parser):
                          'must never pass this.')
     group.addoption('--cp-port', default=None,
                     help='Serial port of the co-processor console. Required when the '
-                         'host firmware is built without CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR, '
+                         'host firmware is built without CONFIG_SLAVE_CONSOLE_ENABLE, '
                          'i.e. when it does not re-print the CP log with a [SLAVE] prefix.')
     group.addoption('--max-video-loss', type=float, default=1.0,
                     help='fail if inbound video packet loss exceeds this fraction. '
@@ -305,7 +305,7 @@ def aws_creds_usable(aws_creds, kvs_region):
 
 
 # Where the co-processor's log comes from. With
-# CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR the host re-prints it behind a [SLAVE]
+# CONFIG_SLAVE_CONSOLE_ENABLE the host re-prints it behind a [SLAVE]
 # prefix, the only option on a one-port board. Without it the CP has its own UART.
 # Reading the config rather than the bench keeps one test working on both, and lets
 # the forwarding -- which otherwise puts a second writer on the host console.
@@ -417,9 +417,10 @@ class _DirectCp:
 def cp_console(request, dut, tmp_path):
     """The co-processor's log, from whichever source the firmware implies."""
     _, cfg = _built_config(request)
-    # Absent from sdkconfig.json when SLAVE_FLASHER_ENABLE is off (the symbol depends on
-    # it): nothing re-prints the C6 log then, so ask for --cp-port rather than wait.
-    forwarded = cfg.get('SLAVE_FLASHER_POST_FLASH_MONITOR', False)
+    # SLAVE_CONSOLE_ENABLE is what re-prints the C6 log on the host console; builds from
+    # before it carry SLAVE_FLASHER_POST_FLASH_MONITOR, which is absent from sdkconfig.json
+    # when the flasher is off. Neither present: nothing re-prints it, so ask for --cp-port.
+    forwarded = cfg.get('SLAVE_CONSOLE_ENABLE', cfg.get('SLAVE_FLASHER_POST_FLASH_MONITOR', False))
     cp_port = request.config.getoption('--cp-port')
 
     if forwarded and not cp_port:
@@ -430,7 +431,7 @@ def cp_console(request, dut, tmp_path):
 
     if not cp_port:
         pytest.fail(
-            'The host firmware is built without CONFIG_SLAVE_FLASHER_POST_FLASH_MONITOR, '
+            'The host firmware is built without CONFIG_SLAVE_CONSOLE_ENABLE, '
             'so it does not re-print the co-processor log. Pass --cp-port <port> so the '
             'test can read the co-processor directly.')
 

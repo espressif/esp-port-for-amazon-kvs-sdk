@@ -27,7 +27,7 @@
 #endif
 
 #if IS_VALID_SLAVE_CHIPSET
-#include "esp_hosted_coprocessor.h"
+#include "eh_cp.h"
 #endif
 
 #include "esp_webrtc_time.h"
@@ -36,6 +36,7 @@
 #include "bridge_peer_connection.h"
 #include "webrtc_bridge.h"
 #include "power_save_handler.h"
+#include "host_ps_integration.h"
 
 static const char *TAG = "signaling_only";
 
@@ -44,6 +45,20 @@ extern int query_resolution_command_register_cli(void);
 extern int query_resolution_command_register_response_handler(void);
 extern int query_snapshot_command_register_cli(void);
 extern int query_snapshot_command_register_response_handler(void);
+
+static void register_app_cli(void)
+{
+    wifi_register_cli(); // for wifi-set command
+    trigger_offer_command_register_cli();
+    query_resolution_command_register_cli();
+    query_snapshot_command_register_cli();
+}
+
+static void register_cli_after_wake(void)
+{
+    esp_cli_register_cmds();
+    register_app_cli();
+}
 
 // Global configuration - keep same structure as before for IoT Core compatibility
 static kvs_signaling_config_t g_kvsSignalingConfig = {0};
@@ -92,44 +107,58 @@ static void app_webrtc_event_handler(app_webrtc_event_data_t *event_data, void *
 #if IS_VALID_SLAVE_CHIPSET
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "esp_efuse.h"
+#include "esp_efuse_table.h"
+#include "esp_heap_caps.h"
 
-#ifdef CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED
-static esp_netif_t *sta_netif = NULL;
 
-static esp_netif_t *create_slave_sta_netif(void)
+static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    /* Create "almost" default station, but with un-flagged DHCP client */
-    /* Use static to ensure the config persists after function returns */
-    static esp_netif_inherent_config_t netif_cfg;
-    memcpy(&netif_cfg, ESP_NETIF_BASE_DEFAULT_WIFI_STA, sizeof(netif_cfg));
+    esp_netif_t *netif = ((ip_event_got_ip_t *)data)->esp_netif;
+    esp_netif_dns_info_t dns = { 0 };
 
-    esp_netif_config_t cfg_sta = {
-        .base = &netif_cfg,
-        .stack = ESP_NETIF_NETSTACK_DEFAULT_WIFI_STA,
-    };
-    esp_netif_t *netif_sta = esp_netif_new(&cfg_sta);
-    ESP_LOGI(TAG, "Created netif_sta: %p (if_key: %s)", netif_sta, netif_cfg.if_key);
-    assert(netif_sta);
-
-    ESP_ERROR_CHECK(esp_netif_attach_wifi_station(netif_sta));
-    ESP_ERROR_CHECK(esp_wifi_set_default_wifi_sta_handlers());
-
-    return netif_sta;
+    /* One unanswered query fails a signaling call. DHCP's server first. */
+    if (esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns) != ESP_OK ||
+        dns.ip.u_addr.ip4.addr == 0) {
+        dns.ip.type = ESP_IPADDR_TYPE_V4;
+        dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(8, 8, 8, 8);
+        esp_netif_set_dns_info(netif, ESP_NETIF_DNS_BACKUP, &dns);
+    }
 }
-#endif
+
 
 static esp_err_t signaling_pre_wifi_init(void *ctx)
 {
-#ifdef CONFIG_ESP_HOSTED_NETWORK_SPLIT_ENABLED
-    /* Create and register the netif with "WIFI_STA_DEF" key */
-    sta_netif = create_slave_sta_netif();
-#endif
-    /* esp_netif_init and netif creation must be done before network_coprocessor_init */
-    esp_hosted_coprocessor_init();
+    /* esp_netif_init must be done before eh_cp_init() */
+    ESP_ERROR_CHECK(eh_cp_init());
+
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                              &on_got_ip, NULL));
+
+    /* Before anything can ask the CP to sleep. AUTO_INIT is off for this. */
+    power_save_init();
     vTaskDelay(pdMS_TO_TICKS(5000));
     return ESP_OK;
 }
 #endif /* IS_VALID_SLAVE_CHIPSET */
+
+
+#if CONFIG_EXAMPLE_MEMPROBE
+static void memprobe_task(void *arg)
+{
+    for (int i = 0; i < 20; i++) {
+        ESP_LOGW(TAG, "MEM t=%3ds int_free=%7u int_largest=%7u int_min=%7u "
+                 "dma_free=%7u psram_free=%8u", i * 15,
+                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned) heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        vTaskDelay(pdMS_TO_TICKS(15000));
+    }
+    vTaskDelete(NULL);
+}
+#endif /* CONFIG_EXAMPLE_MEMPROBE */
 
 void app_main(void)
 {
@@ -146,14 +175,41 @@ void app_main(void)
 
     ESP_LOGI(TAG, "ESP32 WebRTC Signaling-Only Example");
 
-    esp_cli_start();
-    wifi_register_cli(); // for wifi-set command
-    // power_save_register_cli();
-    trigger_offer_command_register_cli();
-    query_resolution_command_register_cli();
-    query_snapshot_command_register_cli();
+    /* ESP_EFUSE_TEMP and PSRAM_CAP are C5-only; the emulated CP is a C6. */
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_EXAMPLE_BOOT_DIAG
+    {
+        /* An unburned block also reads zero. MAC and wafer version share BLK1. */
+        uint8_t mac[6] = {0}, cap = 0, vendor = 0, pkg = 0, wmaj = 0, wmin = 0, blkv = 0;
+        esp_efuse_read_field_blob(ESP_EFUSE_MAC, mac, 48);
+        esp_efuse_read_field_blob(ESP_EFUSE_WAFER_VERSION_MAJOR, &wmaj, 2);
+        esp_efuse_read_field_blob(ESP_EFUSE_WAFER_VERSION_MINOR, &wmin, 4);
+        esp_efuse_read_field_blob(ESP_EFUSE_BLK_VERSION_MAJOR, &blkv, 2);
+        uint8_t fcap = 0, fvendor = 0, temp = 0;
+        esp_efuse_read_field_blob(ESP_EFUSE_FLASH_CAP, &fcap, 3);
+        esp_efuse_read_field_blob(ESP_EFUSE_FLASH_VENDOR, &fvendor, 3);
+        esp_efuse_read_field_blob(ESP_EFUSE_TEMP, &temp, 2);
+        esp_efuse_read_field_blob(ESP_EFUSE_PSRAM_CAP, &cap, 3);
+        esp_efuse_read_field_blob(ESP_EFUSE_PSRAM_VENDOR, &vendor, 2);
+        esp_efuse_read_field_blob(ESP_EFUSE_PKG_VERSION, &pkg, 3);
+        ESP_LOGW(TAG, "efuse BLK1 control: MAC=%02x:%02x:%02x:%02x:%02x:%02x "
+                 "wafer=v%u.%u blk_ver=%u pkg=%u",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], wmaj, wmin, blkv, pkg);
+        /* FLASH_CAP (77) sits beside PSRAM_CAP (83): a matching flash size
+         * proves this part of BLK1 is burned. */
+        ESP_LOGW(TAG, "efuse neighbours: FLASH_CAP=%u FLASH_VENDOR=%u TEMP=%u", fcap, fvendor, temp);
+        ESP_LOGW(TAG, "efuse PSRAM_CAP=%u PSRAM_VENDOR=%u", cap, vendor);
+    }
+#endif
 
-    // Initialize WiFi (with BLE provisioning if enabled)
+    esp_cli_start();
+#if CONFIG_EXAMPLE_MEMPROBE
+    xTaskCreate(memprobe_task, "memprobe", 3072, NULL, 1, NULL);
+#endif
+    register_app_cli();
+    host_ps_integration_set_cli_register_cb(register_cli_after_wake);
+
+    /* Whoever calls esp_wifi_init() second must pass the same WIFI_INIT_CONFIG,
+     * or eh_cp_feat_rpc_ext_v2 reinitialises the driver and drops the link. */
     app_wifi_prov_config_t net_cfg = APP_NETWORK_CONFIG_DEFAULT();
 #if IS_VALID_SLAVE_CHIPSET
     net_cfg.pre_wifi_init_cb = signaling_pre_wifi_init;
@@ -179,9 +235,10 @@ void app_main(void)
     esp_webrtc_time_sntp_time_sync_and_wait();
 
     /* Init early (before app_webrtc's 32 KB default) to keep this shared task
-     * small on the C6. Measured peak on the signaling path is ~4 KB. */
+     * small on the C6. Measured peak on the signaling path is ~4 KB; 6 KB
+     * leaves room for larger SDP or ICE messages and error-path logging. */
     esp_work_queue_config_t work_queue_config = ESP_WORK_QUEUE_CONFIG_DEFAULT();
-    work_queue_config.stack_size = 8 * 1024;
+    work_queue_config.stack_size = 6 * 1024;
     if (esp_work_queue_init_with_config(&work_queue_config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize work queue");
         return;
@@ -216,9 +273,7 @@ void app_main(void)
 
     // Register WebRTC event callback
     app_webrtc_register_event_callback(app_webrtc_event_handler, NULL);
-
-    /* Initialize power save handler (must be after esp_hosted_coprocessor_init) */
-    power_save_init();
+    power_save_register_webrtc_events();
 
     // Configure WebRTC with our new simplified API - signaling-only mode
     app_webrtc_config_t app_webrtc_config = APP_WEBRTC_CONFIG_DEFAULT();

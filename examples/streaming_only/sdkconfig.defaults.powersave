@@ -1,0 +1,11 @@
+# Host deep sleep, paired with co-processor light sleep.
+#
+# Add this file to SDKCONFIG_DEFAULTS after sdkconfig.defaults.esp32p4:
+#
+#   SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.powersave" \
+#       idf.py -B build_ps -DSDKCONFIG=build_ps/sdkconfig build
+#
+# The host parks after the idle timer expires. The co-processor keeps the Wi-Fi
+# link and enters light sleep. The co-processor wakes the host on GPIO 2.
+CONFIG_EXAMPLE_ENABLE_POWER_SAVE=y
+CONFIG_EXAMPLE_POWER_SAVE_DEFER_UNTIL_LINK_UP=y

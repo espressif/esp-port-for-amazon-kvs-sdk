@@ -18,6 +18,12 @@
 #if CONFIG_APP_NETWORK_PROV_BLE
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_ble.h"
+#if CONFIG_APP_BLE_RELEASE_AFTER_PROV
+#include "esp_bt.h"
+#endif
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL
+#include "esp_private/esp_modem_clock.h"
+#endif
 #endif
 
 static const char *TAG = "app_wifi_prov";
@@ -88,6 +94,10 @@ static esp_err_t start_provisioning(const app_wifi_prov_config_t *cfg)
     if (provisioned) {
         ESP_LOGI(TAG, "Device already provisioned, skipping BLE provisioning");
         network_prov_mgr_deinit();
+#if CONFIG_APP_BLE_RELEASE_AFTER_PROV
+        /* Provisioning is skipped, so release Bluetooth memory here. */
+        esp_bt_mem_release(ESP_BT_MODE_BTDM);
+#endif
         return ESP_OK;
     }
 
@@ -120,6 +130,12 @@ static esp_err_t start_provisioning(const app_wifi_prov_config_t *cfg)
      * internal semaphore that wait() blocks on, causing a deadlock. */
     network_prov_mgr_wait();
     network_prov_mgr_deinit();
+#if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL
+    /* BLE init keeps the main XTAL on through light sleep for its low-power clock. The C5
+     * BLE controller does not release it at deinit (the C6 one does), so every light sleep
+     * after provisioning would cost about 4-5 mA more. */
+    modem_clock_deselect_lp_clock_source(PERIPH_BT_MODULE);
+#endif
     ESP_LOGI(TAG, "BLE provisioning complete, resources released");
 
     /* Call post-provisioning callback (e.g. to deinit BT controller on coprocessor) */
@@ -207,6 +223,18 @@ esp_err_t app_wifi_prov_init(const app_wifi_prov_config_t *config)
         ESP_LOGE(TAG, "Failed to start WiFi: %s", esp_err_to_name(start_ret));
         return start_ret;
     }
+
+#if CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT
+    /* Under network split the host may start Wi-Fi over RPC before this point.
+     * Its STA_START came before the station config above, and before the handler
+     * was registered, so nothing has connected with that config. Connect here
+     * unless already associated. If a connect is in flight, the driver rejects
+     * this one and that one carries on. */
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+        esp_wifi_connect();
+    }
+#endif
 
     if (cfg.wifi_connect_timeout_ms > 0) {
         return app_wifi_prov_wait_for_connection(cfg.wifi_connect_timeout_ms);
