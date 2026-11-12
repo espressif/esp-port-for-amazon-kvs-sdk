@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Split-mode Wi-Fi init config:** the `streaming_only` board overlays send the
+  co-processor's own Wi-Fi init config: Enterprise support off, no cache TX buffers
+  on the C6 boards, and 10 static RX buffers on the P4X-C5 boards. The co-processor
+  no longer stops and re-initialises Wi-Fi at every host boot and wake. Regenerate
+  a saved `sdkconfig` to pick this up. The P4X-C5 core board's C5 has no PSRAM and
+  still differs on the TX buffer type, so it re-initialises Wi-Fi as before.
 - **Co-processor flash layout:** `network_adapter` puts its partition table at
   `0xC000` and `ota_0` at `0x20000` on every target, like `signaling_only` and the
   RainMaker split cameras. The P4-EYE and P4X-EYE overlays of `esp_camera`,

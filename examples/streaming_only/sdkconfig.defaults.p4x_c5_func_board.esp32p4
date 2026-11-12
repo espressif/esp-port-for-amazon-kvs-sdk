@@ -26,3 +26,8 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED=y
 CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
 CONFIG_ESP_HOSTED_P4X_C5_DEV_BOARD_FUNC_BOARD=y
 # CONFIG_SLAVE_FLASHER_ENABLE is not set
+
+# Match the C5's Wi-Fi init config. The co-processor compares the host's
+# esp_wifi_init() config with its own, and re-initialises Wi-Fi when they differ.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n

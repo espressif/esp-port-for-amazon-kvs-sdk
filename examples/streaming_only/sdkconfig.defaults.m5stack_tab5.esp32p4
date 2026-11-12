@@ -91,3 +91,9 @@ CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
 # BSP error checks on Tab5 until the BSP is fixed upstream.
 #
 CONFIG_BSP_ERROR_CHECK=y
+
+# Match the C6's Wi-Fi init config. The co-processor compares the host's
+# esp_wifi_init() config with its own, and re-initialises Wi-Fi when they differ.
+# The C6 has no PSRAM, so it has no cache TX buffers.
+CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=0
+CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n

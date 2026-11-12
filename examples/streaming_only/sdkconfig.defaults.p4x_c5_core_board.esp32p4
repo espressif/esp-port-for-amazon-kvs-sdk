@@ -37,3 +37,12 @@ CONFIG_ESP_HOSTED_P4_C5_CORE_BOARD=y
 # hosted up itself once flashing is done.
 #
 CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+
+# Match the C5's Wi-Fi init config. The co-processor compares the host's
+# esp_wifi_init() config with its own, and re-initialises Wi-Fi when they differ.
+# This board's C5 runs without PSRAM, so it has no cache TX buffers. It also uses
+# dynamic TX buffers, which the host cannot select while it allocates Wi-Fi and
+# lwIP buffers in PSRAM, so the TX buffer type still differs.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=0
+CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n

@@ -134,3 +134,9 @@ CONFIG_MEDIA_STREAM_PLAYER_TASK_PRIORITY=3
 
 # Hardware ECDSA verify (faster TLS handshake — significant for KVS bring-up).
 CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=y
+
+# Match the C6's Wi-Fi init config. The co-processor compares the host's
+# esp_wifi_init() config with its own, and re-initialises Wi-Fi when they differ.
+# The C6 has no PSRAM, so it has no cache TX buffers.
+CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=0
+CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n
