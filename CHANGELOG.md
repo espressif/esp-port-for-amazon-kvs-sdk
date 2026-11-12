@@ -7,6 +7,148 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc1] - 2026-11-23
+
+### Repository structure
+
+- Removed the `components/esp_hosted` submodule (esp-hosted-mcu 2.x). Every example
+  takes esp_hosted 3.x from the component registry. A clone made before this keeps
+  the old tree as an untracked directory. Remove it with
+  `rm -rf components/esp_hosted .git/modules/components/esp_hosted`.
+- Removed the `network_coprocessor` component. It wrapped the slave firmware of the
+  in-tree esp_hosted 2.x submodule, and no example uses it since `network_adapter`
+  and the split examples take esp_hosted 3.x from the component registry.
+- Migrated ESP-IDF port from the `beta-reference-esp-port` branch of
+  `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
+  repository. The upstream SDK is now a git submodule with platform patches
+  applied via `git am patches/*.patch`.
+- Moved the webrtc-c submodule to the `develop` commit of awslabs#2146: release
+  **1.20.0** plus these upstream changes:
+  - the relay candidate filter (awslabs#2388) and the TURN rejected-peer timeout
+    fix (awslabs#2387);
+  - the rtpmap payload-type fix for 32-bit platforms (awslabs#2405);
+  - mbedTLS: no cipher list on any build (awslabs#2409), the DTLS fingerprint through
+    `mbedtls_md()` (awslabs#2392) and the RNG from PSA on mbedTLS 4 (awslabs#2385);
+  - srflx candidates from a pre-resolved STUN address (awslabs#2410), one STUN transaction
+    ID per srflx candidate (awslabs#2435) and the STUN cache re-arm start time (awslabs#2407);
+  - RTX retransmissions with their own TWCC sequence number (awslabs#2418), and
+    `transceiverOnFrameDropped()` (awslabs#2438);
+  - `PREFER_DYNAMIC_ALLOCS` (awslabs#2146): the signaling payload, URL and JSON buffers and the
+    TURN channel-data buffer on the heap. It replaces that part of the local patch 0001.
+  - signaling clock skew correction on the WSS connect (awslabs#2422), and CMake 4 builds
+    (awslabs#2442);
+  - the `pSeenTransceivers` initialisation (awslabs#2415);
+  - negotiated data channels with an explicit stream id (awslabs#2399) and
+    `iceServersFinal` (awslabs#2400);
+  - signaling: `freeSignalingClient()` during a reconnect (awslabs#2401), the lws
+    service-loop wake after a send (awslabs#2417), and fetch, disconnect and delete
+    refused during a free (awslabs#2425). The ESP signaling port (`Signaling_esp.c`,
+    `LwsApiCalls_esp.c`) follows awslabs#2401 and awslabs#2425: it refuses a free from its own
+    tasks (the esp_websocket task, the work queue), and waits for queued message
+    jobs before it frees the client.
+  - For awslabs#2401's check, `GETTID()` now returns a per-thread id (the task handle on
+    chip, `pthread_self()` on the host). It was a constant, so every free while a
+    signaling thread ran was refused. A refused free now leaves the client and
+    everything it uses allocated, instead of freeing them under it.
+
+  1.20.0 includes the SDP-renegotiation flow (awslabs#2214) and opt-in mbedTLS 4
+  support (awslabs#2325). The local patch set is listed in `patches/README.md`.
+
+### Added
+
+- `CONFIG_KVS_WEBRTC_VIDEO_QUEUE_DEPTH` sets how many encoded video frames can
+  wait for the WebRTC sender (2–16, default 3). Raise it for sources whose sends
+  can stall for longer than depth / fps.
+- **Headless video player** (`CONFIG_MEDIA_STREAM_PLAYER_HEADLESS`): the receive
+  path decodes inbound H.264 without starting a display, and counts the decoded
+  frames. It lets the player run under ESP-EMU, which models no display
+  (`webrtc_classic/sdkconfig.ci.player_headless`). CI builds it on its own and in
+  the emulator chain.
+- **P4 core boards and the P4X-C5 Function EV Board:** board overlays for the ESP32-P4
+  core boards with a C5 or C6 co-processor, and for the ESP32-P4X-C5 Function EV Board.
+- **Host deep sleep with co-processor light sleep:** with `CONFIG_EXAMPLE_ENABLE_POWER_SAVE`,
+  the `streaming_only` host deep-sleeps when no viewer is connected. The `signaling_only`
+  co-processor stays in light sleep, holds the Wi-Fi link and the signaling session, and
+  wakes the host for an offer or for traffic addressed to it.
+- **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
+  with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
+  master.
+- **`linux_test` host example** — the SDK as a KVS master on the IDF linux target
+  (Linux and macOS hosts), streaming file-backed H.264 + Opus; `tests/linux_test_e2e`
+  checks what an aiortc viewer receives against the sample frames. Builds on IDF
+  5.5, 6.0, 6.1 and master.
+- **Raw-frame sink bus** — the capture loop is a pump: it publishes each camera
+  frame and moves on, and N consumers share the buffer by reference with a
+  per-sink queue depth, overflow policy and fps limit. The H.264 encoder is just
+  another sink. `VIDEO_RAW_MODE_CONVERTED` hands a consumer a PPA-scaled copy and
+  returns the camera buffer immediately. See `include/video_raw_sink.h`.
+- **Per-sink rate control** — one congestion controller per transport instead of
+  a process-wide singleton, arbitrated as the strict minimum over every enabled,
+  still-reporting controller. Transports report either send latency or upload-queue
+  occupancy; the encoder side moved to `video_rate_ctrl_priv.h`.
+- **`webrtc_person_detect` example** — esp-dl pedestrian detection, an LCD preview
+  and WebRTC, all three on one camera, each start/stoppable from the console.
+  ESP32-P4 only.
+- **`media_stream_caps.h`** — capability macros (esp_video capture, hardware H.264,
+  esp_image_effects, PPA) replacing raw `CONFIG_IDF_TARGET_*` tests at the capture
+  pipeline's guard sites.
+- **End-to-end streaming test** (`test_e2e/`) — drives real hardware against a real KVS
+  channel with an aiortc viewer, asserting the full `SIGNALING_CLIENT_STATE` walk in
+  order, that video RTP reaches the viewer (and audio, where the board has a codec),
+  that the selected ICE candidate pair is peer-to-peer rather than TURN-relayed, and
+  that the data channel opens and echoes.
+  Complements `test_app/`, which only covers pure functions. Opt-in via `--e2e`; device
+  credentials come from a gitignored `test_e2e/sdkconfig.creds`. See its README for the
+  measured baseline.
+
+  Split mode (P4 + C6) is covered too, as a single-DUT test: the C6's log is read off
+  the P4's console via the `[SLAVE]` prefix and its console is driven through the P4's
+  `write_slave` command, so a one-USB-port kit needs no ESP-Prog. It additionally
+  asserts the bridge offer handoff and that the adapter never drops a queued message.
+
+  The split pair also runs under ESP-EMU with no hardware (`--emu`): the full KVS path
+  from bring-up to a viewer's answer, and the capture path alone through
+  `streaming_only`'s `media-selftest` command. `apprtc_viewer.py` checks media without
+  AWS against `esp_camera` in a fixed AppRTC room. CI builds the e2e and emulator
+  overlay chains and collects the suite; it runs no test that needs hardware or AWS.
+
+- **File capture as a WebRTC source.** The file source publishes to the sink registry,
+  paced to the frame interval, and reads one packed file per medium
+  (`samples/video.pack`, `audio.pack`; `tools/pack_samples.py`) instead of one file per
+  frame. `streaming_only` selects audio and video sources independently.
+
+- **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
+  alongside v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
+  stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from
+  esp-protocols#1114). No `USE_LIBSRTP3` is required, and no webrtc-c patch: the
+  entropy-less RNG from PSA (awslabs#2385), the fingerprint through `mbedtls_md()`
+  (awslabs#2392) and signaling sending no OpenSSL-style cipher list on mbedTLS builds
+  (awslabs#2409) are upstream.
+
+- **SDP re-negotiation** — re-offer from the same peer re-uses an active
+  session or replaces a terminated one.
+- **BLE Wi-Fi provisioning** via the `network_provisioning` component in a
+  shared `app_common/app_wifi_prov` module. Supported on ESP32-S3, ESP32-C6,
+  and ESP32-P4 (BLE on C6 coprocessor through `esp_hosted`).
+- **Split-mode enhancements** — bridge command framework with protobuf
+  chunking, ICE server bridge for TURN credential sharing, light-sleep
+  integration, snapshot over the bridge with SPIRAM-preferred payloads.
+- **`simple_video_server` example** — standalone HTTP MJPEG / snapshot server
+  with no WebRTC dependency.
+- **Ring buffer peek API** — made public with peek support.
+- **Kconfig stack sizes and signaling init retry** with exponential backoff;
+  WebSocket stale-event guard and timeout race hardening.
+- **ESP Launchpad integration** for `esp_camera` on ESP32-S3 — one-click
+  browser flashing via GitHub Pages. `launchpad.toml` is generated with
+  `${{ github.repository_owner }}` so it auto-adapts to any fork.
+- **Media pipeline** — JPEG snapshot, YUV420 → RGB565 conversion, OV2710
+  sensor bring-up path.
+- **Camera interface selection** — `media_stream` can bring up MIPI-CSI, DVP,
+  SPI or USB-UVC cameras, chosen in menuconfig. BSP boards still go through
+  `bsp_camera_start()`.
+- **UVC H.264 passthrough** on ESP32-P4 — a UVC camera's own H.264 is sent
+  without re-encoding (`CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264`).
+
 ### Changed
 
 - **PROFILE logs:** the new `CONFIG_KVS_PROFILE_LOG` option prints the SDK's PROFILE
@@ -96,164 +238,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that scrolled past while every `kvs_*` component silently resolved elsewhere.
 - `slave_flasher`: missing or empty co-processor images fail at build time;
   configure and `menuconfig` work without them.
-
-### Repository structure
-
-- Removed the `components/esp_hosted` submodule (esp-hosted-mcu 2.x). Every example
-  takes esp_hosted 3.x from the component registry. A clone made before this keeps
-  the old tree as an untracked directory. Remove it with
-  `rm -rf components/esp_hosted .git/modules/components/esp_hosted`.
-- Removed the `network_coprocessor` component. It wrapped the slave firmware of the
-  in-tree esp_hosted 2.x submodule, and no example uses it since `network_adapter`
-  and the split examples take esp_hosted 3.x from the component registry.
-- Migrated ESP-IDF port from the `beta-reference-esp-port` branch of
-  `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
-  repository. The upstream SDK is now a git submodule with platform patches
-  applied via `git am patches/*.patch`.
-- Moved the webrtc-c submodule to the `develop` commit of awslabs#2146: release
-  **1.20.0** plus these upstream changes:
-  - the relay candidate filter (awslabs#2388) and the TURN rejected-peer timeout
-    fix (#2387);
-  - the rtpmap payload-type fix for 32-bit platforms (#2405);
-  - mbedTLS: no cipher list on any build (#2409), the DTLS fingerprint through
-    `mbedtls_md()` (#2392) and the RNG from PSA on mbedTLS 4 (#2385);
-  - srflx candidates from a pre-resolved STUN address (#2410), one STUN transaction
-    ID per srflx candidate (#2435) and the STUN cache re-arm start time (#2407);
-  - RTX retransmissions with their own TWCC sequence number (#2418), and
-    `transceiverOnFrameDropped()` (#2438);
-  - `PREFER_DYNAMIC_ALLOCS` (#2146): the signaling payload, URL and JSON buffers and the
-    TURN channel-data buffer on the heap. It replaces that part of the local patch 0001.
-  - signaling clock skew correction on the WSS connect (#2422), and CMake 4 builds
-    (#2442);
-  - the `pSeenTransceivers` initialisation (#2415);
-  - negotiated data channels with an explicit stream id (#2399) and
-    `iceServersFinal` (#2400);
-  - signaling: `freeSignalingClient()` during a reconnect (#2401), the lws
-    service-loop wake after a send (#2417), and fetch, disconnect and delete
-    refused during a free (#2425). The ESP signaling port (`Signaling_esp.c`,
-    `LwsApiCalls_esp.c`) follows #2401 and #2425: it refuses a free from its own
-    tasks (the esp_websocket task, the work queue), and waits for queued message
-    jobs before it frees the client.
-  - For #2401's check, `GETTID()` now returns a per-thread id (the task handle on
-    chip, `pthread_self()` on the host). It was a constant, so every free while a
-    signaling thread ran was refused. A refused free now leaves the client and
-    everything it uses allocated, instead of freeing them under it.
-
-  1.20.0 brought the SDP-renegotiation flow upstream (awslabs#2214), so the two
-  local patches for it are dropped, and opt-in mbedTLS 4 support (awslabs#2325).
-  #2392, #2385 and #2415 replace local patches 0005, 0004 and 0006. The current
-  patch set is listed in `patches/README.md`.
-
-### Added
-
-- `CONFIG_KVS_WEBRTC_VIDEO_QUEUE_DEPTH` sets how many encoded video frames can
-  wait for the WebRTC sender (2–16, default 3). Raise it for sources whose sends
-  can stall for longer than depth / fps.
-- **Headless video player** (`CONFIG_MEDIA_STREAM_PLAYER_HEADLESS`): the receive
-  path decodes inbound H.264 without starting a display, and counts the decoded
-  frames. It lets the player run under ESP-EMU, which models no display
-  (`webrtc_classic/sdkconfig.ci.player_headless`). CI builds it on its own and in
-  the emulator chain.
-- **P4 core boards and the P4X-C5 Function EV Board:** board overlays for the ESP32-P4
-  core boards with a C5 or C6 co-processor, and for the ESP32-P4X-C5 Function EV Board.
-- **Host deep sleep with co-processor light sleep:** with `CONFIG_EXAMPLE_ENABLE_POWER_SAVE`,
-  the `streaming_only` host deep-sleeps when no viewer is connected. The `signaling_only`
-  co-processor stays in light sleep, holds the Wi-Fi link and the signaling session, and
-  wakes the host for an offer or for traffic addressed to it.
-- **`esp_camera` on the IDF linux target** — the AppRTC example runs on a host
-  with sample frames in place of the camera. Builds on IDF 5.5, 6.0, 6.1 and
-  master.
-- **`linux_test` host example** — the SDK as a KVS master on the IDF linux target
-  (Linux and macOS hosts), streaming file-backed H.264 + Opus; `tests/linux_test_e2e`
-  checks what an aiortc viewer receives against the sample frames. Builds on IDF
-  5.5, 6.0, 6.1 and master.
-- **Raw-frame sink bus** — the capture loop is a pump: it publishes each camera
-  frame and moves on, and N consumers share the buffer by reference with a
-  per-sink queue depth, overflow policy and fps limit. The H.264 encoder is just
-  another sink. `VIDEO_RAW_MODE_CONVERTED` hands a consumer a PPA-scaled copy and
-  returns the camera buffer immediately. See `include/video_raw_sink.h`.
-- **Per-sink rate control** — one congestion controller per transport instead of
-  a process-wide singleton, arbitrated as the strict minimum over every enabled,
-  still-reporting controller. Transports report either send latency or upload-queue
-  occupancy; the encoder side moved to `video_rate_ctrl_priv.h`.
-- **`webrtc_person_detect` example** — esp-dl pedestrian detection, an LCD preview
-  and WebRTC, all three on one camera, each start/stoppable from the console.
-  ESP32-P4 only.
-- **`media_stream_caps.h`** — capability macros (esp_video capture, hardware H.264,
-  esp_image_effects, PPA) replacing raw `CONFIG_IDF_TARGET_*` tests at the capture
-  pipeline's guard sites.
-- **End-to-end streaming test** (`test_e2e/`) — drives real hardware against a real KVS
-  channel with an aiortc viewer, asserting the full `SIGNALING_CLIENT_STATE` walk in
-  order, that video RTP reaches the viewer (and audio, where the board has a codec),
-  that the selected ICE candidate pair is peer-to-peer rather than TURN-relayed, and
-  that the data channel opens and echoes.
-  Complements `test_app/`, which only covers pure functions. Opt-in via `--e2e`; device
-  credentials come from a gitignored `test_e2e/sdkconfig.creds`. See its README for the
-  measured baseline and the issues it already surfaced.
-
-  Split mode (P4 + C6) is covered too, as a single-DUT test: the C6's log is read off
-  the P4's console via the `[SLAVE]` prefix and its console is driven through the P4's
-  `write_slave` command, so a one-USB-port kit needs no ESP-Prog. It additionally
-  asserts the bridge offer handoff and that the adapter never drops a queued message.
-
-  The split pair also runs under ESP-EMU with no hardware (`--emu`): the full KVS path
-  from bring-up to a viewer's answer, and the capture path alone through
-  `streaming_only`'s `media-selftest` command. `apprtc_viewer.py` checks media without
-  AWS against `esp_camera` in a fixed AppRTC room. CI builds the e2e and emulator
-  overlay chains and collects the suite; it runs no test that needs hardware or AWS.
-
-- **File capture feeds WebRTC again.** The file source publishes to the sink registry,
-  paced to the frame interval, and reads one packed file per medium
-  (`samples/video.pack`, `audio.pack`; `tools/pack_samples.py`) instead of one file per
-  frame. `streaming_only` selects audio and video sources independently.
-
-- **ESP-IDF v6 support** — builds against IDF v6.0/v6.1 (mbedTLS 4 / TF-PSA-Crypto)
-  alongside v5.4/v5.5. The SDK crypto adapts to mbedTLS 4 through PSA, the port
-  stays on libsrtp 2.x (`>=2.8.0~1`, which carries the mbedTLS-4/PSA backend from
-  esp-protocols#1114). No `USE_LIBSRTP3` is required, and no webrtc-c patch: the
-  entropy-less RNG from PSA (awslabs#2385), the fingerprint through `mbedtls_md()`
-  (awslabs#2392) and signaling sending no OpenSSL-style cipher list on mbedTLS builds
-  (awslabs#2409) are upstream.
-
-- **SDP re-negotiation** — re-offer from the same peer re-uses an active
-  session or replaces a terminated one.
-- **BLE Wi-Fi provisioning** via the `network_provisioning` component in a
-  shared `app_common/app_wifi_prov` module. Supported on ESP32-S3, ESP32-C6,
-  and ESP32-P4 (BLE on C6 coprocessor through `esp_hosted`).
-- **Split-mode enhancements** — bridge command framework with protobuf
-  chunking, ICE server bridge for TURN credential sharing, light-sleep
-  integration, snapshot over the bridge with SPIRAM-preferred payloads.
-- **`simple_video_server` example** — standalone HTTP MJPEG / snapshot server
-  with no WebRTC dependency.
-- **Ring buffer peek API** — made public with peek support.
-- **Kconfig stack sizes and signaling init retry** with exponential backoff;
-  WebSocket stale-event guard and timeout race hardening.
-- **ESP Launchpad integration** for `esp_camera` on ESP32-S3 — one-click
-  browser flashing via GitHub Pages. `launchpad.toml` is generated with
-  `${{ github.repository_owner }}` so it auto-adapts to any fork.
-- **Media pipeline** — JPEG snapshot, YUV420 → RGB565 conversion, OV2710
-  sensor bring-up path.
-- **Camera interface selection** — `media_stream` can bring up MIPI-CSI, DVP,
-  SPI or USB-UVC cameras, chosen in menuconfig. BSP boards still go through
-  `bsp_camera_start()`.
-- **UVC H.264 passthrough** on ESP32-P4 — a UVC camera's own H.264 is sent
-  without re-encoding (`CONFIG_MEDIA_STREAM_UVC_PASSTHROUGH_H264`).
-
-### Changed
-
 - **`APP_WEBRTC_EVENT_SENT_ANSWER`** is raised once signaling has sent or
   buffered the answer, not before the send. A failed answer raises
   `APP_WEBRTC_EVENT_SIGNALING_ERROR` with the peer id instead. Apps that act on
   `SENT_ANSWER`, such as the power-save handler stopping its park timer, now see
   it only for an answer that goes out or will be re-sent. See `API_USAGE.md` for
   a buffered answer that never goes out.
-- Patch 0003 (`getpeername()` in `socketConnectionIsConnected`) is dropped.
-  The SDK's own check works on lwIP: an established socket gives `EISCONN`.
-  The patch could report a connect still in progress as connected. See
-  `patches/README.md`.
-- Patch 0001 no longer carries the libwebsockets callback and send-path rewrite
-  from awslabs#2134. Only the ws-off (`CONFIG_USE_ESP_WEBSOCKET_CLIENT=n`) path
-  used it; see `patches/README.md` for what replaced each part.
+- The ws-off (`CONFIG_USE_ESP_WEBSOCKET_CLIENT=n`) signaling path uses the upstream
+  libwebsockets callbacks and send path. See `patches/README.md`.
 - esp_camera: `join-room` leaves the current room first instead of failing with
   "Already connected"; a separate `disconnect` is no longer needed.
 - **Camera Kconfig renamed `CONFIG_EXAMPLE_*` → `CONFIG_MEDIA_STREAM_*`** under
@@ -355,13 +347,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The peer connection client's free then took the stats lock after freeing it.
 
   Terminate now completes instead of timing out after 45 s (about 15 s with
-  the network up, most of it the signaling disconnect timeout; !45 shortens it).
+  the network up, most of it the signaling disconnect timeout).
 
 ### CI and testing
 
-- GitHub Actions build matrix for ESP-IDF v5.4 (9 example/target combos) and
-  v5.5 (11 combos) using `espressif/idf` Docker containers.
-- GitLab CI configuration for internal builds.
+- GitHub Actions builds 13 example and target combinations on ESP-IDF v5.5 in
+  `espressif/idf` containers. It also runs the host unit tests and builds the
+  Linux-target examples (`linux_test`, `esp_camera`).
 - Unit-test infrastructure on the ESP-IDF Linux host target covering base64,
   CRC32, hex encoding, signaling serializer, and state machine.
 - Sphinx + Doxygen documentation build job.
@@ -379,8 +371,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Tracked for follow-up PRs:
 
-- Display / video-decode path for received video (`video_player_adapter.c`
-  is currently a stub).
-- First-class M5Stack Tab5 support (partial commits already on `main`).
 - Acoustic Echo Cancellation in the audio send path.
-- Consolidation of signaling implementations into `components/`.
+
+[Unreleased]: https://github.com/espressif/esp-port-for-amazon-kvs-sdk/compare/v1.0.0-rc1...HEAD
+[1.0.0-rc1]: https://github.com/espressif/esp-port-for-amazon-kvs-sdk/releases/tag/v1.0.0-rc1

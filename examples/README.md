@@ -10,6 +10,10 @@ Example applications demonstrating the simplified WebRTC API for ESP32 devices. 
 | **[esp_camera](esp_camera/README.md)** | Browser-compatible streaming | ESP32-CAM modules | No (AppRTC) | Testing, no AWS account |
 | **[streaming_only](streaming_only/README.md)** | Power-optimized media device | ESP32-P4 (split mode) | No (bridge) | High performance, power saving |
 | **[signaling_only](signaling_only/README.md)** | Always-on signaling device | ESP32-C6 (split mode) | Yes (KVS) | Power optimization, IoT |
+| **[network_adapter](network_adapter/README.md)** | Wi-Fi co-processor for the P4 | ESP32-C6/C5 (dual-chip classic) | No | Pairing with `webrtc_classic` on a P4 |
+| **[webrtc_person_detect](webrtc_person_detect/README.md)** | Person detection + LCD preview + WebRTC | ESP32-P4-EYE, ESP32-S3-EYE | Yes (KVS) | Running vision and streaming on one camera |
+| **[simple_video_server](simple_video_server/README.md)** | HTTP MJPEG stream and snapshots | ESP32-P4/S3 + camera | No | Local-network video, no WebRTC |
+| **[linux_test](linux_test/README.md)** | The SDK on a POSIX host | Linux / macOS (IDF linux target) | Yes (KVS) | Testing the signaling and media path without hardware |
 
 `webrtc_classic` and `esp_camera` are **classic mode** (signaling + streaming on one chip).
 `signaling_only` + `streaming_only` are the **split-mode pair** (C6 signals, P4 streams). See

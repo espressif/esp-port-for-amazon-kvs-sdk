@@ -74,7 +74,7 @@ stack size* + the libwebsockets component options), or add them to your
 
 ### Other options
 
-- `CONFIG_KVS_AUTO_APPLY_PATCHES` — Auto-apply webrtc-c platform patches at CMake configure time (default y). The hook is mirrored in `kvs_signaling/CMakeLists.txt` so builds that pull only this component (e.g. `signaling_only` on the C6) also trigger patch application. See the main repo [`README.md`](../../README.md) for opt-out.
+- `CONFIG_KVS_AUTO_APPLY_PATCHES` — Auto-apply webrtc-c platform patches at CMake configure time (default y). The hook is mirrored in `kvs_signaling/CMakeLists.txt` so builds that pull only this component (e.g. `signaling_only` on the C6) also trigger patch application. See the main repo [`README.md`](../../../README.md) for opt-out.
 
 ## Examples
 

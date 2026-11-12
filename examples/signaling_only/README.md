@@ -46,12 +46,17 @@ The C6 has no onboard UART — flash it via an **ESP-Prog** (wiring pinout in
 Wi-Fi (BLE) provisioning is documented in [app_common](../common_components/app_common/README.md#wifi-provisioning);
 `wifi-set <ssid> <password>` also works at runtime.
 
-**AWS KVS settings** (menuconfig → Example Configuration):
+**AWS KVS settings** (menuconfig → AWS Security Credentials). Set the channel and region:
+```
+AWS_KVS_CHANNEL_NAME    = "my-camera-channel"
+AWS_DEFAULT_REGION      = "us-east-1"
+```
+
+This example defaults to IoT Core certificates (`CONFIG_IOT_CORE_ENABLE_CREDENTIALS=y`).
+To use static keys instead, disable `IOT_CORE_ENABLE_CREDENTIALS` and set:
 ```
 AWS_ACCESS_KEY_ID       = "AKIA..."
 AWS_SECRET_ACCESS_KEY   = "your-secret-key"
-AWS_DEFAULT_REGION      = "us-east-1"
-AWS_KVS_CHANNEL         = "my-camera-channel"
 ```
 
 Once both are up: the C6 connects to KVS and waits for the bridge; when the P4 connects, the
@@ -67,7 +72,7 @@ The C6 console exposes commands that proxy to the streaming P4 over the bridge:
 | `query-resolution` | Query the camera resolution from the streaming device (P4) |
 | `query-snapshot [quality]` | Capture a JPEG snapshot from the P4 |
 | `trigger-offer` | Send a trigger-offer message to the P4 for a given peer |
-| `wake-up` | Wake the host (P4) from deep sleep |
+| `wake-up` | Wake the host (P4) from deep sleep. Registered by esp_hosted's co-processor CLI |
 
 ## How it works
 

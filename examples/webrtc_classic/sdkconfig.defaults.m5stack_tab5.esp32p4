@@ -6,9 +6,9 @@
 #   idf.py set-target esp32p4
 #   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.m5stack_tab5.esp32p4' build
 #
-# The on-board C6 must be flashed separately with the Tab5 slave firmware
-# (esp_hosted_mcu feature/tab5_slave_support, MR !272) via the J1 header —
-# there is no P4<->C6 UART on Tab5 for the in-app slave flasher.
+# The on-board C6 must be flashed separately via the J1 header with
+# network_adapter built with sdkconfig.defaults.m5stack_tab5_pair.esp32c6.
+# There is no P4<->C6 UART on Tab5 for the in-app slave flasher.
 #
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
@@ -24,7 +24,7 @@ CONFIG_BSP_BOARD_TYPE_SAMPLE_V12=n
 
 #
 # esp_hosted board select: Tab5 SDIO pinout for the on-board C6
-# (CLK12/CMD13/D0-3=11/10/9/8, RESET15). Host side merged via esp_hosted !247.
+# (CLK12/CMD13/D0-3=11/10/9/8, RESET15).
 #
 CONFIG_ESP32P4_TAB5_C6_BOARD=y
 

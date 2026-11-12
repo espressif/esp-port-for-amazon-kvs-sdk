@@ -5,6 +5,9 @@ ESP32-C6 co-processor runs the signaling side. This directory holds the **C6
 firmware images that the P4 flashes into the C6 in-system** — so you don't
 need to attach a separate cable/console to the C6.
 
+This applies to the P4 board overlays that enable it (`p4_eye`, `p4x_eye`,
+`p4x_c5_core_board`).
+
 ## How it's used
 
 When `CONFIG_SLAVE_FLASHER_ENABLE=y`, the `slave_flasher` component packs this
@@ -27,12 +30,18 @@ offsets. To embed the images in the app instead, set
 ## Where to build them from
 
 The C6 runs the [`signaling_only`](../../signaling_only/README.md) example.
-Build it for `esp32c6` and copy the three outputs here (the app image is named
-after the project, so rename it to `app.bin`):
+It holds the Wi-Fi and AWS settings, so set them in menuconfig before you build.
+Build it with the pair overlay that matches the P4 board and copy the three
+outputs here (the app image is named after the project, so rename it to
+`app.bin`):
 
 ```bash
 cd ../../signaling_only
-idf.py set-target esp32c6
+# p4_eye / p4x_eye:
+idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.p4_eye_pair.esp32c6' set-target esp32c6
+# p4x_c5_core_board instead:
+# idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c5;sdkconfig.defaults.p4x_c5_core_board.esp32c5' set-target esp32c5
+idf.py menuconfig         # Wi-Fi + AWS settings
 idf.py build
 
 DEST=../streaming_only/target-firmware

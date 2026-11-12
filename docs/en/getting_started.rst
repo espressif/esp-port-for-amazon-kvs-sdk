@@ -27,8 +27,8 @@ Clone the WebRTC SDK repository with all submodules:
 
 .. code-block:: bash
 
-   git clone --recursive <git url>
-   cd <cloned-dir>
+   git clone --recursive https://github.com/espressif/esp-port-for-amazon-kvs-sdk.git
+   cd esp-port-for-amazon-kvs-sdk
 
 If you've already cloned without ``--recursive``, update the submodules:
 
@@ -86,12 +86,12 @@ Set up your AWS credentials in the project configuration:
    cd examples/webrtc_classic
    idf.py menuconfig
 
-Navigate to "Example Configuration" and set:
+Navigate to "AWS Security Credentials". Disable "Enable AWS IoT Core credentials for authentication" (``IOT_CORE_ENABLE_CREDENTIALS``), then set:
 
 * AWS_ACCESS_KEY_ID
 * AWS_SECRET_ACCESS_KEY
 * AWS_DEFAULT_REGION
-* AWS_KVS_CHANNEL
+* AWS_KVS_CHANNEL_NAME
 
 Option B: IoT Core Credentials
 """"""""""""""""""""""""""""""
@@ -104,7 +104,7 @@ Enable IoT Core credentials in menuconfig and place your certificates in the app
 
       idf.py menuconfig
 
-   Navigate to "Example Configuration" → "Enable IoT Core Credentials"
+   Navigate to "AWS Security Credentials" → "Enable AWS IoT Core credentials for authentication"
 
 2. Place your certificates in the SPIFFS image directory:
 
@@ -128,7 +128,7 @@ For the best experience with ESP32 camera devices, use ESP RainMaker integration
 * **Optimized Memory Usage**: Credentials allocated from external RAM with proper cleanup
 * **Reduced Code Complexity**: No manual certificate handling required
 
-See the `kvs_webrtc_camera example <https://github.com/espressif/esp-rainmaker/tree/master/examples/kvs_webrtc_camera>`_ in the ESP RainMaker repository for complete implementation.
+See the `camera examples <https://github.com/espressif/esp-rainmaker/tree/master/examples/camera>`_ in the ESP RainMaker repository for complete implementation.
 
 The RainMaker integration features:
 
