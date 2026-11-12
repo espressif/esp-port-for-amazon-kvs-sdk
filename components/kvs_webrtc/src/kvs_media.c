@@ -20,6 +20,7 @@
  */
 
 #include <inttypes.h>
+#include "sdkconfig.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "kvs_media.h"
@@ -75,7 +76,7 @@ static struct {
 static volatile ATOMIC_BOOL g_sender_wait_for_idr = TRUE;
 static UINT32 g_sender_resync_skipped;
 
-#define KVS_VIDEO_SINK_QUEUE_DEPTH 3
+#define KVS_VIDEO_SINK_QUEUE_DEPTH CONFIG_KVS_WEBRTC_VIDEO_QUEUE_DEPTH
 
 /* One PSRAM block per queued frame: this header, then the encoded bytes. Owned by the
  * queue entry, then by the sender thread, which frees it after the send. */

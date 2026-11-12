@@ -47,6 +47,17 @@ menu "KVS WebRTC Configuration"
             Tls_mbedtls.c is used, which reads the CA certificates from
             KVS_CA_CERT_PATH; that file must then exist.
 
+    config KVS_WEBRTC_VIDEO_QUEUE_DEPTH
+        int "Video frames queued between the video source and the WebRTC sender"
+        range 2 16
+        default 3
+        help
+            When the queue is full, new frames are dropped until the next key
+            frame. Increase it if sends can stall for longer than depth / fps,
+            e.g. at high bitrates over Wi-Fi. Each slot holds one encoded frame
+            in PSRAM; while sends stall every slot can hold a key frame, so 16
+            slots can take several MB at 1080p.
+
     config KVS_WEBRTC_MEDIA_DIAG_LOG
         bool "Verbose media diagnostics (per-frame FPS/drop-reason + PTS logs)"
         default n
