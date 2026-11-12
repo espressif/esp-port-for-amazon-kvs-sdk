@@ -32,9 +32,11 @@ static const char *TAG = "power_save_handler";
 /* Idle deep-sleep timer timeout - device sleeps if no activity for this duration */
 #define IDLE_DEEP_SLEEP_TIMEOUT_MS (20 * 1000)
 /* Post-streaming deep-sleep timer timeout - shorter timeout after streaming stops */
-#define POST_STREAMING_DEEP_SLEEP_TIMEOUT_MS (10 * 1000)
+#define POST_STREAMING_DEEP_SLEEP_TIMEOUT_MS 1000
 /* Track active peer connection count - keep device active while any peer is connected */
 static uint32_t g_active_peer_connections = 0;
+/* Sessions between STREAMING_STARTED and STREAMING_STOPPED, connected or not. */
+static uint32_t g_live_sessions = 0;
 static portMUX_TYPE g_peer_connections_lock = portMUX_INITIALIZER_UNLOCKED;
 #if CONFIG_EXAMPLE_POWER_SAVE_DEFER_UNTIL_LINK_UP
 /* Set when the idle timer was asked for before the host held an IP. */
@@ -122,6 +124,16 @@ static uint32_t decrement_peer_connection(void)
 #endif
 
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_EXAMPLE_ENABLE_POWER_SAVE
+/* Arm the short post-streaming countdown once no session is left. The second
+ * only lets the last packets of the closing session drain. */
+static void start_post_stream_timer(void)
+{
+    hosted_recovery_pause();
+    if (esp_hosted_power_save_timer_start(POST_STREAMING_DEEP_SLEEP_TIMEOUT_MS) != 0) {
+        ESP_LOGE(TAG, "post-stream deep-sleep timer refused; the host will not sleep");
+    }
+}
+
 /**
  * @brief Power save event handler for WebRTC events
  */
@@ -136,6 +148,7 @@ static void power_save_event_handler(app_webrtc_event_data_t *event_data, void *
             /* Start idle timer when WebRTC is initialized */
             portENTER_CRITICAL(&g_peer_connections_lock);
             g_active_peer_connections = 0;
+            g_live_sessions = 0;
             portEXIT_CRITICAL(&g_peer_connections_lock);
             start_idle_timer("WebRTC initialized");
             break;
@@ -155,28 +168,57 @@ static void power_save_event_handler(app_webrtc_event_data_t *event_data, void *
             break;
 
         case APP_WEBRTC_EVENT_PEER_DISCONNECTED:
-            /* Peer disconnected - decrement count and start timer if no peers left */
+            /* STREAMING_STOPPED follows for this session and arms the timer
+             * once no session is left, so a viewer still connecting keeps the
+             * host up. */
             {
                 uint32_t count = decrement_peer_connection();
                 ESP_LOGI(TAG, "Peer disconnected: %s (active peers: %" PRIu32 ")",
                          event_data->peer_id ? event_data->peer_id : "unknown", count);
-                if (count == 0) {
-                    ESP_LOGI(TAG, "All peer connections closed, starting host power save timer");
-                    /* Give host few seconds, as it might still get some packets */
-                    hosted_recovery_pause();
-                    if (esp_hosted_power_save_timer_start(POST_STREAMING_DEEP_SLEEP_TIMEOUT_MS) != 0) {
-                        ESP_LOGE(TAG, "post-stream deep-sleep timer refused; the host will not sleep");
-                    }
-                } else {
-                    ESP_LOGI(TAG, "Other peers still connected (%" PRIu32 "), keeping timer stopped", count);
-                }
             }
             break;
 
         case APP_WEBRTC_EVENT_RECEIVED_OFFER:
-            ESP_LOGI(TAG, "Received offer, resetting host power save timer");
-            hosted_recovery_resume();
-            esp_hosted_power_save_timer_start(IDLE_DEEP_SLEEP_TIMEOUT_MS);
+            /* Replaces a 1 s post-stream countdown with the idle timeout, so the
+             * host stays up while this viewer negotiates; SENT_ANSWER stops it.
+             * If the offer then fails, the idle timeout still puts the host to
+             * sleep. Left alone while another session is live: that session
+             * keeps the host up, and its end arms the timer. */
+            {
+                portENTER_CRITICAL(&g_peer_connections_lock);
+                bool idle = g_live_sessions == 0 && g_active_peer_connections == 0;
+                portEXIT_CRITICAL(&g_peer_connections_lock);
+                hosted_recovery_resume();
+                if (idle) {
+                    ESP_LOGI(TAG, "Received offer, restarting host power save timer");
+                    esp_hosted_power_save_timer_start(IDLE_DEEP_SLEEP_TIMEOUT_MS);
+                }
+            }
+            break;
+
+        case APP_WEBRTC_EVENT_STREAMING_STARTED:
+            portENTER_CRITICAL(&g_peer_connections_lock);
+            g_live_sessions++;
+            portEXIT_CRITICAL(&g_peer_connections_lock);
+            break;
+
+        case APP_WEBRTC_EVENT_STREAMING_STOPPED:
+            /* Every session ends here, connected or not: a session that fails
+             * before it connects gets no PEER_DISCONNECTED. The timer stopped at
+             * SENT_ANSWER restarts once the last live session is gone, so
+             * another viewer still negotiating keeps the host up. */
+            {
+                portENTER_CRITICAL(&g_peer_connections_lock);
+                if (g_live_sessions > 0) {
+                    g_live_sessions--;
+                }
+                bool idle = g_live_sessions == 0 && g_active_peer_connections == 0;
+                portEXIT_CRITICAL(&g_peer_connections_lock);
+                if (idle) {
+                    ESP_LOGI(TAG, "Last session stopped, starting host power save timer");
+                    start_post_stream_timer();
+                }
+            }
             break;
 
         case APP_WEBRTC_EVENT_SENT_ANSWER:

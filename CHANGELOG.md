@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Split-mode host sleep:** `streaming_only` deep-sleeps the host 1 s after the last
+  session ends (was 10 s). A session that fails before it connects now starts the
+  timer too, so the host no longer stays awake until the next viewer. The boot idle
+  timer stays at 20 s. An offer that arrives while no session is live restarts the
+  20 s timer, so the host stays up while that viewer negotiates.
 - **`app_webrtc` events:** `APP_WEBRTC_EVENT_STREAMING_STARTED` and
   `APP_WEBRTC_EVENT_STREAMING_STOPPED` are raised once per session, as a pair. A
   re-offer on a live session raised `STREAMING_STARTED` again, and a session whose
