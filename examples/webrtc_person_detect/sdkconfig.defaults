@@ -149,6 +149,9 @@ CONFIG_FREERTOS_HZ=1000
 #
 # BLE Provisioning
 #
+# Standalone placement: the co-processor passes HCI up and this host runs the
+# BLE host stack.
+CONFIG_APP_BLE_VIA_HOSTED_ON_HOST=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_APP_NETWORK_PROV_BLE=y
@@ -169,12 +172,10 @@ CONFIG_WS_DYNAMIC_BUFFER=y
 CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
 #
-# esp_hosted: on P4 the GDMA can reach PSRAM through cache, so let the SDIO
-# transport buffer mempool allocate from DMA-capable SPIRAM first (falls back
-# to internal DMA RAM). Without this the internal-DMA-only alloc fails at boot
-# (sdio_mempool_create assert) — the P4 has little spare internal RAM.
+# ESP-Hosted: off by default. Targets with a native radio build single-chip.
+# The P4 defaults turn it on because the P4 has no radio of its own.
 #
-CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y
+CONFIG_ESP_HOSTED=n
 
 #
 # MDNS Memory Configuration

@@ -42,10 +42,9 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # Native Wi-Fi and BLE here: NimBLE is only for provisioning, which needs no BLE 5.
 CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
 
-# No co-processor. IDF turns Wi-Fi Remote on for every target, which enables esp_hosted,
-# whose constructor then starts an SDIO host at boot - on GPIO 19, the S3's USB D-, which
+# No co-processor: CONFIG_ESP_HOSTED=n comes from sdkconfig.defaults. With esp_hosted on,
+# its constructor would start an SDIO host at boot on GPIO 19, the S3's USB D-, which
 # kills the USB-Serial-JTAG console and leaves the board looking dead.
-CONFIG_ESP_HOSTED_ENABLED=n
 
 #
 # Pipeline sizing. The software encoder holds about 10 fps at QVGA; the rate ladder

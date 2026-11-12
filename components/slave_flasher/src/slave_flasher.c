@@ -288,8 +288,7 @@ esp_err_t flash_slave()
     }
 
 /* esp_hosted 3.x names the co-processor reset pin ESP_HOSTED_HOST_RESET_GPIO.
- * webrtc_person_detect still builds against the in-tree esp_hosted 2.x, which
- * names it ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE. */
+ * The in-tree esp_hosted 2.x submodule names it ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE. */
 #if defined(CONFIG_ESP_HOSTED_HOST_RESET_GPIO)
 #define SLAVE_RESET_GPIO CONFIG_ESP_HOSTED_HOST_RESET_GPIO
 #else
