@@ -77,7 +77,9 @@ typedef esp_err_t (*bridge_cmd_handler_t)(uint32_t cmd_id,
  * @brief Initialize the bridge command subsystem
  *
  * Registers a second esp_hosted custom callback for commands (msg_id 0x1001).
- * Must be called after webrtc_bridge_start().
+ * It does not depend on webrtc_bridge_start(). It is safe to call more than
+ * once: later calls return ESP_OK. On the co-processor,
+ * signaling_bridge_adapter calls it during app_webrtc_init().
  *
  * @return ESP_OK on success
  */

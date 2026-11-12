@@ -285,8 +285,8 @@ void app_main(void)
     // Peer connection interface - use bridge-only implementation
     app_webrtc_config.peer_connection_if = bridge_peer_connection_if_get();
 
-    // Initialize bridge command framework (must be before app_webrtc_init which
-    // registers internal handlers like GET_TIME via signaling_bridge_adapter_init)
+    // Initialize the bridge command framework. app_webrtc_init() also does this
+    // when signaling_bridge_adapter registers GET_TIME, so this call is optional.
     ret = bridge_cmd_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize bridge command framework: %s", esp_err_to_name(ret));

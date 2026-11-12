@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`signaling_only` bridge commands:** the signaling bridge adapter initialises
+  `bridge_cmd` itself. An app no longer has to call `bridge_cmd_init()` before
+  `app_webrtc_init()`.
 - **Split-mode Wi-Fi init config:** the `streaming_only` board overlays send the
   co-processor's own Wi-Fi init config: Enterprise support off, no cache TX buffers
   on the C6 boards, and 10 static RX buffers on the P4X-C5 boards. The co-processor
