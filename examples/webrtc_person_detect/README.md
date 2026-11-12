@@ -42,7 +42,8 @@ H.264 hardware and no PPA, so the same pipeline runs on the CPU instead.
 ## Build
 
 The P4-EYE overlay sets `CONFIG_SLAVE_FLASHER_ENABLE=y`, so the P4 programs the C6 in-system from a
-SPIFFS partition. The C6 images are **not in git** and the build refuses to configure without them:
+SPIFFS partition. The C6 images are **not in git**, and the build fails without them (if the C6 already
+runs `network_adapter`, turn the flasher off in menuconfig instead):
 
 ```bash
 cd examples/network_adapter
