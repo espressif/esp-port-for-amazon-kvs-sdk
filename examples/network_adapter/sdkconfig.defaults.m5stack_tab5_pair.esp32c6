@@ -18,6 +18,15 @@
 #
 
 #
+# Flash layout: the Tab5's C6 keeps the layout it already has (partition table
+# at 0x8000, first app at 0x10000), not the one the other co-processors use.
+# Only hosted OTA updates this C6. An OTA writes the app but not the partition
+# table, and the app reads its table at its compiled-in offset.
+#
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.tab5.esp32c6.csv"
+
+#
 # Board selector — Tab5-specific SDIO slave pinout for the on-board C6.
 #
 CONFIG_ESP32P4_TAB5_C6_BOARD=y
