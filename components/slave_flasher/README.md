@@ -42,6 +42,11 @@ Build those three images from the co-processor firmware — `network_adapter` fo
 a plain network co-processor, or `signaling_only` for the split-mode signaling
 C6 — and stage them per the `target-firmware/README.md` in the example.
 
+Configure and `menuconfig` work without the images. If the co-processor is
+already programmed, turn `CONFIG_SLAVE_FLASHER_ENABLE` off. To enable the
+flasher again, re-run `set-target` with the board overlay; menuconfig would use
+the Kconfig default addresses and pins.
+
 ## Configuration (`idf.py menuconfig` → *Slave Flasher Configuration*)
 
 | Option | Default | Meaning |

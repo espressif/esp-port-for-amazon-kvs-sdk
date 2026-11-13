@@ -40,9 +40,9 @@
 
 #ifdef CONFIG_SLAVE_FLASHER_ENABLE
 #include "slave_flasher.h"
-#if !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
-#include "esp_hosted.h"
 #endif
+#if CONFIG_ESP_HOSTED && !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
+#include "esp_hosted.h"
 #endif
 
 static const char *TAG = "esp_webrtc_camera";
@@ -246,14 +246,14 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to flash slave co-processor: %s", esp_err_to_name(ret));
         return;
     }
+#endif
 
-#if !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
+#if CONFIG_ESP_HOSTED && !CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN
     /* hosted's auto-init is a constructor, so it would enumerate the CP while
      * flash_slave() still holds it in ROM download mode, and give up after four
      * tries. Boards that flash their own CP bring hosted up here instead. */
     ESP_ERROR_CHECK(esp_hosted_init());
     ESP_ERROR_CHECK(esp_hosted_connect_to_slave());
-#endif
 #endif
 
     esp_cli_start();
