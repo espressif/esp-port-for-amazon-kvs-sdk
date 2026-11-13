@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CONFIG_KVS_WEBRTC_VIDEO_QUEUE_DEPTH` sets how many encoded video frames can
+  wait for the WebRTC sender (2–16, default 3). Raise it for sources whose sends
+  can stall for longer than depth / fps.
 - **Headless video player** (`CONFIG_MEDIA_STREAM_PLAYER_HEADLESS`): the receive
   path decodes inbound H.264 without starting a display, and counts the decoded
   frames. It lets the player run under ESP-EMU, which models no display
