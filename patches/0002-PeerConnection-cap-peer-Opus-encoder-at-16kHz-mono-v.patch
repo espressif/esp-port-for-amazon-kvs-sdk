@@ -1,7 +1,7 @@
-From 238b89f4a41b230ca3b2b5a92d069a84a12dc50e Mon Sep 17 00:00:00 2001
+From f828b1f2b9cb41ac5421eb0dfaea907a84a2cca7 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Fri, 15 May 2026 20:16:15 +0530
-Subject: [PATCH 2/3] PeerConnection: cap peer Opus encoder at 16kHz mono via
+Subject: [PATCH 2/4] PeerConnection: cap peer Opus encoder at 16kHz mono via
  DEFAULT_OPUS_FMTP
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

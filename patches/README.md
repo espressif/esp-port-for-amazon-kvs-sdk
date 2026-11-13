@@ -26,7 +26,7 @@ cd ..
 
 ## Patch ledger
 
-Base: upstream `develop` at **awslabs#2429** (docs). Since 1.20.0 it adds, among
+Base: upstream `develop` at **awslabs#2146** (`18ec3b1`). Since 1.20.0 it adds, among
 others:
 
 - awslabs#2399: negotiated data channels with an explicit stream id;
@@ -34,11 +34,17 @@ others:
 - #2401: freeing the signaling client during a reconnect;
 - #2417: the lws service-loop wake after a send;
 - #2425: fetch, disconnect and delete refused while a free runs, and messages received
-  during a free dropped.
+  during a free dropped;
+- #2422: clock skew correction on the WSS connect, and a retry of re-signable rejections;
+- #2418: RTX retransmissions with their own TWCC sequence number;
+- #2407: the STUN cache re-arm start time; #2435: one STUN transaction ID per srflx candidate;
+- #2438: `transceiverOnFrameDropped()`; #2442: CMake 4 builds;
+- #2146: `PREFER_DYNAMIC_ALLOCS`, which heap-allocates the signaling payload, URL and JSON
+  buffers and the TURN channel-data buffer.
 
-All three patches apply cleanly against this base (`git am`, no fuzz). 0001's
+All four patches apply cleanly against this base (`git am`, no fuzz). 0001's
 `LwsApiCalls.c` part sits on top of #2401's reconnect and receive-worker code and #2425's
-message drop. The SDP-renegotiation patches were dropped earlier (that flow is upstream
+message drop. 0001's dynamic-allocation part is upstream as #2146, so it is dropped. The SDP-renegotiation patches were dropped earlier (that flow is upstream
 as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392 and 0004 as
 awslabs#2385, so both are dropped. 0003 was dropped as unnecessary; see its note.
 An earlier 0006, the `pSeenTransceivers` fix, is upstream as awslabs#2415. The
@@ -47,7 +53,7 @@ are unchanged.
 
 | # | Patch | Category | Upstream PR / status |
 |---|-------|----------|----------------------|
-| 0001 | ESP-IDF platform adaptations + robustness, including the `PREFER_DYNAMIC_ALLOCS` / dynamic-signaling-payload work (heap-allocate the payload in `parseSignalingMessage`) and the IceAgent `turnChannelData` heap-allocation | mixed | partial: [awslabs#2146](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2146) for the dynamic-allocs portion |
+| 0001 | ESP-IDF platform adaptations + robustness | ESP-specific | n/a; the dynamic-allocation part is upstream as [awslabs#2146](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2146) and dropped |
 | 0002 | PeerConnection: cap peer Opus encoder at 16kHz mono via `DEFAULT_OPUS_FMTP` | ESP-specific | n/a; narrow-Opus negotiation keeps decode under the 20 ms frame budget on P4 |
 | ~~0003~~ | Ice: accept already-connected TCP in `socketConnectionIsConnected` via `getpeername` | n/a | **dropped**: not needed; upstream's check works on lwIP (see note) |
 | ~~0004~~ | Crypto: take the RNG from PSA when mbedTLS has no entropy module (ESP-IDF 6 / TF-PSA-Crypto builds) | aligned | **upstream** as [awslabs#2385](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2385); dropped |
@@ -63,21 +69,19 @@ are unchanged.
 
 ### Notes per patch
 
-**0001: ESP-IDF platform adaptations + robustness.** The largest patch, mixing
-two kinds of changes:
+**0001: ESP-IDF platform adaptations + robustness.** The largest patch.
 
-  - **Aligned-with-upstream:** the `PREFER_DYNAMIC_ALLOCS` /
-    `DYNAMIC_SIGNALING_PAYLOAD` / `USE_DYNAMIC_URL` paths replace huge static
-    arrays in the signaling payload and TURN URL fields with optional dynamic
-    allocation. This is the same idea as **awslabs#2146** ("Option to use
-    dynamic allocations over huge static arrays: limits memory utilization").
-    When #2146 lands upstream, this portion is split out and removed.
+  - **Upstream now:** its `PREFER_DYNAMIC_ALLOCS` part (dynamic signaling payload,
+    URL and JSON buffers, and the TURN channel-data buffer) is upstream as
+    **awslabs#2146** and is dropped from 0001. Upstream gates the TURN buffer on
+    `PREFER_DYNAMIC_ALLOCS`, which every KVS build sets (`CONFIG_PREFER_DYNAMIC_ALLOCS`
+    defaults to `y`). `USE_DYNAMIC_URL` is now defined only by `kvs_utils`.
   - **ESP-IDF-specific (stays):** ConnectionListener custom thread for
     constrained-stack platforms, mbedtls-3.x compatibility shims, robustness
     fixes in `SocketConnection.c` and `Sctp.c`, and in `LwsApiCalls.c` the
     reconnect/receive thread stacks (on top of #2401's `startReconnectHandler()`
-    and counted receive workers), the payload free on every receive-wrapper
-    free, and the longer API-call timeouts and TCP keepalive.
+    and counted receive workers), the longer API-call timeouts and TCP keepalive,
+    a length-bounded debug log of sent messages, and a one-thread signaling threadpool.
 
 > **lws callback rewrite removed.** 0001 used to carry the libwebsockets callback
 > and send-path changes of awslabs#2134 (partial HTTP body writes, a ping timer,

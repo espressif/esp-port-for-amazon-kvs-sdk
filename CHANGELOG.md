@@ -38,14 +38,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `awslabs/amazon-kinesis-video-streams-webrtc-sdk-c` into this standalone
   repository. The upstream SDK is now a git submodule with platform patches
   applied via `git am patches/*.patch`.
-- Moved the webrtc-c submodule to the `develop` commit of awslabs#2429: release
+- Moved the webrtc-c submodule to the `develop` commit of awslabs#2146: release
   **1.20.0** plus these upstream changes:
   - the relay candidate filter (awslabs#2388) and the TURN rejected-peer timeout
     fix (#2387);
   - the rtpmap payload-type fix for 32-bit platforms (#2405);
   - mbedTLS: no cipher list on any build (#2409), the DTLS fingerprint through
     `mbedtls_md()` (#2392) and the RNG from PSA on mbedTLS 4 (#2385);
-  - srflx candidates from a pre-resolved STUN address (#2410);
+  - srflx candidates from a pre-resolved STUN address (#2410), one STUN transaction
+    ID per srflx candidate (#2435) and the STUN cache re-arm start time (#2407);
+  - RTX retransmissions with their own TWCC sequence number (#2418), and
+    `transceiverOnFrameDropped()` (#2438);
+  - `PREFER_DYNAMIC_ALLOCS` (#2146): the signaling payload, URL and JSON buffers and the
+    TURN channel-data buffer on the heap. It replaces that part of the local patch 0001.
+  - signaling clock skew correction on the WSS connect (#2422), and CMake 4 builds
+    (#2442);
   - the `pSeenTransceivers` initialisation (#2415);
   - negotiated data channels with an explicit stream id (#2399) and
     `iceServersFinal` (#2400);
