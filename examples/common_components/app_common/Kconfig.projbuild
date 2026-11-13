@@ -134,27 +134,31 @@ menu "App Common Configs (Wi-Fi, SD-Card, Camera)"
         # Pins are wired GPIO-IO-MUX on ESP32 and via the GPIO matrix
         # elsewhere. Targets without SDMMC (c5/c6) or without a defined
         # board pinout fall back to -1 ("unset") so kconfig stops
-        # warning about missing defaults. app_storage.c treats -1 as
-        # "SD card disabled".
+        # warning about missing defaults. With 4 lines chosen and D1-D3
+        # left at -1, app_storage.c falls back to 1 line.
+        #
+        # The S3 defaults are the ESP32-S3-EYE's slot (1-bit). GPIO 33-37 must not be used
+        # there: on modules with octal PSRAM they are the PSRAM bus, and claiming them for
+        # the card freezes a firmware that runs code from PSRAM on the spot.
 
         config EXAMPLE_PIN_CMD
             int "CMD GPIO number"
             default 15 if IDF_TARGET_ESP32
-            default 35 if IDF_TARGET_ESP32S3
+            default 38 if IDF_TARGET_ESP32S3
             default 44 if IDF_TARGET_ESP32P4
             default -1
 
         config EXAMPLE_PIN_CLK
             int "CLK GPIO number"
             default 14 if IDF_TARGET_ESP32
-            default 36 if IDF_TARGET_ESP32S3
+            default 39 if IDF_TARGET_ESP32S3
             default 43 if IDF_TARGET_ESP32P4
             default -1
 
         config EXAMPLE_PIN_D0
             int "D0 GPIO number"
             default 2  if IDF_TARGET_ESP32
-            default 37 if IDF_TARGET_ESP32S3
+            default 40 if IDF_TARGET_ESP32S3
             default 39 if IDF_TARGET_ESP32P4
             default -1
 
@@ -163,21 +167,18 @@ menu "App Common Configs (Wi-Fi, SD-Card, Camera)"
             config EXAMPLE_PIN_D1
                 int "D1 GPIO number"
                 default 4  if IDF_TARGET_ESP32
-                default 38 if IDF_TARGET_ESP32S3
                 default 40 if IDF_TARGET_ESP32P4
                 default -1
 
             config EXAMPLE_PIN_D2
                 int "D2 GPIO number"
                 default 12 if IDF_TARGET_ESP32
-                default 33 if IDF_TARGET_ESP32S3
                 default 41 if IDF_TARGET_ESP32P4
                 default -1
 
             config EXAMPLE_PIN_D3
                 int "D3 GPIO number"
                 default 13 if IDF_TARGET_ESP32
-                default 34 if IDF_TARGET_ESP32S3
                 default 42 if IDF_TARGET_ESP32P4
                 default -1
 

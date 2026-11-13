@@ -203,6 +203,15 @@ typedef struct kvs_pc_session_s {
 
     // Correlation ID counter for messages
     SIZE_T correlation_id_postfix;
+
+    // Held around handing a received frame to the player and around the player
+    // teardown, so a teardown can't free the player under a frame in flight.
+    MUTEX media_lock;
+
+    // A key-frame request from the player. The frame handler sends the PLI after it
+    // releases media_lock: the send waits for the ICE agent lock, which a teardown
+    // holds while it waits for media_lock.
+    volatile ATOMIC_BOOL pli_pending;
 } kvs_pc_session_t;
 
 #ifdef __cplusplus
