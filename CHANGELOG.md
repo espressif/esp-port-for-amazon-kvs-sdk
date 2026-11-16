@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the old layout it finds no NVS and aborts at every boot. Reflash the co-processor over
   UART once. The M5Stack Tab5's C6, which only hosted OTA can update, keeps the old
   layout.
+- **Co-processor PSRAM:** `network_adapter` enables PSRAM on the chips that support it
+  (ESP32, ESP32-S3, ESP32-C5, ESP32-C61), and Wi-Fi and lwIP allocate from it. On the
+  P4-C5 core board, BLE provisioning of a standalone example no longer reboots the C5.
+  With everything in internal RAM, about 16 KB was left while BLE advertised, and its
+  BLE controller asserted on the first large packet from the host. A module without
+  PSRAM still boots.
 - Session setup prints fewer lines at the default log level. The setup details
   (ICE servers, offer and answer, session count) print with
   `app_webrtc_set_log_level(3)`. The SDK PROFILE timings print at DEBUG under the
