@@ -623,6 +623,33 @@ cleanup:
     return ret;
 }
 
+/* Take one raw frame from the pipeline when it is running, straight from the camera when not. */
+static esp_err_t snapshot_capture_raw_frame(bool encoder_running, uint8_t *buf, size_t buf_size,
+                                            size_t *len, uint16_t *width, uint16_t *height,
+                                            uint32_t timeout_ms)
+{
+    if (!encoder_running) {
+        ESP_LOGI(TAG, "Snapshot: directly grabbing frame from camera");
+        esp_err_t ret = esp32p4_snapshot_direct_grab(buf, buf_size, len, width, height, timeout_ms);
+        if (ret != ESP_ERR_INVALID_STATE) {
+            return ret;
+        }
+        if (!h264_encoder_is_running()) {
+            /* Refused with no session running: the capture pump did not park when the
+             * last session stopped, and may still be dequeuing. */
+            ESP_LOGE(TAG, "Snapshot: the capture pump is still busy from the last session");
+            return ret;
+        }
+        /* A session started after encoder_running was sampled, and two tasks must not
+         * dequeue from the camera. The buffer fits what the pipeline delivers: it was
+         * sized for the largest frame, or for the stream the session joined. */
+        ESP_LOGI(TAG, "Snapshot: stream started meanwhile");
+    }
+
+    ESP_LOGI(TAG, "Snapshot: intercepting frame from active encoder pipeline");
+    return esp32p4_snapshot_intercept_frame(buf, buf_size, len, width, height, timeout_ms);
+}
+
 /* Largest raw frame the capture layer delivers: 1920x1080 in a packed 4:2:2 format
  * (YUYV / UYVY, 2 bytes per pixel). A YUV420 frame of the same size is smaller. */
 #define SNAPSHOT_MAX_RAW_FRAME_SIZE (1920 * 1080 * 2)
@@ -667,19 +694,8 @@ esp_err_t video_capture_get_snapshot_scaled(uint8_t **jpeg_buf, size_t *jpeg_len
         return ESP_ERR_NO_MEM;
     }
 
-    if (encoder_running) {
-        /* Path 1: Encoder is running - intercept a frame from the pipeline */
-        ESP_LOGI(TAG, "Snapshot: intercepting frame from active encoder pipeline");
-        ret = esp32p4_snapshot_intercept_frame(raw_buf, raw_buf_size,
-                                               &raw_len, &width, &height,
-                                               timeout_ms);
-    } else {
-        /* Path 2: Encoder is NOT running - directly grab from camera */
-        ESP_LOGI(TAG, "Snapshot: directly grabbing frame from camera");
-        ret = esp32p4_snapshot_direct_grab(raw_buf, raw_buf_size,
-                                           &raw_len, &width, &height,
-                                           timeout_ms);
-    }
+    ret = snapshot_capture_raw_frame(encoder_running, raw_buf, raw_buf_size,
+                                     &raw_len, &width, &height, timeout_ms);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to capture raw frame for snapshot: %s", esp_err_to_name(ret));

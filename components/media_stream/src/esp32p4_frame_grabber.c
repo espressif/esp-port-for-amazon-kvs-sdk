@@ -40,6 +40,7 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <sys/lock.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -106,6 +107,12 @@ static uint32_t s_sps_len, s_pps_len;
  * buffer. esp32p4_frame_grabber_stop() waits for this before returning so that whoever
  * tears the capture buffers down next cannot unmap memory the task is still reading. */
 static volatile bool s_task_parked = true;
+
+/* Only one task may dequeue from the camera. Starting and parking the pump and the frames
+ * a direct-grab snapshot dequeues each run under this lock, so a session that starts during
+ * a grab waits the few frames the grab takes instead of dequeuing alongside it. The grab
+ * brings the camera up before it takes the lock, so the session never waits on that. */
+static _lock_t s_dequeue_lock;
 
 #if USE_ESP_VIDEO_IF
 /* Set by esp32p4_frame_grabber_stop(): did every sink give its frames back? Consulted by
@@ -468,6 +475,23 @@ void init_clock(void)
 static inline void init_chip(void) {}
 static inline void init_clock(void) {}
 #endif
+
+/* init_clock() pulses the CSI host and bridge, ISP and GDMA through reset, so it may only
+ * run before the camera first streams. Both the grabber's first init and a cold snapshot
+ * need it, and a session can start while a snapshot holds the camera, so the first caller
+ * runs it and every later one finds it done. */
+static void init_clock_once(void)
+{
+    static _lock_t s_clock_lock;
+    static bool s_clock_ready;
+
+    _lock_acquire(&s_clock_lock);
+    if (!s_clock_ready) {
+        init_clock();
+        s_clock_ready = true;
+    }
+    _lock_release(&s_clock_lock);
+}
 
 void esp32p4_frame_grabber_cleanup(void)
 {
@@ -1148,7 +1172,7 @@ static esp_err_t register_raw_sink(void)
  * one is a use-after-free that would surface as corrupted video rather than a crash. So the bus is
  * halted and drained first, exactly as esp32p4_frame_grabber_stop() does it.
  *
- * @return the result of esp_video_if_start(), or ESP_ERR_INVALID_STATE when a sink was still
+ * @return the result of esp_video_if_restart(), or ESP_ERR_INVALID_STATE when a sink was still
  *         holding a camera frame and the restart was skipped rather than risked. The bus is
  *         resumed either way, so a failed restart leaves the pipeline idle rather than wedged,
  *         and an INVALID_STATE one leaves it streaming exactly as it was.
@@ -1166,8 +1190,9 @@ static esp_err_t uvc_restart_stream(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_video_if_stop();
-    esp_err_t err = esp_video_if_start();
+    /* Not stop() + start(): with another consumer holding the camera that pair only moves
+     * the hold count down and up again and reports success without a STREAMOFF. */
+    esp_err_t err = esp_video_if_restart();
     if (err == ESP_OK) {
         err = register_raw_sink();
     }
@@ -1415,7 +1440,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
     }
 
     init_chip();
-    init_clock();
+    init_clock_once();
 
 #if H264_ENCODE
     /* Set once the encoder is up, so a failure after that takes it down again. */
@@ -1691,13 +1716,32 @@ esp_err_t esp32p4_frame_grabber_start(void)
 #endif
 
 #if USE_ESP_VIDEO_IF
+    /* A camera this grabber kept holding across the stop may have stopped delivering
+     * meanwhile, and a session started on it would get nothing. Restarting is safe here
+     * the way uvc_restart_stream() makes it safe: the pump is parked, the bus still halted
+     * from stop(), and every sink gave its frames back. */
+    _lock_acquire(&s_dequeue_lock);
+    if (s_cam_held && s_drain_clean && s_task_parked && esp_video_if_is_stalled()) {
+        ESP_LOGW(TAG, "camera stopped delivering while held; restarting it");
+        esp_err_t err = esp_video_if_restart();
+        if (err == ESP_OK) {
+            err = register_raw_sink();
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "camera restart failed: %s", esp_err_to_name(err));
+        }
+    }
+    _lock_release(&s_dequeue_lock);
+
     /* Clears the halt a previous stop() left in place, so blocking sinks wait normally
      * again instead of failing fast. */
     video_raw_bus_resume();
 #endif
 
+    _lock_acquire(&s_dequeue_lock);
     s_p4_enc_data.running = true;
     xSemaphoreGive(s_p4_enc_data.run_semaphore);  // Signal the pump to start
+    _lock_release(&s_dequeue_lock);
     ESP_LOGD(TAG, "ESP32P4 frame grabber started");
 
     return ESP_OK;
@@ -1715,6 +1759,9 @@ esp_err_t esp32p4_frame_grabber_stop(void)
         return ESP_OK;
     }
 
+    /* Held until the pump has parked: a direct-grab snapshot that saw running == false any
+     * sooner would dequeue alongside the pump's last DQBUF. */
+    _lock_acquire(&s_dequeue_lock);
     s_p4_enc_data.running = false;
 
 #if USE_ESP_VIDEO_IF
@@ -1737,9 +1784,11 @@ esp_err_t esp32p4_frame_grabber_stop(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (!s_task_parked) {
+        /* A direct grab checks s_task_parked too, so it still cannot dequeue alongside it. */
         ESP_LOGW(TAG, "capture pump did not park within %d ms; capture buffers stay mapped",
                  park_timeout_ms);
     }
+    _lock_release(&s_dequeue_lock);
 
 #if USE_ESP_VIDEO_IF
     /* Parking the pump only guarantees no NEW frame is published. Sinks may still hold
@@ -1842,6 +1891,16 @@ esp_err_t video_capture_request_keyframe(void)
 }
 
 #if USE_ESP_VIDEO_IF
+/* One intercept request at a time: s_snapshot and the snapshot sink describe a single
+ * request, and a second one filling them in would have the first request's frame copied
+ * into its buffer. A second caller waits for the first to finish. */
+static _lock_t s_snapshot_lock;
+
+static esp_err_t intercept_frame_locked(uint8_t *buf, size_t buf_size,
+                                        size_t *len, uint16_t *width,
+                                        uint16_t *height,
+                                        uint32_t timeout_ms);
+
 /**
  * Intercept the next raw frame from the capture pump.
  * The caller provides a pre-allocated buffer. The pump copies the next
@@ -1863,6 +1922,17 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
         return ESP_ERR_INVALID_ARG;
     }
 
+    _lock_acquire(&s_snapshot_lock);
+    const esp_err_t ret = intercept_frame_locked(buf, buf_size, len, width, height, timeout_ms);
+    _lock_release(&s_snapshot_lock);
+    return ret;
+}
+
+static esp_err_t intercept_frame_locked(uint8_t *buf, size_t buf_size,
+                                        size_t *len, uint16_t *width,
+                                        uint16_t *height,
+                                        uint32_t timeout_ms)
+{
     if (!s_p4_enc_data.running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1948,43 +2018,18 @@ static esp_err_t copy_one_raw_frame(uint8_t *buf, size_t buf_size, size_t *len,
     return ret;
 }
 
-/**
- * Directly grab a raw frame from the camera when the capture pump is NOT running.
- *
- * The camera is held for the duration of the grab and released afterwards. If a live
- * stream starts meanwhile, esp_video_if's start/stop count keeps the camera on for it;
- * this grab only gives back its own hold.
- *
- * @param buf[out]        Pre-allocated buffer for the raw frame
- * @param buf_size        Size of the buffer
- * @param len[out]        Actual frame length
- * @param width[out]      Frame width
- * @param height[out]     Frame height
- * @param timeout_ms      Maximum wait time
- * @return ESP_OK on success, ESP_ERR_INVALID_SIZE when the frame is larger than the buffer
- */
-esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
-                                       size_t *len, uint16_t *width,
-                                       uint16_t *height,
-                                       uint32_t timeout_ms)
+/* Whether a direct grab may dequeue. With s_dequeue_lock held. A pump that did not park on
+ * the last stop() may still be dequeuing, so it counts as running. */
+static bool pump_idle_locked(void)
 {
-    if (!buf || !len || !width || !height || buf_size == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    return !s_p4_enc_data.running && s_task_parked;
+}
 
-    if (!s_p4_enc_data.encoder_initialized) {
-        /* Full initialization needed (chip, clock, video interface) */
-        init_chip();
-        init_clock();
-    }
-
-    /* Brings the camera up, or joins a stream another consumer already started. */
-    esp_err_t ret = esp_video_if_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init video interface for snapshot: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
+/* The grab itself. The caller holds the camera and s_dequeue_lock, and has checked
+ * pump_idle_locked(). */
+static esp_err_t direct_grab_locked(uint8_t *buf, size_t buf_size, size_t *len,
+                                    uint16_t *width, uint16_t *height)
+{
     /* Discard initial frames after STREAMON to let sensor/ISP settle
      * (exposure, white balance). Without this the first frame is often
      * noisy and produces an abnormally large JPEG. */
@@ -1997,7 +2042,63 @@ esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
     }
     ESP_LOGD(TAG, "Discarded %d warmup frames", warmup_frames);
 
-    ret = copy_one_raw_frame(buf, buf_size, len, width, height);
+    return copy_one_raw_frame(buf, buf_size, len, width, height);
+}
+
+/**
+ * Directly grab a raw frame from the camera when the capture pump is NOT running.
+ *
+ * The camera is held for the duration of the grab and released afterwards. A live stream
+ * that starts meanwhile waits for the grab to finish before its pump runs, and
+ * esp_video_if's start/stop count keeps the camera on for it; this grab only gives back
+ * its own hold.
+ *
+ * @param buf[out]        Pre-allocated buffer for the raw frame
+ * @param buf_size        Size of the buffer
+ * @param len[out]        Actual frame length
+ * @param width[out]      Frame width
+ * @param height[out]     Frame height
+ * @param timeout_ms      Maximum wait time
+ * @return ESP_OK on success, ESP_ERR_INVALID_SIZE when the frame is larger than the buffer,
+ *         ESP_ERR_INVALID_STATE when the pump is running (use esp32p4_snapshot_intercept_frame())
+ */
+esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
+                                       size_t *len, uint16_t *width,
+                                       uint16_t *height,
+                                       uint32_t timeout_ms)
+{
+    if (!buf || !len || !width || !height || buf_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* The caller chose this path before taking the lock; a session may have started since.
+     * Checked before the camera comes up, so a running session costs no bring-up. */
+    _lock_acquire(&s_dequeue_lock);
+    const bool idle = pump_idle_locked();
+    _lock_release(&s_dequeue_lock);
+    if (!idle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Brought up outside s_dequeue_lock: a cold bring-up can take seconds (a UVC camera
+     * waits for enumeration), and a session starting meanwhile must not wait behind it. */
+    if (!s_p4_enc_data.encoder_initialized) {
+        init_chip();
+        init_clock_once();
+    }
+    /* Brings the camera up, or joins a stream another consumer already started. */
+    esp_err_t ret = esp_video_if_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init video interface for snapshot: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* A session that started while the camera came up joined the same stream, and its
+     * pump now owns the dequeue. */
+    _lock_acquire(&s_dequeue_lock);
+    ret = pump_idle_locked() ? direct_grab_locked(buf, buf_size, len, width, height)
+                             : ESP_ERR_INVALID_STATE;
+    _lock_release(&s_dequeue_lock);
 
     /* Give the camera back; it stops only when no other consumer holds it. */
     esp_video_if_stop();

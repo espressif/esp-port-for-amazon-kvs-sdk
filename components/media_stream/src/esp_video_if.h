@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "H264FrameGrabber.h"
 #include "video_capture.h"
+#include <stdbool.h>
 #include <sys/time.h>
 
 /* Size of the V4L2 capture pool. Consumers that key a table off the buffer index
@@ -92,6 +93,34 @@ esp_err_t esp_video_if_deinit(void);
 esp_err_t esp_video_if_start(void);
 
 /**
+ * @brief Stop and restart the stream for every consumer holding the camera
+ *
+ * For settings the camera only reads at STREAMON. Unlike esp_video_if_stop()
+ * followed by esp_video_if_start(), this restarts the stream even when several
+ * consumers hold the camera, and leaves their holds untouched. On UVC the
+ * capture buffers are freed and reallocated, so no consumer may be holding a
+ * frame across the call.
+ *
+ * @return esp_err_t
+ *  - ESP_OK: Stream restarted
+ *  - ESP_ERR_INVALID_STATE: No consumer holds the camera
+ *  - Other: STREAMON failed; the camera is off, the holds remain and a later
+ *    restart or start turns it on again
+ */
+esp_err_t esp_video_if_restart(void);
+
+/**
+ * @brief Whether the camera is held but not delivering frames
+ *
+ * True when a consumer holds the camera and it is either off (a restart failed)
+ * or streaming with its last few dequeues all failed. Starting the camera joins
+ * a stalled stream like any other: only a holder that knows no other task is
+ * dequeuing (none blocked in DQBUF, no frame checked out) may restart it, with
+ * esp_video_if_restart(), since on UVC the restart frees the capture buffers.
+ */
+bool esp_video_if_is_stalled(void);
+
+/**
  * @brief Get a raw video frame
  *
  * @return video_fb_t* Pointer to the raw frame, or NULL if no frame is available
@@ -164,6 +193,7 @@ esp_err_t esp_video_if_set_desired_resolution(const video_resolution_t *resoluti
  * descriptor. After this, a subsequent esp_video_if_init/start cycle will
  * reallocate buffers.
  *
- * @return esp_err_t ESP_OK on success, otherwise an error code
+ * @return esp_err_t ESP_OK on success, ESP_ERR_INVALID_STATE while a consumer
+ *         still holds the camera (every start must be stopped first)
  */
 esp_err_t esp_video_if_cleanup(void);
