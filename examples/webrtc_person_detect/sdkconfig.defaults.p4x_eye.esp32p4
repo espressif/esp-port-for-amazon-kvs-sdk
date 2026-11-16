@@ -49,11 +49,6 @@ CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
 #
 # CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER is not set
 
-#
-# ST7789 SPI panel byte order. Without it the preview renders with red/blue swapped; the PPA
-# cannot do the swap for us (byte_swap acts on ARGB8888/RGB565 inputs, ours is YUV420).
-#
-CONFIG_LV_COLOR_16_SWAP=y
 
 #
 # esp-dl wants XIP-from-PSRAM. It also wants COMPILER_OPTIMIZATION_PERF and the 256KB/128B

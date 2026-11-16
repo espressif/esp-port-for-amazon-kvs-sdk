@@ -405,9 +405,11 @@ by default so builds that only send video stay lean.
    app_webrtc_config.video_player = video_player;
    ```
 
-3. Ensure the target has a display resolved by `bsp_selector` and LVGL. The
-   render backend calls `bsp_display_start()` and creates an LVGL canvas on
-   the active screen.
+3. Ensure the target has a display resolved by `bsp_selector` and LVGL 9
+   (media_stream requires `lvgl/lvgl ^9`). The render backend calls
+   `bsp_display_start()` and creates an RGB565 LVGL canvas on the active
+   screen. Panel byte order is the BSP's job: it sets esp_lvgl_port's
+   `swap_bytes` for big-endian panels such as the P4-EYE's ST7789.
 
 ### Without a display (headless)
 

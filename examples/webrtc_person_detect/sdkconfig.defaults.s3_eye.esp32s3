@@ -12,8 +12,9 @@ CONFIG_BSP_SELECT_ESP32_S3_EYE=y
 CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=40
 # CONFIG_BSP_LCD_DRAW_BUF_DOUBLE is not set
 
-# ST7789 SPI panel: MSB-first RGB565.
-CONFIG_LV_COLOR_16_SWAP=y
+# The ST7789's MSB-first byte order is set by the BSP (esp_lvgl_port swap_bytes).
+# LVGL 9's builtin heap is a static 64 KB pool in internal RAM; use the system heap.
+CONFIG_LV_USE_CLIB_MALLOC=y
 
 #
 # Camera: YUYV at QVGA, which the software H.264 encoder takes as-is. On DVP the sensor's

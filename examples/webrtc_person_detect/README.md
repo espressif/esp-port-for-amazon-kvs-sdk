@@ -247,5 +247,5 @@ the largest centred square instead, in the same pass, for free.
   but be aware YOLO11n runs ~2.5 s a frame on P4 at 640x640 — far too slow for a live pipeline.
 - Detection boxes are drawn as child LVGL objects over the canvas rather than into its pixel buffer,
   so a preview re-blit does not erase them and they only move when a detection does.
-- The panel wants MSB-first RGB565 (`CONFIG_LV_COLOR_16_SWAP=y`). The PPA cannot do that swap for a
-  YUV input, so it happens during the copy into the canvas.
+- The canvas holds native-endian RGB565. The P4-EYE panel wants MSB-first bytes; esp_lvgl_port swaps
+  them at flush because the BSP sets `swap_bytes` for that panel.

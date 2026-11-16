@@ -31,6 +31,7 @@
 #include "button_gpio.h"
 #include "bsp_err_check.h"
 #include "bsp/display.h"
+#include "src/display/lv_display_private.h"  /* lv_display_t.flushing for the flush-wait callback */
 
 #include "esp_cam_sensor_xclk.h"
 #include "esp_codec_dev_defaults.h"
@@ -116,7 +117,7 @@ static esp_cam_sensor_xclk_handle_t xclk_handle = NULL;
 
 static knob_handle_t knob = NULL;
 
-static lv_disp_t *disp = NULL;
+static lv_display_t *disp = NULL;
 
 static bool led_status = false;
 
@@ -724,7 +725,7 @@ esp_err_t bsp_display_del(void)
     return ESP_OK;
 }
 
-static lv_disp_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
+static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
 {
     assert(cfg != NULL);
     const bsp_display_config_t bsp_disp_cfg = {
@@ -754,13 +755,14 @@ static lv_disp_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
             .buff_dma = cfg->flags.buff_dma,
             .buff_spiram = cfg->flags.buff_spiram,
             .sw_rotate = true,
+            .swap_bytes = (BSP_LCD_BIGENDIAN ? true : false),
         }
     };
 
     return lvgl_port_add_disp(&disp_cfg);
 }
 
-lv_disp_t *bsp_display_start(void)
+lv_display_t *bsp_display_start(void)
 {
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = {
@@ -793,22 +795,25 @@ esp_err_t bsp_display_enter_sleep(void)
  * This board takes that path on every refresh: BSP_LCD_DRAW_BUFF_DOUBLE is 0 and
  * the draw buffer is full-screen, in PSRAM and not DMA-capable, so the flush is
  * slow enough for the spin to dominate.
+ *
+ * LVGL calls this once per flush and treats the flush as finished when it returns,
+ * so it must not return before esp_lvgl_port's transfer-done callback has called
+ * lv_display_flush_ready(): the single draw buffer would be redrawn mid-transfer.
  */
-static void bsp_display_lvgl_flush_wait_cb(lv_disp_drv_t *drv)
+static void bsp_display_lvgl_flush_wait_cb(lv_display_t *display)
 {
-    (void)drv;
-    vTaskDelay(1);
+    while (display->flushing) {
+        vTaskDelay(1);
+    }
 }
 
-lv_disp_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg)
+lv_display_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg)
 {
     assert(cfg != NULL);
     BSP_ERROR_CHECK_RETURN_NULL(lvgl_port_init(&cfg->lvgl_port_cfg));
     BSP_NULL_CHECK(disp = bsp_display_lcd_init(cfg), NULL);
 
-    if (disp->driver != NULL) {
-        disp->driver->wait_cb = bsp_display_lvgl_flush_wait_cb;
-    }
+    lv_display_set_flush_wait_cb(disp, bsp_display_lvgl_flush_wait_cb);
 
     return disp;
 }
@@ -818,9 +823,9 @@ lv_indev_t *bsp_display_get_input_dev(void)
     return NULL;
 }
 
-esp_err_t bsp_display_rotate(lv_disp_rot_t rotation)
+esp_err_t bsp_display_rotate(lv_display_rotation_t rotation)
 {
-    lv_disp_set_rotation(disp, rotation);
+    lv_display_set_rotation(disp, rotation);
     return ESP_OK;
 }
 

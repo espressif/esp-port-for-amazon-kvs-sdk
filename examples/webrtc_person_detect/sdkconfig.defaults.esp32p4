@@ -116,3 +116,7 @@ CONFIG_CAMERA_SC2336_MIPI_RAW8_1920x1080_30FPS=y
 # CONFIG_CAMERA_OV5647_AUTO_DETECT=y
 # CONFIG_CAMERA_OV5647_MIPI_RAW10_1920x1080_30FPS=y
 # CONFIG_CAMERA_OV5647_AUTO_DETECT_MIPI_INTERFACE_SENSOR=y
+
+# LVGL 9's builtin heap is a static 64 KB pool in internal RAM. Allocate from the system
+# heap instead, so LVGL takes only what the video canvas and its labels need.
+CONFIG_LV_USE_CLIB_MALLOC=y

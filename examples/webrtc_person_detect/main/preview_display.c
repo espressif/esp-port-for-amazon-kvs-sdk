@@ -30,7 +30,7 @@ static lv_obj_t  *s_canvas;
 static lv_obj_t  *s_boxes[PREVIEW_MAX_BOXES];
 static lv_obj_t  *s_label;
 static lv_obj_t  *s_stats;
-static lv_color_t *s_canvas_buf;
+static uint16_t   *s_canvas_buf;   /* RGB565, native little-endian */
 static uint16_t   s_w, s_h;
 static bool       s_stats_visible = true;
 
@@ -47,22 +47,12 @@ static uint32_t s_infer_last;         /* detect_results_t.inferences at the last
 static uint16_t s_lcd_dfps;           /* Display and detector rates, in tenths of a frame */
 static uint16_t s_det_dfps;           /* per second, so "4.3" survives a 5 fps target. */
 
-/* Copy the converted frame into the canvas.
- *
- * A straight memcpy would do if the panel took native-endian RGB565, but the ST7789 on P4-EYE wants
- * MSB-first, which LVGL expresses as LV_COLOR_16_SWAP. The PPA cannot help here - its byte_swap
- * acts on the INPUT picture and only for ARGB8888/RGB565 inputs, and ours is YUV420 - so the swap
- * rides along with the copy we are doing anyway. At 240x240 and 15 fps that is ~1.7 MB/s. */
+/* Copy the converted frame into the canvas. The canvas holds native-endian RGB565; a panel that
+ * wants MSB-first bytes (the ST7789 on P4-EYE) gets them from esp_lvgl_port at flush, via the BSP's
+ * swap_bytes flag. */
 static void blit_to_canvas(const uint16_t *src, size_t px)
 {
-#if CONFIG_LV_COLOR_16_SWAP
-    uint16_t *dst = (uint16_t *)s_canvas_buf;
-    for (size_t i = 0; i < px; i++) {
-        dst[i] = __builtin_bswap16(src[i]);
-    }
-#else
     memcpy(s_canvas_buf, src, px * sizeof(uint16_t));
-#endif
 }
 
 /* Reposition the box overlays from the latest detections.
@@ -96,7 +86,7 @@ static void update_boxes(void)
 
         lv_obj_set_pos(s_boxes[i], x, y);
         lv_obj_set_size(s_boxes[i], w, h);
-        lv_obj_clear_flag(s_boxes[i], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_boxes[i], LV_OBJ_FLAG_HIDDEN);
     }
     for (int i = n; i < PREVIEW_MAX_BOXES; i++) {
         lv_obj_add_flag(s_boxes[i], LV_OBJ_FLAG_HIDDEN);
@@ -179,26 +169,26 @@ static void on_preview_frame(const video_raw_frame_t *frame, void *user)
 
 static esp_err_t build_ui(void)
 {
-    lv_disp_t *disp = lv_disp_get_default();
+    lv_display_t *disp = lv_display_get_default();
     if (disp == NULL) {
         ESP_LOGE(TAG, "no LVGL display after bsp_display_start()");
         return ESP_FAIL;
     }
-    const lv_coord_t dw = lv_disp_get_hor_res(disp);
-    const lv_coord_t dh = lv_disp_get_ver_res(disp);
+    const int32_t dw = lv_display_get_horizontal_resolution(disp);
+    const int32_t dh = lv_display_get_vertical_resolution(disp);
 
     /* Square preview, as large as the panel allows: the camera frame is cropped to square by the
      * converter, so a non-square canvas would either letterbox or lie about the aspect. */
     s_w = s_h = (uint16_t)(dw < dh ? dw : dh);
 
-    s_canvas_buf = heap_caps_aligned_calloc(64, 1, (size_t)s_w * s_h * sizeof(lv_color_t),
+    s_canvas_buf = heap_caps_aligned_calloc(64, 1, (size_t)s_w * s_h * sizeof(uint16_t),
                                             MALLOC_CAP_SPIRAM);
     if (s_canvas_buf == NULL) {
         ESP_LOGE(TAG, "out of PSRAM for a %ux%u canvas", s_w, s_h);
         return ESP_ERR_NO_MEM;
     }
 
-    /* Our own screen rather than lv_scr_act(), so nothing else that brings up LVGL can restyle the
+    /* Our own screen rather than lv_screen_active(), so nothing else that brings up LVGL can restyle the
      * ground out from under the preview. */
     s_screen = lv_obj_create(NULL);
     lv_obj_remove_style_all(s_screen);
@@ -207,7 +197,7 @@ static esp_err_t build_ui(void)
 
     s_canvas = lv_canvas_create(s_screen);
     lv_obj_remove_style_all(s_canvas);
-    lv_canvas_set_buffer(s_canvas, s_canvas_buf, s_w, s_h, LV_IMG_CF_TRUE_COLOR);
+    lv_canvas_set_buffer(s_canvas, s_canvas_buf, s_w, s_h, LV_COLOR_FORMAT_RGB565);
     lv_obj_center(s_canvas);
 
     for (int i = 0; i < PREVIEW_MAX_BOXES; i++) {
@@ -217,7 +207,7 @@ static esp_err_t build_ui(void)
         lv_obj_set_style_border_color(s_boxes[i], lv_palette_main(LV_PALETTE_GREEN), 0);
         lv_obj_set_style_border_width(s_boxes[i], 2, 0);
         lv_obj_set_style_border_opa(s_boxes[i], LV_OPA_COVER, 0);
-        lv_obj_clear_flag(s_boxes[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(s_boxes[i], LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(s_boxes[i], LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -244,7 +234,7 @@ static esp_err_t build_ui(void)
         lv_obj_add_flag(s_stats, LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_scr_load(s_screen);
+    lv_screen_load(s_screen);
     return ESP_OK;
 }
 
@@ -256,7 +246,7 @@ esp_err_t preview_display_init(void)
 
     /* BSP owns panel bring-up: it knows the bus, the pins and the panel driver, and it starts the
      * LVGL port task. Backlight is off after this on P4-EYE, hence the explicit brightness. */
-    if (lv_disp_get_default() == NULL) {
+    if (lv_display_get_default() == NULL) {
         if (bsp_display_start() == NULL) {
             ESP_LOGE(TAG, "bsp_display_start() failed");
             return ESP_FAIL;
@@ -332,7 +322,7 @@ esp_err_t preview_display_show_stats(bool show)
         return ESP_ERR_TIMEOUT;
     }
     if (show) {
-        lv_obj_clear_flag(s_stats, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_stats, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_stats, LV_OBJ_FLAG_HIDDEN);
     }

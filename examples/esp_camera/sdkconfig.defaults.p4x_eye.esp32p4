@@ -62,14 +62,11 @@ CONFIG_MEDIA_STREAM_PLAYER_MAX_HEIGHT=240
 
 #
 # LVGL: relax refresh rate - canvas updates at ~6fps, no need for 33fps polling.
-# LV_COLOR_16_SWAP=y is required for the ST7789 SPI panel byte order on
-# P4-EYE (pairs with the manual swap_rgb565_bytes() in display_preview.c).
-# EV-board MIPI-DSI panels keep LV_COLOR_16_SWAP=n via their own overlay.
+# The ST7789 panel's byte order is set by the P4-EYE BSP (esp_lvgl_port swap_bytes).
 #
-CONFIG_LV_DISP_DEF_REFR_PERIOD=200
+CONFIG_LV_DEF_REFR_PERIOD=200
 CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP=100
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
-CONFIG_LV_COLOR_16_SWAP=y
 
 #
 # Slave flasher - host-side OTA path for the C6 over UART. P4-EYE ships

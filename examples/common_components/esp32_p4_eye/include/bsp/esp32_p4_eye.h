@@ -385,7 +385,7 @@ typedef struct {
  *
  * @return Pointer to LVGL display or NULL when error occurred
  */
-lv_disp_t *bsp_display_start(void);
+lv_display_t *bsp_display_start(void);
 
 /**
  * @brief Delete display
@@ -419,7 +419,7 @@ esp_err_t bsp_display_brightness_set(int brightness_percent);
  *
  * @return Pointer to LVGL display or NULL when error occurred
  */
-lv_disp_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg);
+lv_display_t *bsp_display_start_with_config(const bsp_display_cfg_t *cfg);
 
 /**
  * @brief Get pointer to input device (touch, buttons, ...)
@@ -438,7 +438,7 @@ lv_indev_t *bsp_display_get_input_dev(void);
  * @param[in] disp Pointer to LVGL display
  * @param[in] rotation Angle of the display rotation
  */
-esp_err_t bsp_display_rotate(lv_disp_rot_t rotation);
+esp_err_t bsp_display_rotate(lv_display_rotation_t rotation);
 
 /**
  * @brief Take LVGL mutex

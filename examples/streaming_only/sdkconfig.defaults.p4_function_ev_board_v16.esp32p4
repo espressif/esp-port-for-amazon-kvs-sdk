@@ -90,7 +90,7 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # LVGL: same relaxed refresh as P4-EYE plus generous WDT budget. Adjust
 # down if the bigger 800x1280 canvas becomes a refresh bottleneck.
 #
-CONFIG_LV_DISP_DEF_REFR_PERIOD=200
+CONFIG_LV_DEF_REFR_PERIOD=200
 CONFIG_BSP_DISPLAY_LVGL_MAX_SLEEP=100
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=15
 
