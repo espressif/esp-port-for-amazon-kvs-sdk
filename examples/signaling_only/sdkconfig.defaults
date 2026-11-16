@@ -171,3 +171,9 @@ CONFIG_ESP_HOSTED_CP_FEAT_PEER_DATA=y
 
 # app_main owns init ordering: the netif is created before eh_cp_init().
 CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+
+#
+# The co-processor stays up while the host sleeps. It refreshes the ICE server
+# config only when a session asks for it, not every few minutes.
+#
+CONFIG_KVS_ICE_CONFIG_PREFETCH=n

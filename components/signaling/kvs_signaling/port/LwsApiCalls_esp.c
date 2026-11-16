@@ -896,7 +896,7 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
     jsmntok_t* tokens = NULL;
     UINT32 tokenCount;
     UINT32 i, strLen;
-    BOOL parsedStatusResponse = FALSE, jsonInIceServerList = FALSE;
+    BOOL parsedStatusResponse = FALSE, jsonInIceServerList = FALSE, iceLocked = FALSE;
     CHAR messageTypeStr[MAX_SIGNALING_MESSAGE_TYPE_LEN + 1] = {0};
     UINT32 outLen;
     UINT32 decodedLen = 0;
@@ -1028,7 +1028,12 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
             CHK(tokens[i + 1].type == JSMN_ARRAY, STATUS_INVALID_API_CALL_RETURN_JSON);
             CHK(tokens[i + 1].size <= MAX_ICE_CONFIG_COUNT, STATUS_SIGNALING_MAX_ICE_CONFIG_COUNT);
 
-            // Zero the ice configs
+            // Zero the ice configs. Sessions copy them on other tasks, so hold the ICE config lock
+            // until the list is parsed.
+            if (!iceLocked) {
+                signalingIceConfigLock();
+                iceLocked = TRUE;
+            }
             MEMSET(&pSignalingClient->iceConfigs, 0x00, MAX_ICE_CONFIG_COUNT * SIZEOF(IceConfigInfo));
             pSignalingClient->iceConfigCount = 0;
             i++;
@@ -1070,6 +1075,11 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
                 i += pToken[1].size + 1;
             }
         }
+    }
+
+    if (iceLocked) {
+        signalingIceConfigUnlock();
+        iceLocked = FALSE;
     }
 
     // If message type is UNKNOWN after parsing, try to determine it from payload
@@ -1148,6 +1158,9 @@ STATUS handleReceivedSignalingMessage(PSignalingClient pSignalingClient, PCHAR m
     }
 
 CleanUp:
+    if (iceLocked) {
+        signalingIceConfigUnlock();
+    }
 
 #ifdef DYNAMIC_SIGNALING_PAYLOAD
     /* Only heap-allocated on this path; otherwise it points into pRecvMsg. */
@@ -2144,7 +2157,7 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     UINT32 i, strLen, resultLen, configCount = 0, tokenCount;
     INT32 j;
     UINT64 ttl;
-    BOOL jsonInIceServerList = FALSE;
+    BOOL jsonInIceServerList = FALSE, iceLocked = FALSE;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
@@ -2181,15 +2194,16 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     if (STATUS_FAILED(retStatus)) {
         ESP_LOGW(TAG, "Failed to get ice config, proceeding anyway...");
 
-        /* Set ICE config expiration to prevent immediate re-triggering of refresh.
-         * Use a 1-minute TTL to allow retry later, but avoid tight loop.
-         * STUN server fallback is handled elsewhere in the get_ice_servers code. */
-        UINT64 currentTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient);
-        UINT64 retryTtl = 1 * 60 * HUNDREDS_OF_NANOS_IN_A_SECOND; /* 1 minutes */
-        pSignalingClient->iceConfigExpiration = currentTime + retryTtl;
-
-        ESP_LOGI(TAG, "ICE config fetch failed - will retry after %" PRIu64 " seconds",
-                 retryTtl / HUNDREDS_OF_NANOS_IN_A_SECOND);
+        /* Keep a config that is still valid: a reconnect after a network timeout also
+         * fetches here, and its TURN credentials can have minutes left. Drop an expired
+         * config rather than extend it. Sessions use STUN until a fetch succeeds. The refresh
+         * task spaces its retries with its own backoff (iceFetchRetryTime, from
+         * KVS_ICE_FETCH_RETRY_MIN in kvs_signaling.c). */
+        signalingIceConfigLock();
+        if (SIGNALING_GET_CURRENT_TIME(pSignalingClient) > pSignalingClient->iceConfigExpiration) {
+            pSignalingClient->iceConfigCount = 0;
+        }
+        signalingIceConfigUnlock();
 
         // Store successful result
         ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
@@ -2212,6 +2226,9 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
+    // Sessions copy the config on other tasks: hold the ICE config lock while it changes
+    signalingIceConfigLock();
+    iceLocked = TRUE;
     MEMSET(&pSignalingClient->iceConfigs, 0x00, MAX_ICE_CONFIG_COUNT * SIZEOF(IceConfigInfo));
     pSignalingClient->iceConfigCount = 0;
 
@@ -2271,11 +2288,16 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     // Perform some validation on the ice configuration
     pSignalingClient->iceConfigCount = configCount;
     CHK_STATUS(validateIceConfiguration(pSignalingClient));
+    signalingIceConfigUnlock();
+    iceLocked = FALSE;
 
     // Store successful result
     ATOMIC_STORE(&pSignalingClient->result, (SIZE_T) SERVICE_CALL_RESULT_OK);
 
 CleanUp:
+    if (iceLocked) {
+        signalingIceConfigUnlock();
+    }
     SAFE_MEMFREE(tokens);
     if (STATUS_FAILED(retStatus)) {
         DLOGE("Call Failed with Status: 0x%08x", retStatus);
@@ -2998,6 +3020,7 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
     PCHAR buffer = NULL;
     PCHAR pMessageType;
     UINT64 curTime;
+    BOOL iceLocked = FALSE;
 
     CHK(pSignalingClient != NULL && pSignalingMessage != NULL, STATUS_NULL_ARG);
 
@@ -3038,7 +3061,12 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
 
     ESP_LOGD(TAG, "Sending signaling message: type=%s, recipient=%s", pMessageType, pSignalingMessage->peerClientId);
 
-    // In case of an Offer, package the ICE candidates only if we have a set of non-expired ICE configs
+    // In case of an Offer, package the ICE candidates only if we have a set of non-expired ICE configs.
+    // The refresh task can rewrite the config meanwhile, so hold the ICE config lock to encode it.
+    if (pSignalingMessage->messageType == SIGNALING_MESSAGE_TYPE_OFFER) {
+        signalingIceConfigLock();
+        iceLocked = TRUE;
+    }
     if (pSignalingMessage->messageType == SIGNALING_MESSAGE_TYPE_OFFER && pSignalingClient->iceConfigCount != 0 &&
         (curTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient)) <= pSignalingClient->iceConfigExpiration &&
         STATUS_SUCCEEDED(validateIceConfiguration(pSignalingClient))) {
@@ -3082,6 +3110,10 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
 
         // Closing the JSON array
         STRCPY(encodedIceConfig + iceConfigLen, SIGNALING_ICE_SERVER_LIST_TEMPLATE_END);
+    }
+    if (iceLocked) {
+        signalingIceConfigUnlock();
+        iceLocked = FALSE;
     }
 
     // Calculate the size needed for the buffer
@@ -3152,6 +3184,9 @@ STATUS sendEspSignalingMessage(PSignalingClient pSignalingClient, PSignalingMess
     CHK_STATUS(sendEspWebSocketMessage(pSignalingClient, buffer, bufferOffset));
 
 CleanUp:
+    if (iceLocked) {
+        signalingIceConfigUnlock();
+    }
     SAFE_MEMFREE(encodedUris);
     SAFE_MEMFREE(encodedIceConfig);
     // Free dynamically allocated buffer
