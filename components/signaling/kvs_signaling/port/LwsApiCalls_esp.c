@@ -706,6 +706,16 @@ static void esp_websocket_event_handler(void *handler_args, esp_event_base_t bas
                  * the RX buffer; only the chunk that reaches payload_len ends the message. */
                 BOOL lastChunk = data->fin &&
                                  (data->payload_offset + data->data_len >= data->payload_len);
+                /* Size the buffer for the whole message on its first chunk. An SDP offer
+                 * spans several chunks, and growing the buffer chunk by chunk holds the
+                 * old and the new block at once. The connect leaves an empty default-size
+                 * buffer, so an empty buffer that is too small is replaced as well. */
+                if (data->payload_offset == 0 && data->payload_len > data->data_len &&
+                        (gWebSocketDataBuffer == NULL ||
+                         (gWebSocketDataBuffer->currentSize == 0 &&
+                          gWebSocketDataBuffer->maxSize < (UINT32) data->payload_len))) {
+                    initWebSocketBuffer((UINT32) data->payload_len);
+                }
                 STATUS bufferStatus = appendToWebSocketBuffer(data->data_ptr, data->data_len, lastChunk);
 
                 // If buffer is complete, process it using work queue
