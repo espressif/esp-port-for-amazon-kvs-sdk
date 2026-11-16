@@ -2156,8 +2156,9 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     jsmntok_t* pToken;
     UINT32 i, strLen, resultLen, configCount = 0, tokenCount;
     INT32 j;
-    UINT64 ttl;
+    UINT64 ttl, minTtl = MAX_UINT64;
     BOOL jsonInIceServerList = FALSE, iceLocked = FALSE;
+    PIceConfigInfo pConfigs = NULL;
 
     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
 
@@ -2226,11 +2227,10 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_INVALID_API_CALL_RETURN_JSON);
 
-    // Sessions copy the config on other tasks: hold the ICE config lock while it changes
-    signalingIceConfigLock();
-    iceLocked = TRUE;
-    MEMSET(&pSignalingClient->iceConfigs, 0x00, MAX_ICE_CONFIG_COUNT * SIZEOF(IceConfigInfo));
-    pSignalingClient->iceConfigCount = 0;
+    /* Parse into a local copy. The cached config changes only once the new one has passed
+     * the checks below, so a bad response leaves a config that is still valid in place. */
+    pConfigs = (PIceConfigInfo) MEMCALLOC(MAX_ICE_CONFIG_COUNT, SIZEOF(IceConfigInfo));
+    CHK(pConfigs != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
     // Loop through the tokens and extract the ice configuration
     for (i = 0; i < tokenCount; i++) {
@@ -2253,20 +2253,20 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
             } else if (compareJsonString(pResponseStr, pToken, JSMN_STRING, (PCHAR) "Username")) {
                 strLen = (UINT32) (pToken[1].end - pToken[1].start);
                 CHK(strLen <= MAX_ICE_CONFIG_USER_NAME_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
-                STRNCPY(pSignalingClient->iceConfigs[configCount - 1].userName, pResponseStr + pToken[1].start, strLen);
-                pSignalingClient->iceConfigs[configCount - 1].userName[MAX_ICE_CONFIG_USER_NAME_LEN] = '\0';
+                STRNCPY(pConfigs[configCount - 1].userName, pResponseStr + pToken[1].start, strLen);
+                pConfigs[configCount - 1].userName[MAX_ICE_CONFIG_USER_NAME_LEN] = '\0';
                 i++;
             } else if (compareJsonString(pResponseStr, pToken, JSMN_STRING, (PCHAR) "Password")) {
                 strLen = (UINT32) (pToken[1].end - pToken[1].start);
                 CHK(strLen <= MAX_ICE_CONFIG_CREDENTIAL_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
-                STRNCPY(pSignalingClient->iceConfigs[configCount - 1].password, pResponseStr + pToken[1].start, strLen);
-                pSignalingClient->iceConfigs[configCount - 1].userName[MAX_ICE_CONFIG_CREDENTIAL_LEN] = '\0';
+                STRNCPY(pConfigs[configCount - 1].password, pResponseStr + pToken[1].start, strLen);
+                pConfigs[configCount - 1].userName[MAX_ICE_CONFIG_CREDENTIAL_LEN] = '\0';
                 i++;
             } else if (compareJsonString(pResponseStr, pToken, JSMN_STRING, (PCHAR) "Ttl")) {
                 CHK_STATUS(STRTOUI64(pResponseStr + pToken[1].start, pResponseStr + pToken[1].end, 10, &ttl));
 
                 // NOTE: Ttl value is in seconds
-                pSignalingClient->iceConfigs[configCount - 1].ttl = ttl * HUNDREDS_OF_NANOS_IN_A_SECOND;
+                pConfigs[configCount - 1].ttl = ttl * HUNDREDS_OF_NANOS_IN_A_SECOND;
                 i++;
             } else if (compareJsonString(pResponseStr, pToken, JSMN_STRING, (PCHAR) "Uris")) {
                 // Expect an array of elements
@@ -2275,9 +2275,9 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
                 for (j = 0; j < pToken[1].size; j++) {
                     strLen = (UINT32) (pToken[j + 2].end - pToken[j + 2].start);
                     CHK(strLen <= MAX_ICE_CONFIG_URI_LEN, STATUS_SIGNALING_MAX_ICE_URI_LEN);
-                    STRNCPY(pSignalingClient->iceConfigs[configCount - 1].uris[j], pResponseStr + pToken[j + 2].start, strLen);
-                    pSignalingClient->iceConfigs[configCount - 1].uris[j][MAX_ICE_CONFIG_URI_LEN] = '\0';
-                    pSignalingClient->iceConfigs[configCount - 1].uriCount++;
+                    STRNCPY(pConfigs[configCount - 1].uris[j], pResponseStr + pToken[j + 2].start, strLen);
+                    pConfigs[configCount - 1].uris[j][MAX_ICE_CONFIG_URI_LEN] = '\0';
+                    pConfigs[configCount - 1].uriCount++;
                 }
 
                 i += pToken[1].size + 1;
@@ -2285,8 +2285,21 @@ STATUS getIceConfigEsp(PSignalingClient pSignalingClient, UINT64 time)
         }
     }
 
-    // Perform some validation on the ice configuration
+    // The checks of validateIceConfiguration(), made before the cache changes
+    CHK(configCount > 0, STATUS_SIGNALING_NO_CONFIG_SPECIFIED);
+    for (i = 0; i < configCount; i++) {
+        CHK(pConfigs[i].uriCount > 0, STATUS_SIGNALING_NO_CONFIG_URI_SPECIFIED);
+        minTtl = MIN(minTtl, pConfigs[i].ttl);
+    }
+    CHK(minTtl > ICE_CONFIGURATION_REFRESH_GRACE_PERIOD, STATUS_SIGNALING_ICE_TTL_LESS_THAN_GRACE_PERIOD);
+
+    // Sessions copy the config on other tasks: hold the ICE config lock while it changes
+    signalingIceConfigLock();
+    iceLocked = TRUE;
+    MEMSET(&pSignalingClient->iceConfigs, 0x00, MAX_ICE_CONFIG_COUNT * SIZEOF(IceConfigInfo));
+    MEMCPY(&pSignalingClient->iceConfigs, pConfigs, configCount * SIZEOF(IceConfigInfo));
     pSignalingClient->iceConfigCount = configCount;
+    // Sets the config's time and expiry
     CHK_STATUS(validateIceConfiguration(pSignalingClient));
     signalingIceConfigUnlock();
     iceLocked = FALSE;
@@ -2299,6 +2312,7 @@ CleanUp:
         signalingIceConfigUnlock();
     }
     SAFE_MEMFREE(tokens);
+    SAFE_MEMFREE(pConfigs);
     if (STATUS_FAILED(retStatus)) {
         DLOGE("Call Failed with Status: 0x%08x", retStatus);
         // Only set SERVICE_CALL_RESULT if result hasn't been set by performEspHttpRequest
