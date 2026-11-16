@@ -92,7 +92,7 @@ CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
 # ESP_HOSTED_CP_LIGHT_SLEEP_ENABLE is a promptless helper derived from this
 # choice; assigning it directly has no effect. POWER_MAX is the mode that
 # selects the PM, tickless-idle, bus-unload and peripheral-powerdown options
-# already listed below.
+# already listed above.
 CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_POWER_MAX=y
 CONFIG_ESP_HOSTED_CP_LIGHT_SLEEP_MIN_FREQ_MHZ=10
 CONFIG_ESP_PHY_MAC_BB_PD=y

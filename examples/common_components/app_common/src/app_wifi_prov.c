@@ -133,7 +133,10 @@ static esp_err_t start_provisioning(const app_wifi_prov_config_t *cfg)
 #if CONFIG_IDF_TARGET_ESP32C5 && CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL
     /* BLE init keeps the main XTAL on through light sleep for its low-power clock. The C5
      * BLE controller does not release it at deinit (the C6 one does), so every light sleep
-     * after provisioning would cost about 4-5 mA more. */
+     * after provisioning would cost about 4-5 mA more. IDF fixes the controller in "fix(bt): fix
+     * deselect slow clk missing on ESP32-C5". It is in v5.5.6 and v6.1.1, and on release/v6.0
+     * after v6.0.3. With the fix this call does nothing more. Remove it once the minimum
+     * supported IDF has the fix. */
     modem_clock_deselect_lp_clock_source(PERIPH_BT_MODULE);
 #endif
     ESP_LOGI(TAG, "BLE provisioning complete, resources released");
