@@ -1,30 +1,29 @@
-From 2589844791a6b12c7b491ee852f28707c19775ba Mon Sep 17 00:00:00 2001
+From c4b9a50bbfc8dc22d06f75cd254f3feb296c50f0 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 3 Mar 2026 20:48:28 +0530
-Subject: [PATCH 1/3] ESP-IDF platform adaptations and robustness improvements
+Subject: [PATCH 1/4] ESP-IDF platform adaptations and robustness improvements
 
 - Dtls_mbedtls: Fix for mbedtls 3.x compatibility
 - ConnectionListener: Custom thread for ESP platforms to save memory
 - SocketConnection: Increase resilience to memory errors, mbedtls 3.x
 - Sctp: Fix multi-line comment and compiler warnings
-- LwsApiCalls: Dynamic allocations, ESP thread support, parser enhancements
+- LwsApiCalls: ESP thread stacks, longer API timeouts and TCP keepalive, bounded debug log
 - SrtpSession: Fix compiler warnings
-- Include.h: ESP-IDF specific defines and new API declarations
+- Include.h: a one-thread signaling threadpool
 ---
- .../kinesis/video/webrtcclient/Include.h      |  33 ++-
- src/source/Crypto/Dtls_mbedtls.c              |   4 +-
- src/source/Ice/ConnectionListener.c           |   9 +
- src/source/Ice/IceAgent.c                     |  14 +-
- src/source/Ice/SocketConnection.c             |   3 +-
- src/source/Ice/SocketConnection.h             |   4 +-
- src/source/Sctp/Sctp.c                        |   8 +-
- src/source/Signaling/LwsApiCalls.c            | 280 +++++++++++++++++-
- src/source/Signaling/LwsApiCalls.h            |  10 +-
- src/source/Srtp/SrtpSession.c                 |  16 +-
- 10 files changed, 345 insertions(+), 36 deletions(-)
+ .../kinesis/video/webrtcclient/Include.h         |  4 ++--
+ src/source/Crypto/Dtls_mbedtls.c                 |  4 ++--
+ src/source/Ice/ConnectionListener.c              |  9 +++++++++
+ src/source/Ice/SocketConnection.c                |  3 ++-
+ src/source/Ice/SocketConnection.h                |  4 ++--
+ src/source/Sctp/Sctp.c                           |  8 ++++----
+ src/source/Signaling/LwsApiCalls.c               | 15 ++++++++++++++-
+ src/source/Signaling/LwsApiCalls.h               | 10 +++++-----
+ src/source/Srtp/SrtpSession.c                    | 16 ++++++++++++----
+ 9 files changed, 52 insertions(+), 21 deletions(-)
 
 diff --git a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
-index 4841c3dd87..5c19ccfe0a 100644
+index 5816c9586e..b3f72b12e3 100644
 --- a/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
 +++ b/src/include/com/amazonaws/kinesis/video/webrtcclient/Include.h
 @@ -850,12 +850,12 @@ extern "C" {
@@ -42,57 +41,6 @@ index 4841c3dd87..5c19ccfe0a 100644
  
  /**
   * Env to set minimum number of threads in the threadpool for the KVS SDK
-@@ -1566,6 +1566,21 @@ typedef struct {
-                                                               //!<
- } RtcIceCandidateInit, *PRtcIceCandidateInit;
- 
-+/**
-+ * @brief Define this macro to use dynamically allocated payload in SignalingMessage
-+ * This can be useful for platforms with limited memory as it avoids allocating
-+ * MAX_SIGNALING_MESSAGE_LEN for each message when only a small payload is needed
-+ */
-+
-+/**
-+ * @brief If PREFER_DYNAMIC_ALLOCS is set to 1, use dynamic allocation for signaling payload
-+ * Otherwise, use the existing DYNAMIC_SIGNALING_PAYLOAD setting
-+ */
-+#if PREFER_DYNAMIC_ALLOCS
-+#define DYNAMIC_SIGNALING_PAYLOAD 1
-+#define USE_DYNAMIC_URL 1
-+#endif
-+
- /**
-  * @brief Structure defining the basic signaling message
-  */
-@@ -1580,7 +1595,11 @@ typedef struct {
- 
-     UINT32 payloadLen; //!< Optional payload length. If 0, the length will be calculated
- 
-+#ifdef DYNAMIC_SIGNALING_PAYLOAD
-+    PCHAR payload; //!< Actual signaling message payload - dynamically allocated
-+#else
-     CHAR payload[MAX_SIGNALING_MESSAGE_LEN + 1]; //!< Actual signaling message payload
-+#endif
- } SignalingMessage, *PSignalingMessage;
- 
- /**
-@@ -2501,6 +2520,16 @@ PUBLIC_API STATUS freeSignalingClient(PSIGNALING_CLIENT_HANDLE);
-  */
- PUBLIC_API STATUS signalingClientSendMessageSync(SIGNALING_CLIENT_HANDLE, PSignalingMessage);
- 
-+/**
-+ * @brief Releases the (possibly dynamically allocated) payload of a
-+ * SignalingMessage / ReceivedSignalingMessage out-param.
-+ *
-+ * Safe to call with a NULL pMessage.
-+ *
-+ * @param[in,out] pMessage SignalingMessage whose payload should be released.
-+ */
-+PUBLIC_API VOID freeSignalingMessagePayload(PSignalingMessage pMessage);
-+
- /**
-  * @brief Gets the retrieved ICE configuration information object count
-  *
 diff --git a/src/source/Crypto/Dtls_mbedtls.c b/src/source/Crypto/Dtls_mbedtls.c
 index bdc8951ee4..ee06f549a3 100644
 --- a/src/source/Crypto/Dtls_mbedtls.c
@@ -144,41 +92,6 @@ index cc1d64d45c..a06834e573 100644
  
  CleanUp:
  
-diff --git a/src/source/Ice/IceAgent.c b/src/source/Ice/IceAgent.c
-index cba8dac45b..c24ca3c927 100644
---- a/src/source/Ice/IceAgent.c
-+++ b/src/source/Ice/IceAgent.c
-@@ -2706,12 +2706,19 @@ STATUS incomingRelayedDataHandler(UINT64 customData, PSocketConnection pSocketCo
- {
-     STATUS retStatus = STATUS_SUCCESS;
-     PIceCandidate pRelayedCandidate = (PIceCandidate) customData;
--    // this should be more than enough. Usually the number of channel data in each tcp message is around 4
--    TurnChannelData turnChannelData[DEFAULT_TURN_CHANNEL_DATA_BUFFER_SIZE] = {0};
--    UINT32 turnChannelDataCount = ARRAY_SIZE(turnChannelData), i = 0;
-+    // Usually the number of channel data items per TCP message is ~4, but the
-+    // buffer is sized for the worst case (DEFAULT_TURN_CHANNEL_DATA_BUFFER_SIZE).
-+    // At 512 entries that is ~16 KB — far too large for the stack, and it
-+    // overflows constrained worker-thread stacks (e.g. the ICE timer-queue
-+    // executor) when this handler runs on them. Allocate it on the heap.
-+    PTurnChannelData turnChannelData = NULL;
-+    UINT32 turnChannelDataCount = DEFAULT_TURN_CHANNEL_DATA_BUFFER_SIZE, i = 0;
- 
-     CHK(pRelayedCandidate != NULL && pSocketConnection != NULL, STATUS_NULL_ARG);
- 
-+    CHK(NULL != (turnChannelData = (PTurnChannelData) MEMCALLOC(DEFAULT_TURN_CHANNEL_DATA_BUFFER_SIZE, SIZEOF(TurnChannelData))),
-+        STATUS_NOT_ENOUGH_MEMORY);
-+
-     CHK_STATUS(turnConnectionIncomingDataHandler(pRelayedCandidate->pTurnConnection, pBuffer, bufferLen, pSrc, pDest, turnChannelData,
-                                                  &turnChannelDataCount));
-     for (i = 0; i < turnChannelDataCount; ++i) {
-@@ -2720,6 +2727,7 @@ STATUS incomingRelayedDataHandler(UINT64 customData, PSocketConnection pSocketCo
-     }
- 
- CleanUp:
-+    SAFE_MEMFREE(turnChannelData);
-     CHK_LOG_ERR(retStatus);
- 
-     return retStatus;
 diff --git a/src/source/Ice/SocketConnection.c b/src/source/Ice/SocketConnection.c
 index 797a4a430e..a8b5939040 100644
 --- a/src/source/Ice/SocketConnection.c
@@ -247,295 +160,10 @@ index 02272d91cc..456c9dc7ab 100644
          putUnalignedInt32BigEndian(pSctpSession->packet + SIZEOF(UINT32), pRtcDataChannelInit->maxPacketLifeTime.value);
      }
 diff --git a/src/source/Signaling/LwsApiCalls.c b/src/source/Signaling/LwsApiCalls.c
-index 41eaacf698..80d3b5e146 100644
+index 35b4b4d00e..45699113d8 100644
 --- a/src/source/Signaling/LwsApiCalls.c
 +++ b/src/source/Signaling/LwsApiCalls.c
-@@ -810,8 +810,14 @@ STATUS describeChannelLws(PSignalingClient pSignalingClient, UINT64 time)
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+    UINT32 paramsJsonLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+    PCHAR paramsJson = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1];
-     CHAR paramsJson[MAX_JSON_PARAMETER_STRING_LEN];
-+#endif
-     PLwsCallInfo pLwsCallInfo = NULL;
-     PCHAR pResponseStr;
-     jsmn_parser parser;
-@@ -823,12 +829,28 @@ STATUS describeChannelLws(PSignalingClient pSignalingClient, UINT64 time)
- 
-     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for url
-+    UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(DESCRIBE_SIGNALING_CHANNEL_API_POSTFIX);
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // allocate memory for paramsJson
-+    paramsJsonLen = SNPRINTF(NULL, 0, DESCRIBE_CHANNEL_PARAM_JSON_TEMPLATE, pSignalingClient->pChannelInfo->pChannelName);
-+    paramsJsonLen += 1; // +1 for the NULL terminator
-+    paramsJson = (PCHAR) MEMALLOC(paramsJsonLen);
-+    CHK(paramsJson != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    paramsJsonLen = ARRAY_SIZE(paramsJson);
-+#endif
-+
-     // Create the API url
-     STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
-     STRCAT(url, DESCRIBE_SIGNALING_CHANNEL_API_POSTFIX);
- 
-     // Prepare the json params for the call
--    SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), DESCRIBE_CHANNEL_PARAM_JSON_TEMPLATE, pSignalingClient->pChannelInfo->pChannelName);
-+    SNPRINTF(paramsJson, paramsJsonLen, DESCRIBE_CHANNEL_PARAM_JSON_TEMPLATE, pSignalingClient->pChannelInfo->pChannelName);
-     // Create the request info with the body
-     CHK_STATUS(createRequestInfo(url, paramsJson, pSignalingClient->pChannelInfo->pRegion, pSignalingClient->pChannelInfo->pCertPath, NULL, NULL,
-                                  SSL_CERTIFICATE_TYPE_NOT_SPECIFIED, pSignalingClient->pChannelInfo->pUserAgent,
-@@ -941,6 +963,11 @@ CleanUp:
-         DLOGE("Call Failed with Status:  0x%08x", retStatus);
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+    SAFE_MEMFREE(paramsJson);
-+#endif
-+
-     freeLwsCallInfo(&pLwsCallInfo);
- 
-     LEAVES();
-@@ -954,8 +981,14 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+    UINT32 paramsJsonLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+    PCHAR paramsJson = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1];
-     CHAR paramsJson[MAX_JSON_PARAMETER_STRING_LEN];
-+#endif
-     CHAR tagsJson[2 * MAX_JSON_PARAMETER_STRING_LEN];
-     PCHAR pCurPtr, pTagsStart, pResponseStr;
-     UINT32 i, strLen, resultLen;
-@@ -967,6 +1000,22 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
- 
-     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for url
-+    UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(CREATE_SIGNALING_CHANNEL_API_POSTFIX);
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // allocate memory for paramsJson
-+    paramsJsonLen = SNPRINTF(NULL, 0, CREATE_CHANNEL_PARAM_JSON_TEMPLATE, pSignalingClient->pChannelInfo->pChannelName);
-+    paramsJsonLen += 1; // +1 for the NULL terminator
-+    paramsJson = (PCHAR) MEMALLOC(paramsJsonLen);
-+    CHK(paramsJson != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    paramsJsonLen = ARRAY_SIZE(paramsJson);
-+#endif
-+
-     // Create the API url
-     STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
-     STRCAT(url, CREATE_SIGNALING_CHANNEL_API_POSTFIX);
-@@ -991,7 +1040,7 @@ STATUS createChannelLws(PSignalingClient pSignalingClient, UINT64 time)
-     }
- 
-     // Prepare the json params for the call
--    SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), CREATE_CHANNEL_PARAM_JSON_TEMPLATE, pSignalingClient->pChannelInfo->pChannelName,
-+    SNPRINTF(paramsJson, paramsJsonLen, CREATE_CHANNEL_PARAM_JSON_TEMPLATE, pSignalingClient->pChannelInfo->pChannelName,
-              getStringFromChannelType(pSignalingClient->pChannelInfo->channelType),
-              pSignalingClient->pChannelInfo->messageTtl / HUNDREDS_OF_NANOS_IN_A_SECOND, tagsJson);
- 
-@@ -1048,6 +1097,11 @@ CleanUp:
-         DLOGE("Call Failed with Status:  0x%08x", retStatus);
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+    SAFE_MEMFREE(paramsJson);
-+#endif
-+
-     freeLwsCallInfo(&pLwsCallInfo);
- 
-     LEAVES();
-@@ -1061,8 +1115,14 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+    UINT32 paramsJsonLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+    PCHAR paramsJson = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1];
-     CHAR paramsJson[MAX_JSON_PARAMETER_STRING_LEN];
-+#endif
-     UINT32 i, resultLen, strLen, protocolLen = 0, endpointLen = 0;
-     PCHAR pResponseStr, pProtocol = NULL, pEndpoint = NULL;
-     PLwsCallInfo pLwsCallInfo = NULL;
-@@ -1076,6 +1136,22 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
-     DLOGD("=== GetChannelEndpoint START ===");
-     DLOGD("Storage status: %s (%d)", pSignalingClient->mediaStorageConfig.storageStatus ? "ENABLED" : "DISABLED",
-           pSignalingClient->mediaStorageConfig.storageStatus);
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for url
-+    UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(GET_SIGNALING_CHANNEL_ENDPOINT_API_POSTFIX);
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // allocate memory for paramsJson
-+    paramsJsonLen = SNPRINTF(NULL, 0, GET_CHANNEL_ENDPOINT_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-+                 SIGNALING_CHANNEL_PROTOCOL, getStringFromChannelRoleType(pSignalingClient->pChannelInfo->channelRoleType));
-+    paramsJsonLen += 1; // +1 for the NULL terminator
-+    paramsJson = (PCHAR) MEMALLOC(paramsJsonLen);
-+    CHK(paramsJson != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    paramsJsonLen = ARRAY_SIZE(paramsJson);
-+#endif
- 
-     // Create the API url
-     STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
-@@ -1084,11 +1160,11 @@ STATUS getChannelEndpointLws(PSignalingClient pSignalingClient, UINT64 time)
-     // Prepare the json params for the call
-     if (pSignalingClient->mediaStorageConfig.storageStatus == FALSE) {
-         DLOGD("Requesting protocols: WSS, HTTPS (storage disabled - no WEBRTC)");
--        SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), GET_CHANNEL_ENDPOINT_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-+        SNPRINTF(paramsJson, paramsJsonLen, GET_CHANNEL_ENDPOINT_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-                  SIGNALING_CHANNEL_PROTOCOL, getStringFromChannelRoleType(pSignalingClient->pChannelInfo->channelRoleType));
-     } else {
-         DLOGD("Requesting protocols: WSS, HTTPS, WEBRTC (storage enabled)");
--        SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), GET_CHANNEL_ENDPOINT_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-+        SNPRINTF(paramsJson, paramsJsonLen, GET_CHANNEL_ENDPOINT_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-                  SIGNALING_CHANNEL_PROTOCOL_W_MEDIA_STORAGE, getStringFromChannelRoleType(pSignalingClient->pChannelInfo->channelRoleType));
-     }
-     DLOGD("Request params: %s", paramsJson);
-@@ -1210,6 +1286,11 @@ CleanUp:
-         DLOGE("Call Failed with Status:  0x%08x", retStatus);
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+    SAFE_MEMFREE(paramsJson);
-+#endif
-+
-     freeLwsCallInfo(&pLwsCallInfo);
- 
-     LEAVES();
-@@ -1223,7 +1304,13 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+    UINT32 paramsJsonLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+    PCHAR paramsJson = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1], paramsJson[MAX_JSON_PARAMETER_STRING_LEN];
-+#endif
-     PLwsCallInfo pLwsCallInfo = NULL;
-     PCHAR pResponseStr;
-     UINT32 resultLen;
-@@ -1231,6 +1318,23 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
-     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
-     CHK(pSignalingClient->channelEndpointHttps[0] != '\0', STATUS_INTERNAL_ERROR);
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for url
-+    UINT32 urlLen = STRLEN(pSignalingClient->channelEndpointHttps) + STRLEN(GET_ICE_CONFIG_API_POSTFIX);
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // allocate memory for paramsJson
-+    paramsJsonLen = SNPRINTF(NULL, 0, GET_ICE_CONFIG_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-+                 pSignalingClient->clientInfo.signalingClientInfo.clientId);
-+    paramsJsonLen += 1; // +1 for the NULL terminator
-+    paramsJson = (PCHAR) MEMALLOC(paramsJsonLen);
-+    CHK(paramsJson != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    paramsJsonLen = ARRAY_SIZE(paramsJson);
-+#endif
-+
-     // Update the diagnostics info on the number of ICE refresh calls
-     ATOMIC_INCREMENT(&pSignalingClient->diagnostics.iceRefreshCount);
- 
-@@ -1239,7 +1343,7 @@ STATUS getIceConfigLws(PSignalingClient pSignalingClient, UINT64 time)
-     STRCAT(url, GET_ICE_CONFIG_API_POSTFIX);
- 
-     // Prepare the json params for the call
--    SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), GET_ICE_CONFIG_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-+    SNPRINTF(paramsJson, paramsJsonLen, GET_ICE_CONFIG_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn,
-              pSignalingClient->clientInfo.signalingClientInfo.clientId);
- 
-     // Create the request info with the body
-@@ -1281,6 +1385,11 @@ CleanUp:
-         DLOGE("Call Failed with Status:  0x%08x", retStatus);
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+    SAFE_MEMFREE(paramsJson);
-+#endif
-+
-     freeLwsCallInfo(&pLwsCallInfo);
- 
-     LEAVES();
-@@ -1512,7 +1621,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1];
-+#endif
-     PLwsCallInfo pLwsCallInfo = NULL;
-     BOOL locked = FALSE;
-     SERVICE_CALL_RESULT callResult = SERVICE_CALL_RESULT_NOT_SET;
-@@ -1521,13 +1634,31 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
-     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
-     CHK(pSignalingClient->channelEndpointWss[0] != '\0', STATUS_INTERNAL_ERROR);
- 
-+    UINT32 urlLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    if (pSignalingClient->pChannelInfo->channelRoleType == SIGNALING_CHANNEL_ROLE_TYPE_VIEWER) {
-+        // allocate memory for url
-+        urlLen = SNPRINTF(NULL, 0, SIGNALING_ENDPOINT_VIEWER_URL_WSS_TEMPLATE, pSignalingClient->channelEndpointWss,
-+                    SIGNALING_CHANNEL_ARN_PARAM_NAME, pSignalingClient->channelDescription.channelArn, SIGNALING_CLIENT_ID_PARAM_NAME,
-+                    pSignalingClient->clientInfo.signalingClientInfo.clientId);
-+    } else {
-+        // allocate memory for url
-+        urlLen = SNPRINTF(NULL, 0, SIGNALING_ENDPOINT_MASTER_URL_WSS_TEMPLATE, pSignalingClient->channelEndpointWss,
-+                    SIGNALING_CHANNEL_ARN_PARAM_NAME, pSignalingClient->channelDescription.channelArn);
-+    }
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    urlLen = ARRAY_SIZE(url);
-+#endif
-     // Prepare the json params for the call
-     if (pSignalingClient->pChannelInfo->channelRoleType == SIGNALING_CHANNEL_ROLE_TYPE_VIEWER) {
--        SNPRINTF(url, ARRAY_SIZE(url), SIGNALING_ENDPOINT_VIEWER_URL_WSS_TEMPLATE, pSignalingClient->channelEndpointWss,
-+        SNPRINTF(url, urlLen, SIGNALING_ENDPOINT_VIEWER_URL_WSS_TEMPLATE, pSignalingClient->channelEndpointWss,
-                  SIGNALING_CHANNEL_ARN_PARAM_NAME, pSignalingClient->channelDescription.channelArn, SIGNALING_CLIENT_ID_PARAM_NAME,
-                  pSignalingClient->clientInfo.signalingClientInfo.clientId);
-     } else {
--        SNPRINTF(url, ARRAY_SIZE(url), SIGNALING_ENDPOINT_MASTER_URL_WSS_TEMPLATE, pSignalingClient->channelEndpointWss,
-+        SNPRINTF(url, urlLen, SIGNALING_ENDPOINT_MASTER_URL_WSS_TEMPLATE, pSignalingClient->channelEndpointWss,
-                  SIGNALING_CHANNEL_ARN_PARAM_NAME, pSignalingClient->channelDescription.channelArn);
-     }
- 
-@@ -1554,7 +1685,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
+@@ -1774,7 +1774,11 @@ STATUS connectSignalingChannelLws(PSignalingClient pSignalingClient, UINT64 time
  
      // The actual connection will be handled in a separate thread
      // Start the request/response thread
@@ -547,137 +175,7 @@ index 41eaacf698..80d3b5e146 100644
      CHK_STATUS(THREAD_DETACH(pSignalingClient->listenerTracker.threadId));
  
      timeout = (pSignalingClient->clientInfo.connectTimeout != 0) ? pSignalingClient->clientInfo.connectTimeout : SIGNALING_CONNECT_TIMEOUT;
-@@ -1578,6 +1713,10 @@ CleanUp:
- 
-     CHK_LOG_ERR(retStatus);
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+#endif
-+
-     if (STATUS_FAILED(retStatus) && pSignalingClient != NULL) {
-         // Fix-up the timeout case
-         SERVICE_CALL_RESULT serviceCallResult =
-@@ -1606,24 +1745,46 @@ STATUS joinStorageSessionLws(PSignalingClient pSignalingClient, UINT64 time)
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+    UINT32 paramsJsonLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+    PCHAR paramsJson = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1];
-     CHAR paramsJson[MAX_JSON_PARAMETER_STRING_LEN];
-+#endif
-     PLwsCallInfo pLwsCallInfo = NULL;
- 
-     UNUSED_PARAM(pLwsCallInfo);
-     CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
-     CHK(pSignalingClient->channelEndpointWebrtc[0] != '\0', STATUS_INTERNAL_ERROR);
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for url
-+    UINT32 urlLen = STRLEN(pSignalingClient->channelEndpointWebrtc) + STRLEN(JOIN_STORAGE_SESSION_API_POSTFIX);
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // allocate memory for paramsJson
-+    paramsJsonLen = SNPRINTF(NULL, 0, SIGNALING_JOIN_STORAGE_SESSION_VIEWER_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn);
-+    paramsJsonLen += 1; // +1 for the NULL terminator
-+    paramsJson = (PCHAR) MEMALLOC(paramsJsonLen);
-+    CHK(paramsJson != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    paramsJsonLen = ARRAY_SIZE(paramsJson);
-+#endif
-+
-     // Create the API url
-     STRCPY(url, pSignalingClient->channelEndpointWebrtc);
-     STRCAT(url, JOIN_STORAGE_SESSION_API_POSTFIX);
- 
-     // Prepare the json params for the call
-     if (pSignalingClient->pChannelInfo->channelRoleType == SIGNALING_CHANNEL_ROLE_TYPE_VIEWER) {
--        SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), SIGNALING_JOIN_STORAGE_SESSION_VIEWER_PARAM_JSON_TEMPLATE,
-+        SNPRINTF(paramsJson, paramsJsonLen, SIGNALING_JOIN_STORAGE_SESSION_VIEWER_PARAM_JSON_TEMPLATE,
-                  pSignalingClient->channelDescription.channelArn, pSignalingClient->clientInfo.signalingClientInfo.clientId);
-     } else {
--        SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), SIGNALING_JOIN_STORAGE_SESSION_MASTER_PARAM_JSON_TEMPLATE,
-+        SNPRINTF(paramsJson, paramsJsonLen, SIGNALING_JOIN_STORAGE_SESSION_MASTER_PARAM_JSON_TEMPLATE,
-                  pSignalingClient->channelDescription.channelArn);
-     }
- 
-@@ -1665,6 +1826,11 @@ CleanUp:
-         DLOGE("Call Failed with Status:  0x%08x", retStatus);
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+    SAFE_MEMFREE(paramsJson);
-+#endif
-+
-     freeLwsCallInfo(&pLwsCallInfo);
- 
-     LEAVES();
-@@ -1678,8 +1844,14 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
-     UNUSED_PARAM(time);
- 
-     PRequestInfo pRequestInfo = NULL;
-+    UINT32 paramsJsonLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR url = NULL;
-+    PCHAR paramsJson = NULL;
-+#else
-     CHAR url[MAX_URI_CHAR_LEN + 1];
-     CHAR paramsJson[MAX_JSON_PARAMETER_STRING_LEN];
-+#endif
-     PLwsCallInfo pLwsCallInfo = NULL;
-     PCHAR pResponseStr;
-     jsmn_parser parser;
-@@ -1700,6 +1872,21 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
-     previousStorageStatus = pSignalingClient->mediaStorageConfig.storageStatus;
-     DLOGD("Previous storage status: %s (%d)", previousStorageStatus ? "ENABLED" : "DISABLED", previousStorageStatus);
-     DLOGD("Previous storage stream ARN: %s", pSignalingClient->mediaStorageConfig.storageStreamArn);
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for url
-+    UINT32 urlLen = STRLEN(pSignalingClient->pChannelInfo->pControlPlaneUrl) + STRLEN(DESCRIBE_MEDIA_STORAGE_CONF_API_POSTFIX);
-+    urlLen += 1; // +1 for the NULL terminator
-+    url = (PCHAR) MEMALLOC(urlLen);
-+    CHK(url != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // allocate memory for paramsJson
-+    paramsJsonLen = SNPRINTF(NULL, 0, DESCRIBE_MEDIA_STORAGE_CONF_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn);
-+    paramsJsonLen += 1; // +1 for the NULL terminator
-+    paramsJson = (PCHAR) MEMALLOC(paramsJsonLen);
-+    CHK(paramsJson != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    paramsJsonLen = ARRAY_SIZE(paramsJson);
-+#endif
- 
-     // Create the API url
-     STRCPY(url, pSignalingClient->pChannelInfo->pControlPlaneUrl);
-@@ -1707,7 +1894,7 @@ STATUS describeMediaStorageConfLws(PSignalingClient pSignalingClient, UINT64 tim
- 
-     // Prepare the json params for the call
-     CHK(pSignalingClient->channelDescription.channelArn[0] != '\0', STATUS_NULL_ARG);
--    SNPRINTF(paramsJson, ARRAY_SIZE(paramsJson), DESCRIBE_MEDIA_STORAGE_CONF_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn);
-+    SNPRINTF(paramsJson, paramsJsonLen, DESCRIBE_MEDIA_STORAGE_CONF_PARAM_JSON_TEMPLATE, pSignalingClient->channelDescription.channelArn);
-     // Create the request info with the body
-     CHK_STATUS(createRequestInfo(url, paramsJson, pSignalingClient->pChannelInfo->pRegion, pSignalingClient->pChannelInfo->pCertPath, NULL, NULL,
-                                  SSL_CERTIFICATE_TYPE_NOT_SPECIFIED, pSignalingClient->pChannelInfo->pUserAgent,
-@@ -1803,6 +1990,11 @@ CleanUp:
-         DLOGE("Call Failed with Status:  0x%08x", retStatus);
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(url);
-+    SAFE_MEMFREE(paramsJson);
-+#endif
-+
-     freeLwsCallInfo(&pLwsCallInfo);
- 
-     LEAVES();
-@@ -1919,7 +2111,12 @@ STATUS startReconnectHandler(PSignalingClient pSignalingClient)
+@@ -2180,7 +2184,12 @@ STATUS startReconnectHandler(PSignalingClient pSignalingClient)
      ATOMIC_STORE_BOOL(&pSignalingClient->reconnecterTracker.terminated, FALSE);
      MUTEX_UNLOCK(pSignalingClient->reconnecterTracker.lock);
  
@@ -690,20 +188,7 @@ index 41eaacf698..80d3b5e146 100644
      if (STATUS_FAILED(retStatus)) {
          reconnectThreadExited(pSignalingClient, NULL);
          CHK(FALSE, retStatus);
-@@ -2001,7 +2198,12 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
- {
-     ENTERS();
-     STATUS retStatus = STATUS_SUCCESS;
-+    UINT32 encodedMessageLen = 0;
-+#if PREFER_DYNAMIC_ALLOCS
-+    PCHAR encodedMessage = NULL;
-+#else
-     CHAR encodedMessage[MAX_SESSION_DESCRIPTION_INIT_SDP_LEN + 1];
-+#endif
-     CHAR encodedIceConfig[MAX_ENCODED_ICE_SERVER_INFOS_STR_LEN + 1];
-     CHAR encodedUris[MAX_ICE_SERVER_URI_STR_LEN + 1];
-     UINT32 size, writtenSize, correlationLen, iceCount, uriCount, urisLen, iceConfigLen;
-@@ -2029,7 +2231,7 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
+@@ -2291,7 +2300,7 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
              CHK(FALSE, STATUS_INVALID_ARG);
      }
      DLOGD("%s", pMessageType);
@@ -712,119 +197,7 @@ index 41eaacf698..80d3b5e146 100644
      // Calculate the lengths if not specified
      if (messageLen == 0) {
          size = (UINT32) STRLEN(pMessage);
-@@ -2043,8 +2245,17 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
-         correlationLen = correlationIdLen;
-     }
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    // allocate memory for encodedMessage
-+    encodedMessageLen = ((size + 2) / 3) * 4 + 1; // +1 for null terminator
-+    encodedMessage = (PCHAR) MEMALLOC(encodedMessageLen);
-+    CHK(encodedMessage != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#else
-+    encodedMessageLen = ARRAY_SIZE(encodedMessage);
-+#endif
-+
-     // Base64 encode the message
--    writtenSize = ARRAY_SIZE(encodedMessage);
-+    writtenSize = encodedMessageLen;
-     CHK_STATUS(base64Encode(pMessage, size, encodedMessage, &writtenSize));
- 
-     // Account for the template expansion + Action string + max recipient id
-@@ -2126,6 +2337,10 @@ STATUS sendLwsMessage(PSignalingClient pSignalingClient, SIGNALING_MESSAGE_TYPE
- CleanUp:
-     CHK_LOG_ERR(retStatus);
- 
-+#if PREFER_DYNAMIC_ALLOCS
-+    SAFE_MEMFREE(encodedMessage);
-+#endif
-+
-     LEAVES();
-     return retStatus;
- }
-@@ -2205,6 +2420,25 @@ CleanUp:
-     return retStatus;
- }
- 
-+VOID freeSignalingMessagePayload(PSignalingMessage pMessage)
-+{
-+    if (pMessage == NULL) {
-+        return;
-+    }
-+#ifdef DYNAMIC_SIGNALING_PAYLOAD
-+    if (pMessage->payload != NULL) {
-+        /* MEMFREE here matches the SDK-side MEMCALLOC used in
-+         * parseSignalingMessage; both go through this translation unit's
-+         * allocator so static / shared / instrumented builds all work. */
-+        MEMFREE(pMessage->payload);
-+        pMessage->payload = NULL;
-+    }
-+#else
-+    /* Static-array payload — nothing to release. */
-+    (VOID) pMessage;
-+#endif
-+}
-+
- STATUS parseSignalingMessage(PCHAR pMessage, UINT32 messageLen, PReceivedSignalingMessage pReceivedSignalingMessage)
- {
-     ENTERS();
-@@ -2244,7 +2478,12 @@ STATUS parseSignalingMessage(PCHAR pMessage, UINT32 messageLen, PReceivedSignali
-         } else if (compareJsonString(pMessage, &tokens[i], JSMN_STRING, (PCHAR) "messagePayload")) {
-             strLen = (UINT32) (tokens[i + 1].end - tokens[i + 1].start);
-             CHK(strLen <= MAX_SIGNALING_MESSAGE_LEN, STATUS_INVALID_API_CALL_RETURN_JSON);
--            outLen = SIZEOF(pReceivedSignalingMessage->signalingMessage.payload);
-+            outLen = (strLen + 3) / 4 * 3 + 1;
-+#ifdef DYNAMIC_SIGNALING_PAYLOAD
-+            pReceivedSignalingMessage->signalingMessage.payload = (PCHAR) MEMCALLOC(1, outLen);
-+            CHK(pReceivedSignalingMessage->signalingMessage.payload != NULL, STATUS_NOT_ENOUGH_MEMORY);
-+#endif
-+
-             // Base64 method will set outLen <= original input outLen
-             CHK_STATUS(base64Decode(pMessage + tokens[i + 1].start, strLen, (PBYTE) (pReceivedSignalingMessage->signalingMessage.payload), &outLen));
- 
-@@ -2325,6 +2564,9 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
- 
-     // Parse the response
-     CHK(NULL != (pSignalingMessageWrapper = (PSignalingMessageWrapper) MEMCALLOC(1, SIZEOF(SignalingMessageWrapper))), STATUS_NOT_ENOUGH_MEMORY);
-+
-+    // payload is allocated inside parseSignalingMessage (sized to the message)
-+    // and released via freeSignalingMessagePayload() at every wrapper-free site.
-     pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage.version = SIGNALING_MESSAGE_CURRENT_VERSION;
-     CHK_STATUS(parseSignalingMessage(pMessage, messageLen, &pSignalingMessageWrapper->receivedSignalingMessage));
- 
-@@ -2349,6 +2591,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
-             // Notify the awaiting send
-             CVAR_BROADCAST(pSignalingClient->receiveCvar);
-             // Delete the message wrapper and exit
-+            freeSignalingMessagePayload(&pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage);
-             SAFE_MEMFREE(pSignalingMessageWrapper);
-             CHK(FALSE, retStatus);
-             break;
-@@ -2358,6 +2601,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
-             CHK_STATUS(terminateConnectionWithStatus(pSignalingClient, SERVICE_CALL_RESULT_SIGNALING_GO_AWAY));
- 
-             // Delete the message wrapper and exit
-+            freeSignalingMessagePayload(&pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage);
-             SAFE_MEMFREE(pSignalingMessageWrapper);
- 
-             // Iterate the state machinery
-@@ -2373,6 +2617,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
-             CHK_STATUS(terminateConnectionWithStatus(pSignalingClient, SERVICE_CALL_RESULT_SIGNALING_RECONNECT_ICE));
- 
-             // Delete the message wrapper and exit
-+            freeSignalingMessagePayload(&pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage);
-             SAFE_MEMFREE(pSignalingMessageWrapper);
- 
-             // Iterate the state machinery
-@@ -2420,6 +2665,7 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
-         MUTEX_UNLOCK(pSignalingClient->receiveWorkerLock);
-         DLOGD("Dropping received message of type %s: signaling client is shutting down",
-               getMessageTypeInString(pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage.messageType));
-+        freeSignalingMessagePayload(&pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage);
-         SAFE_MEMFREE(pSignalingMessageWrapper);
-         CHK(FALSE, retStatus);
-     }
-@@ -2430,7 +2676,11 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
+@@ -2733,7 +2742,11 @@ STATUS receiveLwsMessage(PSignalingClient pSignalingClient, PCHAR pMessage, UINT
      retStatus = threadpoolContextPush(receiveLwsMessageWrapper, pSignalingMessageWrapper);
  #else
      // Issue the callback on a separate thread
@@ -836,26 +209,8 @@ index 41eaacf698..80d3b5e146 100644
  #endif
      if (STATUS_FAILED(retStatus)) {
          MUTEX_LOCK(pSignalingClient->receiveWorkerLock);
-@@ -2462,6 +2712,9 @@ CleanUp:
-         }
- 
-         // Only reached before the worker was created; afterwards the wrapper pointer is NULL and the worker frees it.
-+        if (pSignalingMessageWrapper != NULL) {
-+            freeSignalingMessagePayload(&pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage);
-+        }
-         SAFE_MEMFREE(pSignalingMessageWrapper);
-     }
- 
-@@ -2645,6 +2898,7 @@ PVOID receiveLwsMessageWrapper(PVOID args)
- CleanUp:
-     CHK_LOG_ERR(retStatus);
- 
-+    freeSignalingMessagePayload(&pSignalingMessageWrapper->receivedSignalingMessage.signalingMessage);
-     SAFE_MEMFREE(pSignalingMessageWrapper);
- 
-     // Decrement the in-flight worker counter and wake any shutdown waiter in
 diff --git a/src/source/Signaling/LwsApiCalls.h b/src/source/Signaling/LwsApiCalls.h
-index 2c28b4b4d7..c7d97b8156 100644
+index 389286eb35..7386300ac4 100644
 --- a/src/source/Signaling/LwsApiCalls.h
 +++ b/src/source/Signaling/LwsApiCalls.h
 @@ -11,13 +11,13 @@ extern "C" {

@@ -1,7 +1,7 @@
-From 610f285336b07cf676b3492e6d1119c7fc562c9e Mon Sep 17 00:00:00 2001
+From 39f373a4950c2ac928209bd649a8dcc30e3b3029 Mon Sep 17 00:00:00 2001
 From: Apply Patches <apply-patches@espressif.local>
 Date: Mon, 28 Sep 2026 14:22:48 +0800
-Subject: [PATCH] Signaling: let the build override the WSS ping interval
+Subject: [PATCH 3/4] Signaling: let the build override the WSS ping interval
 
 The interval is a power knob on battery targets: each ping is a radio
 transmit. Guard the default so a -D from the build system wins, and
@@ -14,7 +14,7 @@ both move together.
  1 file changed, 2 insertions(+)
 
 diff --git a/src/source/Signaling/LwsApiCalls.h b/src/source/Signaling/LwsApiCalls.h
-index 85fba6b3de..f5c5bf2d87 100644
+index 7386300ac4..97b0f540ec 100644
 --- a/src/source/Signaling/LwsApiCalls.h
 +++ b/src/source/Signaling/LwsApiCalls.h
 @@ -18,7 +18,9 @@ extern "C" {
@@ -28,5 +28,5 @@ index 85fba6b3de..f5c5bf2d87 100644
  
  // Protocol indexes
 -- 
-2.51.0
+2.43.0
 

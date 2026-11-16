@@ -1,7 +1,8 @@
-From 80cb18ce7ae049095e54029481601d5e26d271c1 Mon Sep 17 00:00:00 2001
+From 1fad69ed5505ab8facda6d1efb991d329a550cc9 Mon Sep 17 00:00:00 2001
 From: Vikram Dattu <vikram.dattu@espressif.com>
 Date: Tue, 3 Nov 2026 21:51:21 +0530
-Subject: [PATCH] Signaling: end the fetch and GET_TOKEN back-offs on shutdown
+Subject: [PATCH 4/4] Signaling: end the fetch and GET_TOKEN back-offs on
+ shutdown
 
 A free sets the client's shutdown flag, and so does a caller that wants
 a connect in progress to stop. Two sleeps ignored it:
@@ -47,10 +48,10 @@ index 898af93ed3..fbcda94939 100644
      }
  
 diff --git a/src/source/Signaling/StateMachine.c b/src/source/Signaling/StateMachine.c
-index 9f543b670a..c92b1d3d2e 100644
+index 334bce39b1..0fe991a077 100644
 --- a/src/source/Signaling/StateMachine.c
 +++ b/src/source/Signaling/StateMachine.c
-@@ -346,6 +346,7 @@ STATUS executeGetTokenSignalingState(UINT64 customData, UINT64 time)
+@@ -357,6 +357,7 @@ STATUS executeGetTokenSignalingState(UINT64 customData, UINT64 time)
      STATUS retStatus = STATUS_SUCCESS;
      PSignalingClient pSignalingClient = SIGNALING_CLIENT_FROM_CUSTOM_DATA(customData);
      SERVICE_CALL_RESULT serviceCallResult;
@@ -58,7 +59,7 @@ index 9f543b670a..c92b1d3d2e 100644
  
      CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
  
-@@ -358,7 +359,12 @@ STATUS executeGetTokenSignalingState(UINT64 customData, UINT64 time)
+@@ -369,7 +370,12 @@ STATUS executeGetTokenSignalingState(UINT64 customData, UINT64 time)
                                                                              SIGNALING_CLIENT_STATE_GET_CREDENTIALS));
      }
  
