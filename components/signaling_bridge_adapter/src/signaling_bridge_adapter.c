@@ -464,6 +464,9 @@ int signaling_bridge_adapter_send_message(webrtc_message_t *signalingMessage)
         case WEBRTC_MESSAGE_TYPE_TRIGGER_OFFER:
             signalingMsg.messageType = SIGNALING_MSG_TYPE_TRIGGER_OFFER;
             break;
+        case WEBRTC_MESSAGE_TYPE_CLOSE_SESSION:
+            signalingMsg.messageType = SIGNALING_MSG_TYPE_CLOSE_SESSION;
+            break;
         default:
             ESP_LOGE(TAG, "Unsupported message type: %d", (int) signalingMessage->message_type);
             return -1;

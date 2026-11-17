@@ -191,6 +191,9 @@ typedef enum {
     WEBRTC_MESSAGE_TYPE_STATE_CHANGE,
     WEBRTC_MESSAGE_TYPE_ERROR,
     WEBRTC_MESSAGE_TYPE_TRIGGER_OFFER,
+    WEBRTC_MESSAGE_TYPE_CLOSE_SESSION,  /*!< Split mode: the signaling device asks the streaming
+                                             device to end peer_client_id's session. Bridge only;
+                                             never sent to a signaling server. */
 } webrtc_message_type_t;
 
 /**

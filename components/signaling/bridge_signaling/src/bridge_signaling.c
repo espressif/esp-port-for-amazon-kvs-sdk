@@ -99,6 +99,13 @@ void bridge_message_handler(const void* data, int len)
         goto cleanup;
     }
 
+    /* The signaling device ended this peer's signaling session; the peer connection is ours. */
+    if (signaling_msg.messageType == SIGNALING_MSG_TYPE_CLOSE_SESSION) {
+        ESP_LOGI(TAG, "Received CLOSE_SESSION for peer %s from signaling device", signaling_msg.peerClientId);
+        app_webrtc_close_session(signaling_msg.peerClientId);
+        goto cleanup;
+    }
+
     // Handle READY signal (though P4 shouldn't normally receive this)
     if (signaling_msg.messageType == SIGNALING_MSG_TYPE_READY) {
         ESP_LOGI(TAG, "Received READY signal (unexpected on streaming device)");

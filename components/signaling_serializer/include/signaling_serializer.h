@@ -47,6 +47,10 @@ typedef enum {
     SIGNALING_MSG_TYPE_TRIGGER_OFFER,        // ← Trigger offer message
     SIGNALING_MSG_TYPE_READY,                // ← Ready signal from streaming device to signaling device
     SIGNALING_MSG_TYPE_READY_QUERY,          // ← Query from signaling device: "Are you ready?"
+    SIGNALING_MSG_TYPE_CLOSE_SESSION,        // ← Signaling device asks the streaming device to end one peer's session
+    /* Every serializer puts the raw number on the wire, so the two devices of a split pair must
+     * agree on these values: append new types, never insert or reorder. A device that does not
+     * know a type logs and drops it. */
 } signaling_msg_type;
 
 // Must match with the defines in the signaling protocol defined in kvs

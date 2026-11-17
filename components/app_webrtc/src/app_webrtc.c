@@ -2280,6 +2280,31 @@ static BOOL markSessionForClose(PSampleConfiguration pSampleConfiguration, const
     return marked || deferred;
 }
 
+/* Split mode: this device keeps no sessions - offers go straight through the bridge -
+ * and the streaming host owns the peer connection, so the close is handed to it. Sent
+ * outside gRunTaskLock, like the offers the bridge forwards. */
+static WEBRTC_STATUS forwardCloseToStreamingHost(const char *peer_id)
+{
+    webrtc_peer_connection_if_t *pc_interface = gWebRtcAppConfig.peer_connection_if;
+    if (pc_interface == NULL || pc_interface->send_message == NULL) {
+        return WEBRTC_STATUS_INVALID_OPERATION;
+    }
+
+    webrtc_message_t msg;
+    MEMSET(&msg, 0, SIZEOF(msg));
+    msg.message_type = WEBRTC_MESSAGE_TYPE_CLOSE_SESSION;
+    STRNCPY(msg.peer_client_id, peer_id, SIZEOF(msg.peer_client_id) - 1);
+
+    WEBRTC_STATUS status = pc_interface->send_message(NULL, &msg);
+    if (status != WEBRTC_STATUS_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to forward the close for peer %s to the streaming host: 0x%08" PRIx32,
+                 peer_id, (uint32_t) status);
+        return WEBRTC_STATUS_INTERNAL_ERROR;
+    }
+    ESP_LOGI(TAG, "Forwarded the close for peer %s to the streaming host", peer_id);
+    return WEBRTC_STATUS_SUCCESS;
+}
+
 WEBRTC_STATUS app_webrtc_close_session(const char *peer_id)
 {
     if (peer_id == NULL) {
@@ -2290,13 +2315,19 @@ WEBRTC_STATUS app_webrtc_close_session(const char *peer_id)
      * the context, and announces itself under gRunTaskLock first, so the context
      * is only used with that lock held and no teardown under way. A teardown
      * frees and reports every session itself, so there is nothing to close. */
-    BOOL marked = FALSE;
+    BOOL marked = FALSE, bridge = FALSE;
     pthread_mutex_lock(&gRunTaskLock);
     if (!gRunTaskTearingDown && !gTerminateTeardownBusy && gSampleConfiguration != NULL) {
-        marked = markSessionForClose(gSampleConfiguration, peer_id);
+        bridge = gSampleConfiguration->bridge_mode;
+        if (!bridge) {
+            marked = markSessionForClose(gSampleConfiguration, peer_id);
+        }
     }
     pthread_mutex_unlock(&gRunTaskLock);
 
+    if (bridge) {
+        return forwardCloseToStreamingHost(peer_id);
+    }
     if (marked) {
         ESP_LOGI(TAG, "Closing session for peer %s on request", peer_id);
     }

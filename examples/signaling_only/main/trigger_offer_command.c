@@ -10,6 +10,7 @@
 #include <esp_console.h>
 #include <esp_log.h>
 #include "app_webrtc_if.h"
+#include "app_webrtc.h"
 
 static const char *TAG = "trigger_offer_cmd";
 
@@ -84,6 +85,19 @@ static int trigger_offer_cli_handler(int argc, char *argv[])
     return result;
 }
 
+/* Ends one viewer's session: app_webrtc forwards the close to the streaming device. */
+static int close_session_cli_handler(int argc, char *argv[])
+{
+    if (argc != 2) {
+        ESP_LOGE(TAG, "Usage: close-session <peer_client_id>");
+        return -1;
+    }
+
+    WEBRTC_STATUS status = app_webrtc_close_session(argv[1]);
+    ESP_LOGI(TAG, "close-session %s: status 0x%08x", argv[1], (unsigned) status);
+    return status == WEBRTC_STATUS_SUCCESS ? 0 : -1;
+}
+
 /* Console command definition */
 static esp_console_cmd_t trigger_offer_cmds[] = {
     {
@@ -91,7 +105,13 @@ static esp_console_cmd_t trigger_offer_cmds[] = {
         .help = "Send trigger offer message to streaming device for specified peer",
         .hint = "<peer_client_id>",
         .func = trigger_offer_cli_handler,
-    }
+    },
+    {
+        .command = "close-session",
+        .help = "Close one viewer's session on the streaming device",
+        .hint = "<peer_client_id>",
+        .func = close_session_cli_handler,
+    },
 };
 
 /**

@@ -219,3 +219,35 @@ TEST_CASE("extract_ice_server_response rejects wrong message type", "[signaling_
     esp_err_t ret = extract_ice_server_response_from_message(&msg, &ice_resp);
     TEST_ASSERT_NOT_EQUAL(ESP_OK, ret);
 }
+
+/* The type travels as its raw number, so both devices of a split pair must agree on it. */
+TEST_CASE("message type wire numbers are stable", "[signaling_serializer]")
+{
+    TEST_ASSERT_EQUAL(6, SIGNALING_MSG_TYPE_TRIGGER_OFFER);
+    TEST_ASSERT_EQUAL(7, SIGNALING_MSG_TYPE_READY);
+    TEST_ASSERT_EQUAL(8, SIGNALING_MSG_TYPE_READY_QUERY);
+    TEST_ASSERT_EQUAL(9, SIGNALING_MSG_TYPE_CLOSE_SESSION);
+}
+
+TEST_CASE("CLOSE_SESSION roundtrip keeps the peer id", "[signaling_serializer]")
+{
+    _init_serializer();
+
+    signaling_msg_t msg_in;
+    memset(&msg_in, 0, sizeof(msg_in));
+    msg_in.messageType = SIGNALING_MSG_TYPE_CLOSE_SESSION;
+    strncpy(msg_in.peerClientId, "viewer-42", sizeof(msg_in.peerClientId) - 1);
+
+    size_t serialized_len = 0;
+    char *serialized = serialize_signaling_message(&msg_in, &serialized_len);
+    TEST_ASSERT_NOT_NULL(serialized);
+
+    signaling_msg_t msg_out;
+    memset(&msg_out, 0, sizeof(msg_out));
+    TEST_ASSERT_EQUAL(ESP_OK, deserialize_signaling_message(serialized, serialized_len, &msg_out));
+    TEST_ASSERT_EQUAL(SIGNALING_MSG_TYPE_CLOSE_SESSION, msg_out.messageType);
+    TEST_ASSERT_EQUAL_STRING("viewer-42", msg_out.peerClientId);
+
+    free(serialized);
+    free(msg_out.payload);
+}
