@@ -587,6 +587,12 @@ int signaling_bridge_adapter_register_bridge_cmd_handlers(void)
 {
 #if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED && (CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5)
     /* ICE exchange uses signaling channel (SIGNALING_MSG_TYPE_ICE_REQUEST/RESPONSE), not bridge_cmd */
+    /* The GET_TIME handler needs the bridge_cmd framework, so init it here and
+     * do not rely on the app. A second call from the app is harmless. */
+    if (bridge_cmd_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize bridge_cmd");
+        return -1;
+    }
     if (bridge_cmd_register_handler(BRIDGE_CMD_GET_TIME, handle_get_time_request) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register GET_TIME bridge_cmd handler");
         return -1;

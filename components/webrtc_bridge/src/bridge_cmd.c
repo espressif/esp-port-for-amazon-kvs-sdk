@@ -406,7 +406,7 @@ static esp_err_t bridge_cmd_send_response(uint32_t cmd_id, uint32_t req_id,
 esp_err_t bridge_cmd_init(void)
 {
     if (s_initialized) {
-        ESP_LOGW(TAG, "Already initialized");
+        ESP_LOGD(TAG, "Already initialized");
         return ESP_OK;
     }
 
