@@ -640,6 +640,27 @@ static void sink_free_resources(struct video_raw_sink_s *s)
     }
 }
 
+/* Camera buffers claimed by the registered PASSTHROUGH and CONVERTED sinks. Under the sink lock. */
+static uint32_t committed_loans_locked(void)
+{
+    uint32_t committed = 0;
+    for (int i = 0; i < CONFIG_VIDEO_RAW_SINK_MAX; i++) {
+        if (s_sinks[i].in_use && (s_sinks[i].mode == VIDEO_RAW_MODE_PASSTHROUGH ||
+                                  s_sinks[i].mode == VIDEO_RAW_MODE_CONVERTED)) {
+            committed += s_sinks[i].cap;
+        }
+    }
+    return committed;
+}
+
+uint32_t video_raw_bus_loans_unclaimed(void)
+{
+    sink_lock();
+    const uint32_t committed = committed_loans_locked();
+    sink_unlock();
+    return committed < LOAN_CAP ? LOAN_CAP - committed : 0;
+}
+
 esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
                                   video_raw_sink_handle_t *out)
 {
@@ -691,13 +712,7 @@ esp_err_t video_raw_sink_register(const video_raw_sink_config_t *cfg,
 
     /* Reject Passthrough and Converted sinks that cannot be served. */
     if (cfg->mode == VIDEO_RAW_MODE_PASSTHROUGH || cfg->mode == VIDEO_RAW_MODE_CONVERTED) {
-        uint32_t committed = 0;
-        for (int i = 0; i < CONFIG_VIDEO_RAW_SINK_MAX; i++) {
-            if (s_sinks[i].in_use && (s_sinks[i].mode == VIDEO_RAW_MODE_PASSTHROUGH ||
-                                      s_sinks[i].mode == VIDEO_RAW_MODE_CONVERTED)) {
-                committed += s_sinks[i].cap;
-            }
-        }
+        const uint32_t committed = committed_loans_locked();
         if (committed + cap > LOAN_CAP) {
             sink_unlock();
             ESP_LOGE(TAG,

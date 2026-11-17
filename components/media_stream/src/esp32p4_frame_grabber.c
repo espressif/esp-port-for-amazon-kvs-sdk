@@ -986,6 +986,10 @@ static bool capture_fourcc(uint32_t pixfmt, uint32_t *out)
  * afterwards. A permanent reservation for something most projects never call - and
  * webrtc_person_detect does not call it at all - would be the wrong trade.
  *
+ * With the budget spent - the encoder sink alone takes all of it at the default
+ * CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT - the request registers INLINE instead. The one copy
+ * then runs on the pump, which costs at most a frame of capture time and claims no loan.
+ *
  * queue_depth 0: one frame, no staging. There is nothing to pipeline; the request wants the
  * next frame and then it is done.
  */
@@ -1023,17 +1027,15 @@ static void snapshot_sink_on_frame(const video_raw_frame_t *frame, void *user)
     }
 }
 
-/* Claim the sink for one request. ESP_ERR_NO_MEM here means the camera pool is fully lent out
- * to the streaming sinks; it goes back to the caller as a failed snapshot, which is the right
- * answer for an on-demand operation - unlike the encoder sink, nothing is silently degraded by
- * refusing it. */
+/* Claim the sink for one request: PASSTHROUGH while a camera buffer is free to lend,
+ * INLINE when the streaming sinks have claimed them all. */
 static esp_err_t snapshot_sink_arm(void)
 {
     if (s_snapshot_sink != NULL) {
         return ESP_ERR_INVALID_STATE;       /* A request is already in flight. */
     }
 
-    const video_raw_sink_config_t cfg = {
+    video_raw_sink_config_t cfg = {
         .name        = "snapshot",
         .mode        = VIDEO_RAW_MODE_PASSTHROUGH,
         .on_frame    = snapshot_sink_on_frame,
@@ -1044,7 +1046,16 @@ static esp_err_t snapshot_sink_arm(void)
         .task_prio   = 3,
     };
 
-    const esp_err_t err = video_raw_sink_register(&cfg, &s_snapshot_sink);
+    if (video_raw_bus_loans_unclaimed() < 1) {
+        ESP_LOGI(TAG, "Snapshot: every camera buffer is on loan; copying on the capture pump");
+        cfg.mode = VIDEO_RAW_MODE_INLINE;
+    }
+    esp_err_t err = video_raw_sink_register(&cfg, &s_snapshot_sink);
+    if (err == ESP_ERR_NO_MEM && cfg.mode == VIDEO_RAW_MODE_PASSTHROUGH) {
+        /* Another sink took the last buffer since the check. */
+        cfg.mode = VIDEO_RAW_MODE_INLINE;
+        err = video_raw_sink_register(&cfg, &s_snapshot_sink);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Snapshot sink registration failed: %s", esp_err_to_name(err));
         s_snapshot_sink = NULL;
