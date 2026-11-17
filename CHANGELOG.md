@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Co-processor flash layout:** `network_adapter` puts its partition table at
+  `0xC000` and `ota_0` at `0x20000` on every target, like `signaling_only` and the
+  RainMaker split cameras. The P4-EYE and P4X-EYE overlays of `esp_camera`,
+  `webrtc_classic` and `webrtc_person_detect` flash it there. This fixes
+  `webrtc_classic` on the P4-C5 core board, whose overlay already used `0xC000` and
+  `0x20000` and so wrote `network_adapter` to the wrong offsets. The overlays no longer
+  set the flasher addresses, because `slave_flasher`'s defaults match every image.
+  A co-processor reflashed over UART with the new layout loses the Wi-Fi credentials
+  in its NVS once, so the board must be provisioned again. Hosted OTA cannot cross this
+  change: the new app reads its partition table at `0xC000`, so on a co-processor with
+  the old layout it finds no NVS and aborts at every boot. Reflash the co-processor over
+  UART once. The M5Stack Tab5's C6, which only hosted OTA can update, keeps the old
+  layout.
+- **Co-processor PSRAM:** `network_adapter` enables PSRAM on the chips that support it
+  (ESP32, ESP32-S3, ESP32-C5, ESP32-C61), and Wi-Fi and lwIP allocate from it. On the
+  P4-C5 core board, BLE provisioning of a standalone example no longer reboots the C5.
+  With everything in internal RAM, about 16 KB was left while BLE advertised, and its
+  BLE controller asserted on the first large packet from the host. A module without
+  PSRAM still boots.
 - Session setup prints fewer lines at the default log level. The setup details
   (ICE servers, offer and answer, session count) print with
   `app_webrtc_set_log_level(3)`. The SDK PROFILE timings print at DEBUG under the

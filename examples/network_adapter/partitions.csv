@@ -1,0 +1,10 @@
+# ESP-IDF Partition Table
+# Name, Type, SubType, Offset, Size, Flags
+# Targets other than the C5 and C6, which have their own copy. Same layout as
+# the other co-processor images the P4 flashes: partition table at 0xC000,
+# first app at 0x20000.
+nvs,data,nvs,0xD000,16K,
+otadata,data,ota,0x11000,8K,
+phy_init,data,phy,0x13000,4K,
+ota_0,app,ota_0,0x20000,1536K,
+ota_1,app,ota_1,0x1A0000,1536K,

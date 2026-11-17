@@ -44,7 +44,8 @@ menu "Slave Flasher Configuration"
         depends on SLAVE_FLASHER_ENABLE
         help
             Flash address where the partition table will be written.
-            Default is 0xC000 (49152 decimal).
+            Default is 0xC000 (49152 decimal). The C5 and C6 builds of network_adapter,
+            signaling_only and the RainMaker split cameras all put their partition table here.
 
     config SLAVE_APPLICATION_ADDRESS
         hex "Application Address"
@@ -52,7 +53,8 @@ menu "Slave Flasher Configuration"
         depends on SLAVE_FLASHER_ENABLE
         help
             Flash address where the application binary will be written.
-            Default is 0x20000 (131072 decimal).
+            Default is 0x20000 (131072 decimal). The C5 and C6 builds of network_adapter,
+            signaling_only and the RainMaker split cameras all put their first app here.
 
     config SLAVE_UART_RX_PIN
         int "UART RX Pin"

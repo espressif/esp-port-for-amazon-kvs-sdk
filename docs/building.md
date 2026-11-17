@@ -205,8 +205,10 @@ rather than repeating it.
   storage extending past ~10 MB) will not fit an 8 MB `CONFIG_ESPTOOLPY_FLASHSIZE` — set
   the flash size to match the board (16 MB) in the board overlay. Conversely a small
   (~3 MB) single-`factory` layout fits 8 MB fine.
-- **Partition table offset.** Examples use `CONFIG_PARTITION_TABLE_OFFSET=0x9000` (some
-  layouts use `0xC000`); the first app partition must be 64 KB-aligned (`0x10000`/`0x20000`).
+- **Partition table offset.** The first app partition must be 64 KB-aligned. Every
+  ESP32-C5 and ESP32-C6 co-processor image the P4 flashes (`network_adapter`, `signaling_only`
+  and the RainMaker split cameras) puts the partition table at `0xC000` and the first app at `0x20000`.
+  These are `slave_flasher`'s defaults, so one P4 build can flash any of them.
 - **Only bootloader logs on the monitor.** Wrong console channel — see
   [Console output](#console-output).
 - **Build/Wi-Fi/allocation failures on P4+C6.** Confirm the C6 `network_adapter` is

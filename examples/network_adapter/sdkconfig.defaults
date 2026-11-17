@@ -22,10 +22,24 @@ CONFIG_ESP32_WIFI_NVS_ENABLED=
 
 # OTA
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_TWO_OTA=y
+# The C5 and C6 defaults name their own copy of this layout.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0xC000
 
 # OS
 CONFIG_FREERTOS_HZ=1000
+
+# PSRAM, on the chips that support it (ESP32, S3, C5, C61). Without it Wi-Fi,
+# lwIP, the transport buffers and the BT controller share internal RAM. On the
+# C5 about 16 KB is left while BLE advertises, and the BLE controller asserts on
+# the first large HCI ACL packet from the host. A module without PSRAM still
+# boots.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# Internal RAM kept free for DMA. The transport buffers must be internal.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 
 #Disable enterprise support by default
 CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n

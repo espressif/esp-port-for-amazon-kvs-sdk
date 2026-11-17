@@ -42,13 +42,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 #
 # Slave Flasher (host-side OTA path for the C6 slave over UART).
-# Addresses must match the C6 firmware packed into target-firmware/.
-# rmaker_split_camera (RainMaker C6 reference): partition table at 0xC000,
-# ota_0 (first app slot) at 0x20000.
+# The C6 firmware uses slave_flasher's default addresses (partition table at
+# 0xC000, first app at 0x20000), like every co-processor image the P4 flashes.
 #
 CONFIG_SLAVE_FLASHER_ENABLE=y
-CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0xC000
-CONFIG_SLAVE_APPLICATION_ADDRESS=0x20000
 CONFIG_SLAVE_UART_RX_PIN=36
 CONFIG_SLAVE_UART_TX_PIN=35
 CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33

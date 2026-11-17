@@ -79,14 +79,10 @@ CONFIG_LV_COLOR_16_SWAP=y
 # with the C6 on the same PCB, so the P4 image carries the C6 binaries in
 # the slave SPIFFS partition and flashes them on boot. EV / Function dev
 # boards use ESP-Prog on the C6 instead; their overlays leave this off.
-# Addresses match the network_adapter C6 firmware that the standalone
-# example pairs with — minimal no-OTA layout: partition table at 0x8000,
-# app at 0x10000. (rmaker_split_camera uses a different layout — see the
-# streaming_only example for that pairing.)
+# The C6 firmware uses slave_flasher's default addresses (partition table at
+# 0xC000, first app at 0x20000), like every co-processor image the P4 flashes.
 #
 CONFIG_SLAVE_FLASHER_ENABLE=y
-CONFIG_SLAVE_PARTITION_TABLE_ADDRESS=0x8000
-CONFIG_SLAVE_APPLICATION_ADDRESS=0x10000
 CONFIG_SLAVE_UART_RX_PIN=36
 CONFIG_SLAVE_UART_TX_PIN=35
 CONFIG_SLAVE_GPIO0_TRIGGER_PIN=33
