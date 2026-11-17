@@ -288,6 +288,14 @@ static WEBRTC_STATUS signalingClientErrorWrapper(uint64_t customData, WEBRTC_STA
  * @brief Wrapper for peer connection state change callbacks
  * This handles states from the peer connection interface, including media startup signals
  */
+/* A session's streaming events, in the only order they may be raised. The state
+ * moves forward only: STARTED from NONE, ENDED from anything. A session that ended
+ * cannot start again, so a late MEDIA_STARTING (a re-offer, or an answer that
+ * arrives after the session was torn down) raises nothing. */
+#define STREAMING_STATE_NONE    0
+#define STREAMING_STATE_STARTED 1
+#define STREAMING_STATE_ENDED   2
+
 static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webrtc_peer_state_t state)
 {
     // Try to determine if this is a specific session or global config
@@ -340,10 +348,15 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
                 if (ATOMIC_EXCHANGE_BOOL(&pAppWebRTCSession->connectedAnnounced, FALSE)) {
                     raiseEvent(APP_WEBRTC_EVENT_PEER_DISCONNECTED, 0, pAppWebRTCSession->peerId, "Peer disconnected");
                 }
-                // Outside that gate on purpose: STREAMING_STOPPED pairs with
-                // STREAMING_STARTED, which is raised on MEDIA_STARTING while the offer is
-                // handled -- before ICE completes and so before connectedAnnounced is set.
-                raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, pAppWebRTCSession->peerId, "Media streaming stopped");
+                // A gate of its own: STREAMING_STOPPED pairs with STREAMING_STARTED, which
+                // is raised on MEDIA_STARTING while the offer is handled -- before ICE
+                // completes and so before connectedAnnounced is set. A session whose offer
+                // was rejected before media started never raised STREAMING_STARTED, and an
+                // unpaired STREAMING_STOPPED would count down another viewer's session.
+                if (ATOMIC_EXCHANGE(&pAppWebRTCSession->streamingState, STREAMING_STATE_ENDED) ==
+                    STREAMING_STATE_STARTED) {
+                    raiseEvent(APP_WEBRTC_EVENT_STREAMING_STOPPED, 0, pAppWebRTCSession->peerId, "Media streaming stopped");
+                }
                 ATOMIC_STORE_BOOL(&pAppWebRTCSession->terminateFlag, TRUE);  // Mark THIS session
                 CVAR_BROADCAST(pSampleConfiguration->cvar);
                 ESP_LOGI(TAG, "Marked specific peer %s for termination (not affecting other peers)",
@@ -369,7 +382,14 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
 
         case WEBRTC_PEER_STATE_MEDIA_STARTING:
             if (pAppWebRTCSession != NULL) {
-                raiseEvent(APP_WEBRTC_EVENT_STREAMING_STARTED, 0, pAppWebRTCSession->peerId, "Media streaming started");
+                // Once per session: a re-offer on a live session (renegotiation, or a
+                // trigger-offer to a connected peer) reaches MEDIA_STARTING again, and a
+                // second STREAMING_STARTED would never be paired with a STREAMING_STOPPED.
+                SIZE_T expected = STREAMING_STATE_NONE;
+                if (ATOMIC_COMPARE_EXCHANGE(&pAppWebRTCSession->streamingState, &expected,
+                                            STREAMING_STATE_STARTED)) {
+                    raiseEvent(APP_WEBRTC_EVENT_STREAMING_STARTED, 0, pAppWebRTCSession->peerId, "Media streaming started");
+                }
             } else {
                 ESP_LOGI(TAG, "Media starting (bridge mode)");
                 raiseEvent(APP_WEBRTC_EVENT_STREAMING_STARTED, 0, NULL, "Media streaming started");
@@ -1211,6 +1231,13 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
     webrtc_message_t* pWebRtcMessageCopy = NULL;
 
     CHK(pSampleConfiguration != NULL, STATUS_NULL_ARG);
+
+    /* Before any lock and any session work: an app that sleeps when idle needs to
+     * stay up for the whole negotiation, and fetching the ICE servers alone can
+     * take seconds. */
+    if (pWebRtcMessage->message_type == WEBRTC_MESSAGE_TYPE_OFFER) {
+        raiseEvent(APP_WEBRTC_EVENT_RECEIVED_OFFER, 0, pWebRtcMessage->peer_client_id, "Received offer");
+    }
 
     MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
     locked = TRUE;

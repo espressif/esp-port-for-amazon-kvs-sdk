@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`app_webrtc` events:** `APP_WEBRTC_EVENT_STREAMING_STARTED` and
+  `APP_WEBRTC_EVENT_STREAMING_STOPPED` are raised once per session, as a pair. A
+  re-offer on a live session raised `STREAMING_STARTED` again, and a session whose
+  offer was rejected before media started raised `STREAMING_STOPPED` alone, so an
+  app that counted sessions from these events could miscount. A session that has
+  ended does not start again. `APP_WEBRTC_EVENT_RECEIVED_OFFER` is now raised when
+  an offer arrives; it was declared but never raised.
 - **`signaling_only` bridge commands:** the signaling bridge adapter initialises
   `bridge_cmd` itself. An app no longer has to call `bridge_cmd_init()` before
   `app_webrtc_init()`.

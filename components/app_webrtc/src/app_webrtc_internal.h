@@ -206,6 +206,7 @@ struct __AppWebRTCSession {
     // === Core Session Management ===
     volatile ATOMIC_BOOL terminateFlag;        //!< Flag to indicate session should be terminated
     volatile ATOMIC_BOOL connectedAnnounced;   //!< PEER_CONNECTED was raised for this session, so PEER_DISCONNECTED is owed
+    volatile SIZE_T streamingState;            //!< STREAMING_STATE_*: STREAMING_STARTED and STREAMING_STOPPED each at most once, in order
     volatile ATOMIC_BOOL peerIdReceived;       //!< Flag indicating peer ID has been received
     volatile ATOMIC_BOOL firstFrame;           //!< Flag for first frame handling
     char peerId[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN + 1]; //!< Peer identifier string
