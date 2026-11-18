@@ -241,3 +241,7 @@ CONFIG_CAPTURE_MEDIA_STREAM=y
 CONFIG_CAPTURE_MEDIA_STREAM_WIDTH=1920
 CONFIG_CAPTURE_MEDIA_STREAM_HEIGHT=1080
 CONFIG_CAPTURE_MEDIA_STREAM_QUALITY=2
+
+# LVGL 9's builtin heap is a static 64 KB pool in internal RAM. Allocate from the system
+# heap instead, so LVGL takes only what the video canvas and its labels need.
+CONFIG_LV_USE_CLIB_MALLOC=y

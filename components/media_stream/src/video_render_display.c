@@ -77,7 +77,7 @@ struct video_render_display_ctx {
     video_render_display_cfg_t cfg;
     uint16_t                   canvas_w;
     uint16_t                   canvas_h;
-    lv_color_t                *canvas_buf;
+    uint16_t                  *canvas_buf;   /* RGB565, native little-endian */
     lv_obj_t                  *canvas;
     uint32_t                   frame_count;
     /* FPS overlay state (label + sliding 1s window). */
@@ -113,17 +113,9 @@ static inline uint16_t yuv_to_rgb565(int y, int u, int v)
     if (r < 0)   r = 0;   else if (r > 255) r = 255;
     if (g < 0)   g = 0;   else if (g > 255) g = 255;
     if (b < 0)   b = 0;   else if (b > 255) b = 255;
-    /* Panel byte-order is encoded via the LVGL convention
-     * CONFIG_LV_COLOR_16_SWAP: when set, the panel wants MSB-first bytes
-     * (e.g. ST7789 SPI on P4-EYE); when clear, the panel takes native LE
-     * (e.g. EK79007 / ILI9881C DSI). Match accordingly so the same
-     * source compiles correctly for both panel families. */
-    uint16_t rgb = (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-#if CONFIG_LV_COLOR_16_SWAP
-    return __builtin_bswap16(rgb);
-#else
-    return rgb;
-#endif
+    /* Native-endian RGB565. Panels that want MSB-first bytes (ST7789 SPI on
+     * P4-EYE) get them from esp_lvgl_port at flush, via the BSP's swap_bytes. */
+    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
 /* Pack a center-cropped I420 sub-region into a contiguous (Y || U || V)
@@ -204,15 +196,12 @@ static void render_i420_to_rgb565(const uint8_t *y, const uint8_t *u, const uint
     }
 }
 
-/* LVGL display refresh monitor — fires once per real screen refresh. We use
- * it to log actual LCD flushes-per-second alongside our "played fps" counter
- * which only measures canvas-invalidate-call rate. */
-static void video_render_lvgl_monitor_cb(struct _lv_disp_drv_t *drv,
-                                         uint32_t time_ms, uint32_t px)
+/* LV_EVENT_RENDER_READY handler — fires once per refresh that actually drew
+ * something. We use it to log actual LCD flushes-per-second alongside our
+ * "played fps" counter, which only measures the canvas-invalidate-call rate. */
+static void video_render_lvgl_render_ready_cb(lv_event_t *e)
 {
-    (void)drv;
-    (void)time_ms;
-    (void)px;
+    (void)e;
     static uint32_t total;
     static uint32_t window_count;
     static uint64_t window_start_us;
@@ -240,12 +229,12 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
 
     /* Bring up the BSP display if nobody else has. Some integrations (e.g.
      * a preview path) may have already called bsp_display_start; detect
-     * that via lv_disp_get_default() and skip re-init. Using the "with
+     * that via lv_display_get_default() and skip re-init. Using the "with
      * config" variant here so the LVGL task lands on SPIRAM stack with
      * a relaxed timer period - the same shape the standalone example's
      * display_preview.c uses on P4-EYE. Backlight is off by default on
      * P4-EYE; bsp_display_brightness_set is required to see anything. */
-    if (lv_disp_get_default() == NULL) {
+    if (lv_display_get_default() == NULL) {
         bsp_display_cfg_t disp_cfg = {
             .lvgl_port_cfg = {
                 /* Bumped from 2 → 4 so the LVGL task is at least at the
@@ -288,9 +277,8 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
             },
 #endif
             .flags = {
-                /* P4's GDMA can address PSRAM; lvgl8 esp_lvgl_port_disp
-                 * needs the SOC_PSRAM_DMA_CAPABLE gate (mirrors lvgl9).
-                 * See downstream_patches/lvgl_port-lvgl8-allow-dma-spiram.patch. */
+                /* P4's GDMA can address PSRAM (SOC_PSRAM_DMA_CAPABLE), so
+                 * esp_lvgl_port accepts a DMA draw buffer in SPIRAM. */
                 .buff_dma    = true,
                 .buff_spiram = true,
             },
@@ -301,10 +289,10 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
              * BSP returns NULL there even though lvgl_port_init / lcd_init /
              * brightness_init have already succeeded — bsp_display_lcd_init
              * is registered with LVGL as the default display before touch
-             * init runs. Recover that display via lv_disp_get_default() and
+             * init runs. Recover that display via lv_display_get_default() and
              * keep going without touch input. Track upstream BSP fix to
              * make touch-init optional. */
-            if (lv_disp_get_default() == NULL) {
+            if (lv_display_get_default() == NULL) {
                 ESP_LOGE(TAG, "bsp_display_start_with_config failed and no LVGL display registered");
                 return ESP_FAIL;
             }
@@ -321,22 +309,25 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
         ESP_LOGE(TAG, "bsp_display_lock timeout on init");
         return ESP_FAIL;
     }
-    lv_disp_t *disp = lv_disp_get_default();
-    uint32_t disp_w = lv_disp_get_hor_res(disp);
-    uint32_t disp_h = lv_disp_get_ver_res(disp);
+    lv_display_t *disp = lv_display_get_default();
+    uint32_t disp_w = lv_display_get_horizontal_resolution(disp);
+    uint32_t disp_h = lv_display_get_vertical_resolution(disp);
 
-    /* Hook LVGL's monitor_cb so we can count *real* LCD refreshes (not just
-     * canvas-invalidate calls). Fires once per screen refresh completion.
-     * Lets us answer "are we actually pushing N fps to the panel, or is LVGL
-     * coalescing our invalidates and only flushing far fewer?". */
-    if (disp && disp->driver && disp->driver->monitor_cb == NULL) {
-        disp->driver->monitor_cb = video_render_lvgl_monitor_cb;
+    /* Count *real* LCD refreshes (not just canvas-invalidate calls), so the
+     * log answers "are we actually pushing N fps to the panel, or is LVGL
+     * coalescing our invalidates and only flushing far fewer?". Registered
+     * once: the display outlives a player deinit/init cycle. */
+    static bool render_ready_hooked;
+    if (disp && !render_ready_hooked) {
+        lv_display_add_event_cb(disp, video_render_lvgl_render_ready_cb,
+                                LV_EVENT_RENDER_READY, NULL);
+        render_ready_hooked = true;
     }
     /* Clear any default styles on the active screen so the canvas gets a
      * clean black background (matches the preview's appearance). */
-    lv_obj_remove_style_all(lv_scr_act());
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
+    lv_obj_remove_style_all(lv_screen_active());
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
     bsp_display_unlock();
 
     struct video_render_display_ctx *ctx =
@@ -351,7 +342,7 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
     /* Cache-line align the canvas buffer in SPIRAM so later CPU/DMA
      * mixing doesn't step on partial lines. Matches the P4-EYE preview's
      * alloc pattern. */
-    const size_t buf_bytes = (size_t)ctx->canvas_w * ctx->canvas_h * sizeof(lv_color_t);
+    const size_t buf_bytes = (size_t)ctx->canvas_w * ctx->canvas_h * sizeof(uint16_t);
     ctx->canvas_buf = heap_caps_aligned_calloc(64, 1, buf_bytes, RENDER_ALLOC_CAPS);
     if (ctx->canvas_buf == NULL) {
         ESP_LOGE(TAG, "canvas buffer alloc failed (%zu bytes)", buf_bytes);
@@ -375,15 +366,9 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
         esp_imgfx_color_convert_cfg_t cc_cfg = {
             .in_res          = { .width = (int16_t)ctx->canvas_w, .height = (int16_t)ctx->canvas_h },
             .in_pixel_fmt    = ESP_IMGFX_PIXEL_FMT_I420,
-            /* Panel byte-order, gated on LVGL's canonical signal that each
-             * BSP sets for its panel:
-             *   CONFIG_LV_COLOR_16_SWAP=y -> MSB-first  (ST7789 SPI, P4-EYE)
-             *   CONFIG_LV_COLOR_16_SWAP=n -> native LE  (EK79007/ILI9881C DSI) */
-#if CONFIG_LV_COLOR_16_SWAP
-            .out_pixel_fmt   = ESP_IMGFX_PIXEL_FMT_RGB565_BE,
-#else
+            /* Native LE, matching the LV_COLOR_FORMAT_RGB565 canvas; a
+             * big-endian panel is swapped at flush by esp_lvgl_port. */
             .out_pixel_fmt   = ESP_IMGFX_PIXEL_FMT_RGB565_LE,
-#endif
             .color_space_std = ESP_IMGFX_COLOR_SPACE_STD_BT601,
         };
         esp_imgfx_err_t cc_ret = esp_imgfx_color_convert_open(&cc_cfg, &ctx->cc_handle);
@@ -403,7 +388,7 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
         heap_caps_free(ctx);
         return ESP_FAIL;
     }
-    ctx->canvas = lv_canvas_create(lv_scr_act());
+    ctx->canvas = lv_canvas_create(lv_screen_active());
     if (ctx->canvas == NULL) {
         bsp_display_unlock();
         heap_caps_free(ctx->canvas_buf);
@@ -418,7 +403,7 @@ esp_err_t video_render_display_init(const video_render_display_cfg_t *cfg,
     lv_obj_remove_style_all(ctx->canvas);
     lv_canvas_set_buffer(ctx->canvas, ctx->canvas_buf,
                          ctx->canvas_w, ctx->canvas_h,
-                         LV_IMG_CF_TRUE_COLOR);
+                         LV_COLOR_FORMAT_RGB565);
     lv_obj_set_pos(ctx->canvas, 0, 0);
     lv_obj_set_size(ctx->canvas, ctx->canvas_w, ctx->canvas_h);
 
@@ -475,11 +460,7 @@ static void resize_canvas_if_needed(video_render_display_handle_t handle,
     esp_imgfx_color_convert_cfg_t cc_cfg = {
         .in_res          = { .width = (int16_t)target_w, .height = (int16_t)target_h },
         .in_pixel_fmt    = ESP_IMGFX_PIXEL_FMT_I420,
-#if CONFIG_LV_COLOR_16_SWAP
-        .out_pixel_fmt   = ESP_IMGFX_PIXEL_FMT_RGB565_BE,
-#else
         .out_pixel_fmt   = ESP_IMGFX_PIXEL_FMT_RGB565_LE,
-#endif
         .color_space_std = ESP_IMGFX_COLOR_SPACE_STD_BT601,
     };
     esp_imgfx_err_t cc_ret = esp_imgfx_color_convert_open(&cc_cfg, &handle->cc_handle);
@@ -491,7 +472,7 @@ static void resize_canvas_if_needed(video_render_display_handle_t handle,
     /* Re-bind the LVGL canvas at the new dims and re-centre it. */
     if (bsp_display_lock(RENDER_LOCK_MS)) {
         lv_canvas_set_buffer(handle->canvas, handle->canvas_buf,
-                             target_w, target_h, LV_IMG_CF_TRUE_COLOR);
+                             target_w, target_h, LV_COLOR_FORMAT_RGB565);
         lv_obj_set_size(handle->canvas, target_w, target_h);
         lv_obj_center(handle->canvas);
         bsp_display_unlock();
@@ -538,7 +519,7 @@ esp_err_t video_render_display_render_i420(video_render_display_handle_t handle,
         };
         esp_imgfx_data_t out = {
             .data     = (uint8_t *)handle->canvas_buf,
-            .data_len = (uint32_t)handle->canvas_w * handle->canvas_h * sizeof(lv_color_t),
+            .data_len = (uint32_t)handle->canvas_w * handle->canvas_h * sizeof(uint16_t),
         };
         esp_imgfx_err_t cc_ret = esp_imgfx_color_convert_process(handle->cc_handle, &in, &out);
         if (cc_ret != ESP_IMGFX_ERR_OK) {
@@ -564,7 +545,7 @@ esp_err_t video_render_display_render_i420(video_render_display_handle_t handle,
     if (bsp_display_lock(RENDER_LOCK_MS / 2)) {
         lv_canvas_set_buffer(handle->canvas, handle->canvas_buf,
                              handle->canvas_w, handle->canvas_h,
-                             LV_IMG_CF_TRUE_COLOR);
+                             LV_COLOR_FORMAT_RGB565);
         lv_obj_invalidate(handle->canvas);
         bsp_display_unlock();
     } else {
@@ -613,11 +594,11 @@ void video_render_display_deinit(video_render_display_handle_t handle)
     }
     if (bsp_display_lock(RENDER_LOCK_MS)) {
         if (handle->fps_label) {
-            lv_obj_del(handle->fps_label);
+            lv_obj_delete(handle->fps_label);
             handle->fps_label = NULL;
         }
         if (handle->canvas) {
-            lv_obj_del(handle->canvas);
+            lv_obj_delete(handle->canvas);
             handle->canvas = NULL;
         }
         bsp_display_unlock();

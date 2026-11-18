@@ -151,25 +151,17 @@ This initialization order is enforced in the ``media_stream`` component and shou
 LVGL Memory Configuration
 --------------------------
 
-**Custom Memory Allocator**
+**Memory Pool**
 
-The display uses a custom LVGL memory allocator to save internal RAM:
+The player renders with LVGL 9. Its builtin ``lv_malloc`` pool is a static 64 KB block of
+internal RAM, so the examples make LVGL allocate from the system heap instead. LVGL then takes
+only what the player's canvas and labels need, and with ``CONFIG_SPIRAM_USE_MALLOC=y`` that
+heap includes SPIRAM:
 
 .. code-block:: c
 
-   // Configure in sdkconfig.defaults.esp32p4:
-   CONFIG_LV_USE_BUILTIN_MALLOC=n
-   CONFIG_LV_USE_CUSTOM_MALLOC=y
-
-   // Allocates LVGL memory pool from SPIRAM
-   void *lv_malloc_core(size_t size) {
-       return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
-   }
-
-**Memory Savings**
-
-* Default: ~64KB internal RAM for LVGL memory pool
-* Custom: 0KB internal RAM (all in SPIRAM)
+   // sdkconfig.defaults.esp32p4
+   CONFIG_LV_USE_CLIB_MALLOC=y
 
 **Display Buffer Configuration**
 
@@ -323,7 +315,7 @@ Some WebRTC senders don't properly set the keyframe flag, but still send I-frame
 **Display Shows Nothing**
 
 1. Check initialization order (camera before display)
-2. Verify LVGL custom malloc is enabled
+2. Check for LVGL out-of-memory asserts
 3. Check display power and backlight
 4. Review logs for ``bsp_display_start_with_config`` errors
 5. Wait for first keyframe to arrive (can take 1-2 seconds)

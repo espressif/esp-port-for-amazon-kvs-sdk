@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer stops and re-initialises Wi-Fi at every host boot and wake. Regenerate
   a saved `sdkconfig` to pick this up. The P4X-C5 core board's C5 has no PSRAM and
   still differs on the TX buffer type, so it re-initialises Wi-Fi as before.
+- **LVGL 9:** `media_stream` and the examples require `lvgl ^9`, so an app on LVGL 8
+  can no longer resolve `media_stream`. Overlays drop `CONFIG_LV_COLOR_16_SWAP` (the
+  BSP sets esp_lvgl_port's `swap_bytes`), rename `CONFIG_LV_DISP_DEF_REFR_PERIOD` to
+  `CONFIG_LV_DEF_REFR_PERIOD`, and set `CONFIG_LV_USE_CLIB_MALLOC=y` to avoid LVGL 9's
+  static 64 KB internal pool. An overlay that still sets the old refresh key falls back
+  to LVGL's default period without a warning. Regenerate a saved `sdkconfig`.
+- `app_wifi_prov_init()` accepts a default event loop the app created first.
 - **Co-processor flash layout:** `network_adapter` puts its partition table at
   `0xC000` and `ota_0` at `0x20000` on every target, like `signaling_only` and the
   RainMaker split cameras. The P4-EYE and P4X-EYE overlays of `esp_camera`,

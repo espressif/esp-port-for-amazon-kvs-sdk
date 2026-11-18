@@ -76,13 +76,14 @@ dependencies:
   # the render backend targets an LVGL canvas on the BSP's display.
   # Co-processor targets (C5/C6) have no display and skip the render
   # backend entirely — exclude these dependencies there.
+  # The renderer uses the LVGL 9 API (lv_display_t, LV_COLOR_FORMAT_RGB565);
+  # panel byte order comes from the BSP's esp_lvgl_port swap_bytes flag.
   lvgl/lvgl:
-    version: "^8"
+    version: "^9"
     rules:
       - if: "target not in [esp32c5, esp32c6, linux]"
 
-  # >=2.9.0: has the esp-bsp lvgl8 DMA+SPIRAM gate (PR #783) older versions
-  # lack, and drops the DPI callback IDF v5.5 deprecated (keeps -Werror clean).
+  # >=2.9.0: drops the DPI callback IDF v5.5 deprecated (keeps -Werror clean).
   espressif/esp_lvgl_port:
     version: "~2.9.0"
     rules:

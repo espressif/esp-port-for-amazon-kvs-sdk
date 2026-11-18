@@ -1817,9 +1817,9 @@ menu "Media Stream Configuration"
                 decode and render the inbound H.264 video stream from a
                 WebRTC peer connection on a connected display.
 
-                On when the target supports the `esp_h264` software decoder
-                (ESP32-P4 and ESP32-S3). Set to n to fall back to the no-op
-                stub and keep LVGL out of the build. The adapter is only
+                On by default on ESP32-P4 with a display BSP. Renders with
+                LVGL 9. Set to n to fall back to the no-op stub and keep
+                LVGL out of the build. The adapter is only
                 activated when the consumer actually wires the
                 `media_stream_get_video_player_if()` interface into
                 `app_webrtc_config.video_player`.

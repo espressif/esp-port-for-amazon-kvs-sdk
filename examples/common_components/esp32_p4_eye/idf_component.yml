@@ -10,7 +10,7 @@ tags:
 
 dependencies:
   idf: ">=5.4"
-  lvgl/lvgl: "^8"
+  lvgl/lvgl: "^9"
 
   espressif/esp_lvgl_port:
     version: "^2"
