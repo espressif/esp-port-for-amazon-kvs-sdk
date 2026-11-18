@@ -103,10 +103,10 @@ Cleans up all resources and unregisters handlers.
 ## Dependencies
 
 - `kvs_webrtc` - For WebRTC application interface and event handling
-- `network_coprocessor` - For RPC handler registration
 - `webrtc_bridge` - For bridge communication and message handling
 - `signaling_serializer` - For message serialization/deserialization
 - `esp_common` - For ESP-IDF common utilities
+- `espressif/esp_hosted` (3.x, component registry) - For RPC handler registration
 
 ## Integration
 

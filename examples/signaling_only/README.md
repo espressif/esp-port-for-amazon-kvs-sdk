@@ -9,6 +9,9 @@ See [**Deployment Modes → Split Mode**](../../README.md#deployment-modes) in t
 how the pair splits the pipeline across the two chips (with diagram). This page covers the C6
 (signaling) side; flash the P4 side from [streaming_only](../streaming_only/README.md).
 
+The co-processor side of esp_hosted comes from the component registry (`espressif/esp_hosted` in
+`main/idf_component.yml`).
+
 ## Features
 
 - **AWS KVS signaling** — full offer/answer + ICE-candidate exchange
