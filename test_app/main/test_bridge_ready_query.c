@@ -46,6 +46,16 @@ void  webrtc_bridge_register_handler(int msg_id, void (*cb)(const void *, int)) 
 
 void  app_webrtc_trigger_offer(const char *peer_id) { (void)peer_id; }
 
+/* Captures the close the P4 is asked for. */
+static int  g_close_count;
+static char g_close_peer[64];
+WEBRTC_STATUS app_webrtc_close_session(const char *peer_id)
+{
+    g_close_count++;
+    strncpy(g_close_peer, peer_id ? peer_id : "", sizeof(g_close_peer) - 1);
+    return WEBRTC_STATUS_SUCCESS;
+}
+
 int   esp_work_queue_add_task(void *fn, void *arg) { (void)fn; (void)arg; return 0; }
 
 /* ice_bridge_client_* — declared in bridge_signaling/src/ice_bridge_client.h */
@@ -119,6 +129,38 @@ TEST_CASE("READY_QUERY is not answered while the P4 cannot consume messages", "[
     TEST_ASSERT_EQUAL(ESP_OK, deserialize_signaling_message(g_last_sent, g_last_sent_len, &reply));
     TEST_ASSERT_EQUAL_INT_MESSAGE(SIGNALING_MSG_TYPE_READY, reply.messageType,
                                   "P4 reply to READY_QUERY was not a READY signal");
+
+    iface->free(client);
+}
+
+/* Split mode: the signaling device forwards app_webrtc_close_session() as CLOSE_SESSION, and
+ * the streaming device must close that peer's session itself. */
+TEST_CASE("CLOSE_SESSION closes the named peer's session", "[bridge_signaling]")
+{
+    signaling_serializer_init();
+
+    webrtc_signaling_client_if_t *iface = bridge_signaling_client_if_get();
+    bridge_signaling_config_t cfg = { .client_id = NULL, .log_level = 0 };
+    void *client = NULL;
+    TEST_ASSERT_EQUAL(WEBRTC_STATUS_SUCCESS, iface->init(&cfg, &client));
+    TEST_ASSERT_EQUAL(WEBRTC_STATUS_SUCCESS, iface->set_callbacks(client, 0, dummy_on_msg, NULL, NULL));
+
+    signaling_msg_t close = {0};
+    close.messageType = SIGNALING_MSG_TYPE_CLOSE_SESSION;
+    strncpy(close.peerClientId, "viewer-7", sizeof(close.peerClientId) - 1);
+    size_t len = 0;
+    char *buf = serialize_signaling_message(&close, &len);
+    TEST_ASSERT_NOT_NULL(buf);
+
+    g_close_count = 0;
+    memset(g_close_peer, 0, sizeof(g_close_peer));
+    reset_capture();
+    bridge_message_handler(buf, (int)len);
+    free(buf);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, g_close_count, "CLOSE_SESSION did not close a session");
+    TEST_ASSERT_EQUAL_STRING("viewer-7", g_close_peer);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, g_sent_count, "CLOSE_SESSION is not answered");
 
     iface->free(client);
 }

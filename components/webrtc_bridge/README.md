@@ -15,7 +15,7 @@ The bridge exposes two independent communication channels over the chosen transp
 
 ### 1. Signaling Message Channel (msg_id 0x1000)
 
-Passthrough of signaling JSON messages (SDP offers/answers, ICE candidates) between the signaling and streaming processors. Uses a simple send/receive API:
+Passthrough of signaling messages (SDP offers/answers, ICE candidates, and per-peer controls such as a trigger-offer or a session close) between the signaling and streaming processors. Uses a simple send/receive API:
 
 - `webrtc_bridge_send_message()` -- send a signaling message to the remote side
 - `webrtc_bridge_register_handler()` -- register a callback for incoming signaling messages

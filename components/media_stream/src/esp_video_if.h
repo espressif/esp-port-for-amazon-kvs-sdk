@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "H264FrameGrabber.h"
 #include "video_capture.h"
+#include <stdbool.h>
 #include <sys/time.h>
 
 /* Size of the V4L2 capture pool. Consumers that key a table off the buffer index
@@ -44,23 +45,32 @@ typedef struct {
 } video_fb_t;
 
 /**
- * @brief Initialize the video interface
+ * @brief Initialize the video interface and start the camera
+ *
+ * Counts as one esp_video_if_start(): pair it with esp_video_if_stop() or
+ * esp_video_if_deinit(). On an initialized interface this is the same as
+ * esp_video_if_start().
  *
  * @return esp_err_t ESP_OK on success, otherwise an error code
  */
 esp_err_t esp_video_if_init(void);
 
 /**
- * @brief Stop the video interface
+ * @brief Release the camera
  *
- * @return esp_err_t ESP_OK on success, otherwise an error code
+ * The camera stops streaming once every consumer that started it has stopped
+ * it; until then the call only drops this consumer's hold. Safe to call from
+ * any task.
+ *
+ * @return esp_err_t ESP_OK on success, ESP_FAIL when the interface is not initialized
  */
 esp_err_t esp_video_if_stop(void);
 
 /**
  * @brief Deinitialize the video interface while retaining mmap buffers
  *
- * This function stops streaming but keeps the mmap buffers and fd open so the next
+ * Releases the camera like esp_video_if_stop() (it stops streaming once no other
+ * consumer holds it) but keeps the mmap buffers and fd open so the next
  * init/start cycle can reuse them without reallocation. The camera hardware may
  * remain powered because the fd stays open.
  *
@@ -72,11 +82,43 @@ esp_err_t esp_video_if_stop(void);
 esp_err_t esp_video_if_deinit(void);
 
 /**
- * @brief Start the video interface
+ * @brief Start the camera, or join a stream another consumer already started
+ *
+ * Each successful call must be balanced by esp_video_if_stop(). A joining
+ * consumer gets the running format, not a resolution it set meanwhile; read
+ * it back with esp_video_if_get_resolution(). Safe to call from any task.
  *
  * @return esp_err_t ESP_OK on success, otherwise an error code
  */
 esp_err_t esp_video_if_start(void);
+
+/**
+ * @brief Stop and restart the stream for every consumer holding the camera
+ *
+ * For settings the camera only reads at STREAMON. Unlike esp_video_if_stop()
+ * followed by esp_video_if_start(), this restarts the stream even when several
+ * consumers hold the camera, and leaves their holds untouched. On UVC the
+ * capture buffers are freed and reallocated, so no consumer may be holding a
+ * frame across the call.
+ *
+ * @return esp_err_t
+ *  - ESP_OK: Stream restarted
+ *  - ESP_ERR_INVALID_STATE: No consumer holds the camera
+ *  - Other: STREAMON failed; the camera is off, the holds remain and a later
+ *    restart or start turns it on again
+ */
+esp_err_t esp_video_if_restart(void);
+
+/**
+ * @brief Whether the camera is held but not delivering frames
+ *
+ * True when a consumer holds the camera and it is either off (a restart failed)
+ * or streaming with its last few dequeues all failed. Starting the camera joins
+ * a stalled stream like any other: only a holder that knows no other task is
+ * dequeuing (none blocked in DQBUF, no frame checked out) may restart it, with
+ * esp_video_if_restart(), since on UVC the restart frees the capture buffers.
+ */
+bool esp_video_if_is_stalled(void);
 
 /**
  * @brief Get a raw video frame
@@ -115,6 +157,17 @@ esp_err_t esp_video_if_get_resolution(video_resolution_t *resolution);
 esp_err_t esp_video_if_get_pixel_format(uint32_t *pixelformat);
 
 /**
+ * @brief Get the size of one capture buffer, i.e. the largest frame the camera can deliver
+ *
+ * @param size Pointer to store the size in bytes
+ * @return esp_err_t
+ *  - ESP_OK: Successfully retrieved the size
+ *  - ESP_ERR_INVALID_ARG: size pointer is NULL
+ *  - ESP_ERR_INVALID_STATE: Capture is not streaming
+ */
+esp_err_t esp_video_if_get_frame_size(size_t *size);
+
+/**
  * @brief Get the resolution capture will first ask the camera for
  *
  * Usable before capture starts. The camera may still settle on a fallback, so prefer
@@ -140,6 +193,7 @@ esp_err_t esp_video_if_set_desired_resolution(const video_resolution_t *resoluti
  * descriptor. After this, a subsequent esp_video_if_init/start cycle will
  * reallocate buffers.
  *
- * @return esp_err_t ESP_OK on success, otherwise an error code
+ * @return esp_err_t ESP_OK on success, ESP_ERR_INVALID_STATE while a consumer
+ *         still holds the camera (every start must be stopped first)
  */
 esp_err_t esp_video_if_cleanup(void);

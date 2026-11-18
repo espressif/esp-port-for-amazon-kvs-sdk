@@ -40,6 +40,7 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <sys/lock.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -107,10 +108,39 @@ static uint32_t s_sps_len, s_pps_len;
  * tears the capture buffers down next cannot unmap memory the task is still reading. */
 static volatile bool s_task_parked = true;
 
+/* Only one task may dequeue from the camera. Starting and parking the pump and the frames
+ * a direct-grab snapshot dequeues each run under this lock, so a session that starts during
+ * a grab waits the few frames the grab takes instead of dequeuing alongside it. The grab
+ * brings the camera up before it takes the lock, so the session never waits on that. */
+static _lock_t s_dequeue_lock;
+
 #if USE_ESP_VIDEO_IF
 /* Set by esp32p4_frame_grabber_stop(): did every sink give its frames back? Consulted by
  * deinit before it frees anything a sink callback could still be touching. */
 static bool s_drain_clean = true;
+
+/* True while the grabber holds one of esp_video_if's camera holds. init() takes it, and
+ * deinit() or a failed init() gives it back. A deinit that leaves the camera up keeps it,
+ * so the next init() does not stack a second hold that no deinit would give back. */
+static bool s_cam_held;
+
+static esp_err_t cam_hold(void)
+{
+    if (s_cam_held) {
+        return ESP_OK;
+    }
+    esp_err_t ret = esp_video_if_init();
+    s_cam_held = (ret == ESP_OK);
+    return ret;
+}
+
+static void cam_release(void)
+{
+    if (s_cam_held) {
+        esp_video_if_deinit();
+        s_cam_held = false;
+    }
+}
 #endif
 
 /* A UVC camera's YUY2 is repacked for the hardware encoder; the software encoder reads it as
@@ -446,6 +476,23 @@ static inline void init_chip(void) {}
 static inline void init_clock(void) {}
 #endif
 
+/* init_clock() pulses the CSI host and bridge, ISP and GDMA through reset, so it may only
+ * run before the camera first streams. Both the grabber's first init and a cold snapshot
+ * need it, and a session can start while a snapshot holds the camera, so the first caller
+ * runs it and every later one finds it done. */
+static void init_clock_once(void)
+{
+    static _lock_t s_clock_lock;
+    static bool s_clock_ready;
+
+    _lock_acquire(&s_clock_lock);
+    if (!s_clock_ready) {
+        init_clock();
+        s_clock_ready = true;
+    }
+    _lock_release(&s_clock_lock);
+}
+
 void esp32p4_frame_grabber_cleanup(void)
 {
 #if SDCARD_SAVE
@@ -488,7 +535,8 @@ typedef struct {
     SemaphoreHandle_t done;             /* Signaled when raw frame is copied */
     uint8_t *buffer;                    /* Destination buffer (caller-allocated) */
     size_t buffer_size;                 /* Allocated buffer size */
-    size_t frame_len;                   /* Actual copied frame length */
+    size_t frame_len;                   /* Length of the offered frame, copied or not */
+    bool copied;                        /* The frame fit the buffer and was copied */
     uint16_t width;                     /* Frame width */
     uint16_t height;                    /* Frame height */
 } snapshot_intercept_t;
@@ -938,6 +986,10 @@ static bool capture_fourcc(uint32_t pixfmt, uint32_t *out)
  * afterwards. A permanent reservation for something most projects never call - and
  * webrtc_person_detect does not call it at all - would be the wrong trade.
  *
+ * With the budget spent - the encoder sink alone takes all of it at the default
+ * CONFIG_MEDIA_STREAM_CAM_BUFFER_COUNT - the request registers INLINE instead. The one copy
+ * then runs on the pump, which costs at most a frame of capture time and claims no loan.
+ *
  * queue_depth 0: one frame, no staging. There is nothing to pipeline; the request wants the
  * next frame and then it is done.
  */
@@ -959,10 +1011,13 @@ static void snapshot_sink_on_frame(const video_raw_frame_t *frame, void *user)
         return;
     }
 
-    const size_t copy_len = (frame->len <= s_snapshot.buffer_size)
-                            ? frame->len : s_snapshot.buffer_size;
-    memcpy(s_snapshot.buffer, frame->buffer, copy_len);
-    s_snapshot.frame_len = copy_len;
+    /* Never truncate: the JPEG encoder sizes its read from width x height, so a
+     * partial frame would have it read past the buffer. The request fails instead. */
+    s_snapshot.copied = (frame->len <= s_snapshot.buffer_size);
+    if (s_snapshot.copied) {
+        memcpy(s_snapshot.buffer, frame->buffer, frame->len);
+    }
+    s_snapshot.frame_len = frame->len;
     s_snapshot.width     = frame->width;
     s_snapshot.height    = frame->height;
     s_snapshot.requested = false;
@@ -972,17 +1027,15 @@ static void snapshot_sink_on_frame(const video_raw_frame_t *frame, void *user)
     }
 }
 
-/* Claim the sink for one request. ESP_ERR_NO_MEM here means the camera pool is fully lent out
- * to the streaming sinks; it goes back to the caller as a failed snapshot, which is the right
- * answer for an on-demand operation - unlike the encoder sink, nothing is silently degraded by
- * refusing it. */
+/* Claim the sink for one request: PASSTHROUGH while a camera buffer is free to lend,
+ * INLINE when the streaming sinks have claimed them all. */
 static esp_err_t snapshot_sink_arm(void)
 {
     if (s_snapshot_sink != NULL) {
         return ESP_ERR_INVALID_STATE;       /* A request is already in flight. */
     }
 
-    const video_raw_sink_config_t cfg = {
+    video_raw_sink_config_t cfg = {
         .name        = "snapshot",
         .mode        = VIDEO_RAW_MODE_PASSTHROUGH,
         .on_frame    = snapshot_sink_on_frame,
@@ -993,7 +1046,16 @@ static esp_err_t snapshot_sink_arm(void)
         .task_prio   = 3,
     };
 
-    const esp_err_t err = video_raw_sink_register(&cfg, &s_snapshot_sink);
+    if (video_raw_bus_loans_unclaimed() < 1) {
+        ESP_LOGI(TAG, "Snapshot: every camera buffer is on loan; copying on the capture pump");
+        cfg.mode = VIDEO_RAW_MODE_INLINE;
+    }
+    esp_err_t err = video_raw_sink_register(&cfg, &s_snapshot_sink);
+    if (err == ESP_ERR_NO_MEM && cfg.mode == VIDEO_RAW_MODE_PASSTHROUGH) {
+        /* Another sink took the last buffer since the check. */
+        cfg.mode = VIDEO_RAW_MODE_INLINE;
+        err = video_raw_sink_register(&cfg, &s_snapshot_sink);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Snapshot sink registration failed: %s", esp_err_to_name(err));
         s_snapshot_sink = NULL;
@@ -1121,7 +1183,7 @@ static esp_err_t register_raw_sink(void)
  * one is a use-after-free that would surface as corrupted video rather than a crash. So the bus is
  * halted and drained first, exactly as esp32p4_frame_grabber_stop() does it.
  *
- * @return the result of esp_video_if_start(), or ESP_ERR_INVALID_STATE when a sink was still
+ * @return the result of esp_video_if_restart(), or ESP_ERR_INVALID_STATE when a sink was still
  *         holding a camera frame and the restart was skipped rather than risked. The bus is
  *         resumed either way, so a failed restart leaves the pipeline idle rather than wedged,
  *         and an INVALID_STATE one leaves it streaming exactly as it was.
@@ -1139,8 +1201,9 @@ static esp_err_t uvc_restart_stream(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_video_if_stop();
-    esp_err_t err = esp_video_if_start();
+    /* Not stop() + start(): with another consumer holding the camera that pair only moves
+     * the hold count down and up again and reports success without a STREAMOFF. */
+    esp_err_t err = esp_video_if_restart();
     if (err == ESP_OK) {
         err = register_raw_sink();
     }
@@ -1368,8 +1431,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
             }
         }
         // Reinitialize esp_video_if if it was deinitialized (for power/security reasons)
-        // esp_video_if_init() will check internally and return early if already initialized
-        esp_err_t ret = esp_video_if_init();
+        esp_err_t ret = cam_hold();
         if (ret != ESP_OK) {
             /* Must be reported, not just logged: the caller starts the pump next, and
                that task would immediately DQBUF a camera that is not there. */
@@ -1381,6 +1443,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
          * correct follows from that. No-op when the format is unchanged. */
         ret = register_raw_sink();
         if (ret != ESP_OK) {
+            cam_release();
             return ret;
         }
 #endif
@@ -1388,7 +1451,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
     }
 
     init_chip();
-    init_clock();
+    init_clock_once();
 
 #if H264_ENCODE
     /* Set once the encoder is up, so a failure after that takes it down again. */
@@ -1407,7 +1470,7 @@ esp_err_t esp32p4_frame_grabber_init(void)
      * outright here kills the whole session for what is often a transient miss. */
     esp_err_t ret = ESP_FAIL;
     for (int attempt = 1; attempt <= CAMERA_INIT_MAX_ATTEMPTS; attempt++) {
-        ret = esp_video_if_init();
+        ret = cam_hold();
         if (ret == ESP_OK) {
             if (attempt > 1) {
                 ESP_LOGW(TAG, "video interface initialized on attempt %d", attempt);
@@ -1620,6 +1683,9 @@ cleanup:
         vSemaphoreDelete(s_p4_enc_data.run_semaphore);
         s_p4_enc_data.run_semaphore = NULL;
     }
+#if USE_ESP_VIDEO_IF
+    cam_release();
+#endif
     ESP_LOGE(TAG, "ESP32P4 frame grabber initialization failed");
     return ESP_FAIL;
 }
@@ -1661,13 +1727,32 @@ esp_err_t esp32p4_frame_grabber_start(void)
 #endif
 
 #if USE_ESP_VIDEO_IF
+    /* A camera this grabber kept holding across the stop may have stopped delivering
+     * meanwhile, and a session started on it would get nothing. Restarting is safe here
+     * the way uvc_restart_stream() makes it safe: the pump is parked, the bus still halted
+     * from stop(), and every sink gave its frames back. */
+    _lock_acquire(&s_dequeue_lock);
+    if (s_cam_held && s_drain_clean && s_task_parked && esp_video_if_is_stalled()) {
+        ESP_LOGW(TAG, "camera stopped delivering while held; restarting it");
+        esp_err_t err = esp_video_if_restart();
+        if (err == ESP_OK) {
+            err = register_raw_sink();
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "camera restart failed: %s", esp_err_to_name(err));
+        }
+    }
+    _lock_release(&s_dequeue_lock);
+
     /* Clears the halt a previous stop() left in place, so blocking sinks wait normally
      * again instead of failing fast. */
     video_raw_bus_resume();
 #endif
 
+    _lock_acquire(&s_dequeue_lock);
     s_p4_enc_data.running = true;
     xSemaphoreGive(s_p4_enc_data.run_semaphore);  // Signal the pump to start
+    _lock_release(&s_dequeue_lock);
     ESP_LOGD(TAG, "ESP32P4 frame grabber started");
 
     return ESP_OK;
@@ -1685,6 +1770,9 @@ esp_err_t esp32p4_frame_grabber_stop(void)
         return ESP_OK;
     }
 
+    /* Held until the pump has parked: a direct-grab snapshot that saw running == false any
+     * sooner would dequeue alongside the pump's last DQBUF. */
+    _lock_acquire(&s_dequeue_lock);
     s_p4_enc_data.running = false;
 
 #if USE_ESP_VIDEO_IF
@@ -1707,9 +1795,11 @@ esp_err_t esp32p4_frame_grabber_stop(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     if (!s_task_parked) {
+        /* A direct grab checks s_task_parked too, so it still cannot dequeue alongside it. */
         ESP_LOGW(TAG, "capture pump did not park within %d ms; capture buffers stay mapped",
                  park_timeout_ms);
     }
+    _lock_release(&s_dequeue_lock);
 
 #if USE_ESP_VIDEO_IF
     /* Parking the pump only guarantees no NEW frame is published. Sinks may still hold
@@ -1778,7 +1868,7 @@ esp_err_t esp32p4_frame_grabber_deinit(void)
                       "rather than reclaiming buffers it may be reading");
         return ESP_ERR_INVALID_STATE;
     }
-    esp_video_if_deinit();
+    cam_release();
 #endif
     return ESP_OK;
 }
@@ -1812,6 +1902,16 @@ esp_err_t video_capture_request_keyframe(void)
 }
 
 #if USE_ESP_VIDEO_IF
+/* One intercept request at a time: s_snapshot and the snapshot sink describe a single
+ * request, and a second one filling them in would have the first request's frame copied
+ * into its buffer. A second caller waits for the first to finish. */
+static _lock_t s_snapshot_lock;
+
+static esp_err_t intercept_frame_locked(uint8_t *buf, size_t buf_size,
+                                        size_t *len, uint16_t *width,
+                                        uint16_t *height,
+                                        uint32_t timeout_ms);
+
 /**
  * Intercept the next raw frame from the capture pump.
  * The caller provides a pre-allocated buffer. The pump copies the next
@@ -1833,6 +1933,17 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
         return ESP_ERR_INVALID_ARG;
     }
 
+    _lock_acquire(&s_snapshot_lock);
+    const esp_err_t ret = intercept_frame_locked(buf, buf_size, len, width, height, timeout_ms);
+    _lock_release(&s_snapshot_lock);
+    return ret;
+}
+
+static esp_err_t intercept_frame_locked(uint8_t *buf, size_t buf_size,
+                                        size_t *len, uint16_t *width,
+                                        uint16_t *height,
+                                        uint32_t timeout_ms)
+{
     if (!s_p4_enc_data.running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -1850,6 +1961,7 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
     s_snapshot.buffer = buf;
     s_snapshot.buffer_size = buf_size;
     s_snapshot.frame_len = 0;
+    s_snapshot.copied = false;
     s_snapshot.width = 0;
     s_snapshot.height = 0;
 
@@ -1875,6 +1987,11 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
         ESP_LOGE(TAG, "Snapshot intercept timed out");
         return ESP_ERR_TIMEOUT;
     }
+    if (!s_snapshot.copied) {
+        ESP_LOGE(TAG, "Snapshot: a %zu byte frame does not fit the %zu byte buffer",
+                 s_snapshot.frame_len, buf_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     *len = s_snapshot.frame_len;
     *width = s_snapshot.width;
@@ -1883,9 +2000,69 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
     return ESP_OK;
 }
 
+/* Copy the next camera frame out whole. A frame larger than the buffer fails the
+ * grab rather than being cut short: the JPEG encoder reads width x height from it. */
+static esp_err_t copy_one_raw_frame(uint8_t *buf, size_t buf_size, size_t *len,
+                                    uint16_t *width, uint16_t *height)
+{
+    video_fb_t *raw_frame = esp_video_if_get_frame();
+    if (!raw_frame) {
+        ESP_LOGE(TAG, "Failed to get raw frame for snapshot");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    esp_err_t ret = ESP_OK;
+    if (raw_frame->len > buf_size) {
+        ESP_LOGE(TAG, "Snapshot: a %zu byte frame does not fit the %zu byte buffer",
+                 raw_frame->len, buf_size);
+        ret = ESP_ERR_INVALID_SIZE;
+    } else {
+        memcpy(buf, raw_frame->buf, raw_frame->len);
+        video_resolution_t resolution = {0};
+        esp_video_if_get_resolution(&resolution);
+        *len = raw_frame->len;
+        *width = resolution.width;
+        *height = resolution.height;
+    }
+
+    esp_video_if_release_frame(raw_frame);
+    return ret;
+}
+
+/* Whether a direct grab may dequeue. With s_dequeue_lock held. A pump that did not park on
+ * the last stop() may still be dequeuing, so it counts as running. */
+static bool pump_idle_locked(void)
+{
+    return !s_p4_enc_data.running && s_task_parked;
+}
+
+/* The grab itself. The caller holds the camera and s_dequeue_lock, and has checked
+ * pump_idle_locked(). */
+static esp_err_t direct_grab_locked(uint8_t *buf, size_t buf_size, size_t *len,
+                                    uint16_t *width, uint16_t *height)
+{
+    /* Discard initial frames after STREAMON to let sensor/ISP settle
+     * (exposure, white balance). Without this the first frame is often
+     * noisy and produces an abnormally large JPEG. */
+    const int warmup_frames = 5;
+    for (int i = 0; i < warmup_frames; i++) {
+        video_fb_t *discard = esp_video_if_get_frame();
+        if (discard) {
+            esp_video_if_release_frame(discard);
+        }
+    }
+    ESP_LOGD(TAG, "Discarded %d warmup frames", warmup_frames);
+
+    return copy_one_raw_frame(buf, buf_size, len, width, height);
+}
+
 /**
  * Directly grab a raw frame from the camera when the capture pump is NOT running.
- * This is safe only when the pump is paused (not consuming frames).
+ *
+ * The camera is held for the duration of the grab and released afterwards. A live stream
+ * that starts meanwhile waits for the grab to finish before its pump runs, and
+ * esp_video_if's start/stop count keeps the camera on for it; this grab only gives back
+ * its own hold.
  *
  * @param buf[out]        Pre-allocated buffer for the raw frame
  * @param buf_size        Size of the buffer
@@ -1893,7 +2070,8 @@ esp_err_t esp32p4_snapshot_intercept_frame(uint8_t *buf, size_t buf_size,
  * @param width[out]      Frame width
  * @param height[out]     Frame height
  * @param timeout_ms      Maximum wait time
- * @return ESP_OK on success
+ * @return ESP_OK on success, ESP_ERR_INVALID_SIZE when the frame is larger than the buffer,
+ *         ESP_ERR_INVALID_STATE when the pump is running (use esp32p4_snapshot_intercept_frame())
  */
 esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
                                        size_t *len, uint16_t *width,
@@ -1904,79 +2082,39 @@ esp_err_t esp32p4_snapshot_direct_grab(uint8_t *buf, size_t buf_size,
         return ESP_ERR_INVALID_ARG;
     }
 
-    bool need_init = false;
-    bool need_start = false;
+    /* The caller chose this path before taking the lock; a session may have started since.
+     * Checked before the camera comes up, so a running session costs no bring-up. */
+    _lock_acquire(&s_dequeue_lock);
+    const bool idle = pump_idle_locked();
+    _lock_release(&s_dequeue_lock);
+    if (!idle) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    /* If esp_video_if is not initialized, temporarily init it */
+    /* Brought up outside s_dequeue_lock: a cold bring-up can take seconds (a UVC camera
+     * waits for enumeration), and a session starting meanwhile must not wait behind it. */
     if (!s_p4_enc_data.encoder_initialized) {
-        /* Full initialization needed (chip, clock, video interface) */
         init_chip();
-        init_clock();
-        esp_err_t ret = esp_video_if_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to init video interface for snapshot: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        need_init = true;
-        need_start = true;
-    } else {
-        /* Camera is initialized but encoder might be paused.
-         * esp_video_if might have been deinitialized (streaming stopped).
-         * Reinit to restart streaming if needed. */
-        esp_err_t ret = esp_video_if_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to reinit video interface for snapshot: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        need_start = true;
+        init_clock_once();
+    }
+    /* Brings the camera up, or joins a stream another consumer already started. */
+    esp_err_t ret = esp_video_if_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init video interface for snapshot: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    /* Discard initial frames after STREAMON to let sensor/ISP settle
-     * (exposure, white balance). Without this the first frame is often
-     * noisy and produces an abnormally large JPEG. */
-    if (need_start) {
-        const int warmup_frames = 5;
-        for (int i = 0; i < warmup_frames; i++) {
-            video_fb_t *discard = esp_video_if_get_frame();
-            if (discard) {
-                esp_video_if_release_frame(discard);
-            }
-        }
-        ESP_LOGD(TAG, "Discarded %d warmup frames", warmup_frames);
-    }
+    /* A session that started while the camera came up joined the same stream, and its
+     * pump now owns the dequeue. */
+    _lock_acquire(&s_dequeue_lock);
+    ret = pump_idle_locked() ? direct_grab_locked(buf, buf_size, len, width, height)
+                             : ESP_ERR_INVALID_STATE;
+    _lock_release(&s_dequeue_lock);
 
-    /* Get one raw frame */
-    video_fb_t *raw_frame = esp_video_if_get_frame();
-    if (!raw_frame) {
-        ESP_LOGE(TAG, "Failed to get raw frame for snapshot");
-        if (need_init) {
-            esp_video_if_deinit();
-        }
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    /* Copy frame data */
-    size_t copy_len = (raw_frame->len <= buf_size) ? raw_frame->len : buf_size;
-    memcpy(buf, raw_frame->buf, copy_len);
-
-    video_resolution_t resolution = {0};
-    esp_video_if_get_resolution(&resolution);
-
-    *len = copy_len;
-    *width = resolution.width;
-    *height = resolution.height;
-
-    /* Release the raw frame back to the driver */
-    esp_video_if_release_frame(raw_frame);
-
-    /* Stop streaming so the next snapshot can cleanly restart */
+    /* Give the camera back; it stops only when no other consumer holds it. */
     esp_video_if_stop();
 
-    if (need_init) {
-        esp_video_if_deinit();
-    }
-
-    return ESP_OK;
+    return ret;
 }
 #endif /* USE_ESP_VIDEO_IF */
 

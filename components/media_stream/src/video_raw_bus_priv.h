@@ -82,6 +82,14 @@ void video_raw_bus_resume(void);
  */
 bool video_raw_bus_drain(void);
 
+/**
+ * @brief Camera buffers no registered sink has claimed
+ *
+ * What a PASSTHROUGH or CONVERTED sink registered now could claim (queue_depth + 1 of
+ * them). Only a hint: another task can register in between.
+ */
+uint32_t video_raw_bus_loans_unclaimed(void);
+
 #ifdef __cplusplus
 }
 #endif

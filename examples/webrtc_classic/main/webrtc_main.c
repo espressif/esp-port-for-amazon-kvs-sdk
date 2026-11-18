@@ -10,6 +10,9 @@
 #include <inttypes.h>
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "esp_cli.h"
@@ -23,6 +26,7 @@
 #include "esp_webrtc_time.h"
 #include "esp_work_queue.h"
 #include "media_stream.h"
+#include "video_capture.h"
 
 #include "esp_console.h"
 
@@ -220,6 +224,79 @@ static int trigger_offer_cli_handler(int argc, char *argv[])
     return 0;
 }
 
+/* Work function to close one peer's session in esp_work_queue context */
+static void close_session_work_fn(void *priv_data)
+{
+    trigger_offer_work_params_t *params = (trigger_offer_work_params_t *)priv_data;
+
+    WEBRTC_STATUS status = app_webrtc_close_session(params->peer_id);
+    ESP_LOGI(TAG, "close-session %s: status 0x%08" PRIx32, params->peer_id, (uint32_t) status);
+    free(params);
+}
+
+/* CLI handler for close-session command */
+static int close_session_cli_handler(int argc, char *argv[])
+{
+    if (argc != 2 || strlen(argv[1]) >= sizeof(((trigger_offer_work_params_t *)0)->peer_id)) {
+        ESP_LOGE(TAG, "Usage: close-session <peer_id>");
+        return -1;
+    }
+
+    trigger_offer_work_params_t *params = calloc(1, sizeof(*params));
+    if (params == NULL) {
+        return -1;
+    }
+    strcpy(params->peer_id, argv[1]);
+
+    if (esp_work_queue_add_task(close_session_work_fn, params) != ESP_OK) {
+        free(params);
+        return -1;
+    }
+    return 0;
+}
+
+#define SNAPSHOT_TASK_STACK  (8 * 1024)
+#define SNAPSHOT_QUALITY     80
+#define SNAPSHOT_TIMEOUT_MS  5000
+
+/* Takes the requested snapshots one after another and logs each result. A task of its
+ * own, so a slow grab blocks neither the console nor the work queue. */
+static void snapshot_task(void *arg)
+{
+    const int count = (int)(intptr_t) arg;
+
+    for (int i = 1; i <= count; i++) {
+        uint8_t *jpeg = NULL;
+        size_t len = 0;
+        int64_t start_us = esp_timer_get_time();
+        esp_err_t err = video_capture_get_snapshot(&jpeg, &len, SNAPSHOT_QUALITY, SNAPSHOT_TIMEOUT_MS);
+        int64_t took_ms = (esp_timer_get_time() - start_us) / 1000;
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "snapshot %d/%d: %zu bytes in %" PRId64 " ms", i, count, len, took_ms);
+        } else {
+            ESP_LOGE(TAG, "snapshot %d/%d failed: %s", i, count, esp_err_to_name(err));
+        }
+        video_capture_snapshot_free(jpeg);
+    }
+    vTaskDelete(NULL);
+}
+
+/* CLI handler for snapshot command */
+static int snapshot_cli_handler(int argc, char *argv[])
+{
+    int count = (argc > 1) ? atoi(argv[1]) : 1;
+    if (argc > 2 || count < 1 || count > 100) {
+        ESP_LOGE(TAG, "Usage: snapshot [count 1-100]");
+        return -1;
+    }
+    if (xTaskCreate(snapshot_task, "snapshot", SNAPSHOT_TASK_STACK, (void *)(intptr_t) count,
+                    tskIDLE_PRIORITY + 2, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start the snapshot task");
+        return -1;
+    }
+    return 0;
+}
+
 /* Register trigger offer CLI command */
 static void register_trigger_offer_cli(void)
 {
@@ -235,6 +312,26 @@ static void register_trigger_offer_cli(void)
         ESP_LOGE(TAG, "Failed to register trigger-offer command: %d", ret);
     } else {
         ESP_LOGI(TAG, "Registered trigger-offer command");
+    }
+
+    const esp_console_cmd_t more_cmds[] = {
+        {
+            .command = "close-session",
+            .help = "Close one viewer's session. Usage: close-session <peer_id>",
+            .hint = "<peer_id>",
+            .func = close_session_cli_handler,
+        },
+        {
+            .command = "snapshot",
+            .help = "Capture JPEG snapshots and log their sizes. Usage: snapshot [count]",
+            .hint = "[count]",
+            .func = snapshot_cli_handler,
+        },
+    };
+    for (size_t i = 0; i < sizeof(more_cmds) / sizeof(more_cmds[0]); i++) {
+        if (esp_console_cmd_register(&more_cmds[i]) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register %s command", more_cmds[i].command);
+        }
     }
 }
 

@@ -334,13 +334,8 @@ esp_err_t mjpeg_camera_and_encoder_init(uint16_t width, uint16_t height, uint8_t
         return ret;
     }
     ESP_LOGI(TAG, "JPEG encoder created successfully");
-
-    // Start video capture with error recovery
-    ret = esp_video_if_start();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Video start failed: %d - will retry in encoder task", ret);
-        // We'll continue anyway and let the encoder task retry
-    }
+    /* esp_video_if_init() has already started the camera; a second start would
+     * count as another consumer and keep the camera on after our stop. */
 #endif
 
     // Create encoder task
