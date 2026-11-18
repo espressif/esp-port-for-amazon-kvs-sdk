@@ -47,7 +47,7 @@ runs `network_adapter`, turn the flasher off in menuconfig instead):
 
 ```bash
 cd examples/network_adapter
-idf.py set-target esp32c6
+idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.p4_eye_pair.esp32c6' set-target esp32c6
 idf.py build
 
 DEST=../webrtc_person_detect/target-firmware

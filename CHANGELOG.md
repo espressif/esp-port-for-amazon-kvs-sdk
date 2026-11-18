@@ -61,10 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `app_webrtc_set_log_level(3)`. The SDK PROFILE timings print at DEBUG under the
   `kvs_profile` tag (`KVS_PROFILE_LOG_TAG`). `app_webrtc_set_log_level(8)` turns
   them on. Log lines no longer show the TURN username.
-- **esp_hosted 3.x:** `network_adapter`, `webrtc_classic`, `esp_camera` and the WebRTC
-  bridge use the registry component `espressif/esp_hosted` 3.x in place of the
-  in-tree 2.x submodule. ESP-IDF 5.5 is the minimum. `webrtc_person_detect` stays on
-  the in-tree 2.x.
+- **esp_hosted 3.x:** `network_adapter`, `webrtc_classic`, `esp_camera`,
+  `webrtc_person_detect` and the WebRTC bridge use the registry component
+  `espressif/esp_hosted` 3.x in place of the in-tree 2.x submodule. ESP-IDF 5.5 is the
+  minimum.
 - **Split mode on esp_hosted 3.x:** `signaling_only` and `streaming_only` use esp_hosted
   3.x and its network split.
 - **Co-processor console without the flasher:** `CONFIG_SLAVE_CONSOLE_ENABLE` forwards the
