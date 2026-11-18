@@ -287,8 +287,8 @@ esp_err_t flash_slave()
         return ret;
     }
 
-/* esp_hosted 3.x names the co-processor reset pin ESP_HOSTED_HOST_RESET_GPIO.
- * The in-tree esp_hosted 2.x submodule names it ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE. */
+/* esp_hosted 3.x names the co-processor reset pin ESP_HOSTED_HOST_RESET_GPIO,
+ * and 2.x names it ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE. An app may still use 2.x. */
 #if defined(CONFIG_ESP_HOSTED_HOST_RESET_GPIO)
 #define SLAVE_RESET_GPIO CONFIG_ESP_HOSTED_HOST_RESET_GPIO
 #else

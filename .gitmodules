@@ -7,6 +7,3 @@
 [submodule "components/libwebsockets/libwebsockets"]
 	path = components/libwebsockets/libwebsockets
 	url = https://github.com/warmcat/libwebsockets.git
-[submodule "components/esp_hosted"]
-	path = components/esp_hosted
-	url = https://github.com/espressif/esp-hosted-mcu.git

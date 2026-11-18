@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Repository structure
 
+- Removed the `components/esp_hosted` submodule (esp-hosted-mcu 2.x). Every example
+  takes esp_hosted 3.x from the component registry. A clone made before this keeps
+  the old tree as an untracked directory. Remove it with
+  `rm -rf components/esp_hosted .git/modules/components/esp_hosted`.
 - Removed the `network_coprocessor` component. It wrapped the slave firmware of the
   in-tree esp_hosted 2.x submodule, and no example uses it since `network_adapter`
   and the split examples take esp_hosted 3.x from the component registry.

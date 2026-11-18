@@ -27,7 +27,7 @@ This directory contains the complete ecosystem of ESP-IDF components needed for 
 ### Hardware & Platform Support
 | Component | Purpose | Dependencies | Use Case |
 |-----------|---------|--------------|----------|
-| **[esp_hosted](esp_hosted/)** | ESP-Hosted functionality | - | Dual-chip communication |
+| **esp_hosted** (registry `espressif/esp_hosted`) | ESP-Hosted functionality | - | Dual-chip communication |
 | **[esp_webrtc_utils](esp_webrtc_utils/)** | WebRTC utilities for ESP | - | Platform optimizations |
 
 ### Development & API Components
