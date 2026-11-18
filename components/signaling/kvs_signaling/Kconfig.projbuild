@@ -30,4 +30,25 @@ menu "KVS Signaling Configuration"
 
             The value also sets secs_since_valid_ping in the libwebsockets
             build, so both paths use one cadence.
+
+    config KVS_ICE_CONFIG_PREFETCH
+        bool "Refresh the ICE server config before a session needs it"
+        depends on USE_ESP_WEBSOCKET_CLIENT
+        default y
+        help
+            While signaling is connected, refresh the TURN server config as soon as it is due.
+            A new viewer session then starts with a valid config.
+            Without this option, the first session after the config expires starts the refresh.
+            The refresh costs one GetIceServerConfig call about every 4.5 minutes while connected.
+            Disable it on devices that need to stay idle to save power.
+
+    config KVS_ICE_REFRESH_TASK_STACK_SIZE
+        int "ICE refresh task stack size (bytes)"
+        depends on USE_ESP_WEBSOCKET_CLIENT
+        default 16384 if SPIRAM
+        default 8192
+        help
+            Stack of the task that refreshes the ICE server config. The refresh makes one
+            HTTPS call. The stack comes from PSRAM when there is PSRAM, and from internal RAM
+            otherwise, and it is held for as long as the device runs.
 endmenu

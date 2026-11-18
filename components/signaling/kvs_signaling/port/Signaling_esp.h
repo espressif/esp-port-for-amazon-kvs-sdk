@@ -21,6 +21,14 @@ extern "C" {
 BOOL signaling_is_ice_config_refresh_needed(PSignalingClient pSignalingClient);
 BOOL signaling_has_valid_ice_config(PSignalingClient pSignalingClient);
 STATUS refresh_ice_configuration(PSignalingClient pSignalingClient);
+// One GetIceServerConfig call outside the state machine. The caller holds the client's stateLock.
+STATUS signaling_fetch_ice_config(PSignalingClient pSignalingClient);
+// Copy of one cached ICE config entry, taken under the ICE config lock. Fails without a valid config.
+STATUS signaling_copy_ice_config(PSignalingClient pSignalingClient, UINT32 index, PIceConfigInfo pIceConfigInfo,
+                                 PUINT32 pIceConfigCount);
+// Held by every writer of iceConfigs / iceConfigCount, and by the readers that copy or encode them
+VOID signalingIceConfigLock(VOID);
+VOID signalingIceConfigUnlock(VOID);
 
 // True on one of the tasks the client's callbacks run on (esp_websocket's, the work queue's)
 BOOL isEspSignalingTask(PSignalingClient pSignalingClient);

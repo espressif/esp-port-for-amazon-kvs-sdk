@@ -22,6 +22,10 @@
 
 #include "esp_work_queue.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 
 // Include KVS signaling headers for refresh_ice_configuration and PSignalingClient
@@ -50,9 +54,6 @@ typedef struct {
     WEBRTC_STATUS (*on_ice_servers_updated)(uint64_t, uint32_t);
 } kvs_ice_callback_ctx_t;
 
-// Forward declaration for kvs_refresh_ice_task (defined after KvsSignalingClientData)
-static void kvs_refresh_ice_task(void *arg);
-
 // Forward declarations for internal KVS functions (not exposed in public header)
 STATUS createKvsSignalingClient(kvs_signaling_config_t *pConfig, PVOID *ppSignalingClient);
 STATUS connectKvsSignalingClient(PVOID pSignalingClient);
@@ -70,6 +71,8 @@ STATUS setKvsSignalingRoleType(PVOID pSignalingClient, SIGNALING_CHANNEL_ROLE_TY
 STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount, RtcIceServer iceServers[]);
 STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool useTurn, uint8_t **data, int *len, bool *have_more);
 static WEBRTC_STATUS kvsIsIceRefreshNeededWrapper(void *pSignalingClient, bool *refreshNeeded);
+static WEBRTC_STATUS kvsHasValidIceConfigWrapper(void *pSignalingClient, bool *pHasValidConfig);
+
 
 #ifndef CONFIG_USE_ESP_WEBSOCKET_CLIENT
 /**
@@ -150,6 +153,14 @@ typedef struct {
     // is taken: only their candidates and newer answers must queue behind it.
     char flushAnswerPeers[KVS_PENDING_ANSWER_MAX][KVS_PENDING_ICE_PEERID_LEN];
     UINT32 flushAnswerPeerCount;
+
+    // ICE refresh task only: fetches that failed in a row, and when the timer may try again
+    UINT32 iceFetchFailures;
+    UINT64 iceFetchRetryTime;
+    // A session asked for a refresh. Kept until the client has a valid config or a fetch ran.
+    volatile BOOL iceRefreshRequested;
+    // A fetch for this client is running on the ICE refresh task
+    volatile BOOL iceFetchActive;
 } KvsSignalingClientData;
 
 /* Live-client guard: work-queue tasks capture a raw KvsSignalingClientData*.
@@ -230,8 +241,13 @@ static void kvs_apply_cached_ice_task(void *arg)
 
     if (pClientData->ice_callback_ctx.on_ice_servers_updated != NULL) {
         UINT32 iceConfigCount = 0;
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+        STATUS iceCountStatus = signaling_copy_ice_config((PSignalingClient) pClientData->signalingClientHandle, 0,
+                                                          NULL, &iceConfigCount);
+#else
         STATUS iceCountStatus = signalingClientGetIceConfigInfoCount(
             pClientData->signalingClientHandle, &iceConfigCount);
+#endif
         if (STATUS_SUCCEEDED(iceCountStatus) && iceConfigCount > 0) {
             DLOGI("Applying %" PRIu32 " cached ICE servers to peer connection (async)", iceConfigCount);
             pClientData->ice_callback_ctx.on_ice_servers_updated(
@@ -240,61 +256,217 @@ static void kvs_apply_cached_ice_task(void *arg)
     }
 }
 
-/**
- * @brief Work queue task for refreshing ICE configuration in background
- */
-static void kvs_refresh_ice_task(void *arg)
+/* Queue passing the cached servers to the peer connection. Session setup reads the same
+ * list on the work queue. */
+static void kvs_queue_ice_apply(KvsSignalingClientData *pClientData)
 {
+    esp_err_t result = esp_work_queue_add_task(&kvs_apply_cached_ice_task, (void *) pClientData);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to queue cached ICE apply task: %d", (int) result);
+    }
+}
+
 #ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
-    if (arg == NULL || !kvsSignalingClientIsLive(arg)) {
-        ESP_LOGW(TAG, "Background ICE refresh task: NULL or torn-down client");
+/*
+ * ICE config refresh task.
+ *
+ * A refresh is one GetIceServerConfig call over HTTPS, a few seconds. It runs on its own
+ * task because inbound signaling messages (offers, ICE candidates) go through the work
+ * queue, and would wait behind it. The task makes the call directly, without the signaling
+ * state machine. It holds the client's stateLock for the call, so a connect or reconnect
+ * cannot change the endpoint or the credentials under it.
+ *
+ * The task runs below the SDK threads, so the TLS handshake does not delay the ICE checks
+ * and DTLS of a session that is starting.
+ *
+ * A session asks for a refresh through iceRefreshRequested. With
+ * CONFIG_KVS_ICE_CONFIG_PREFETCH the task also refreshes on its own once the cached config
+ * is due, so a new session normally finds a valid config. Between refreshes the task
+ * sleeps until the next one is due.
+ */
+#define KVS_ICE_REFRESH_TASK_STACK CONFIG_KVS_ICE_REFRESH_TASK_STACK_SIZE
+#define KVS_ICE_REFRESH_TASK_PRIO  (CONFIG_PTHREAD_TASK_PRIO_DEFAULT - 1)
+// After a failed fetch the timer waits 30 s, doubling per failure up to 10 min.
+// A session's request waits only for 30 s after the last call.
+#define KVS_ICE_FETCH_RETRY_MIN    (30 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+#define KVS_ICE_FETCH_RETRY_MAX    (10 * 60 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+// The state lock is busy, such as during a connect or its backoff: try again after this.
+// A connect's CONNECTED edge also wakes the task.
+#define KVS_ICE_REFRESH_BUSY_RETRY (10 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+// The longest the task sleeps, so a step of the wall clock cannot stall it for long
+#define KVS_ICE_REFRESH_MAX_SLEEP  (10 * 60 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+// A fetch is one HTTPS call, plus one for the credentials when they expired. Each call has
+// 15 s connect and read timeouts. The free waits this long for a running fetch.
+#define KVS_ICE_REFRESH_DRAIN_MS   (65 * 1000)
+
+static TaskHandle_t s_iceRefreshTask = NULL;
+// Held while the task works on a client. Teardown takes it to wait for a running fetch.
+static SemaphoreHandle_t s_iceRefreshRunLock = NULL;
+
+/* Fetch the ICE config of one client. The caller holds the client's stateLock. */
+static void kvs_refresh_ice_config(KvsSignalingClientData *pClientData)
+{
+    PSignalingClient pClient = (PSignalingClient) pClientData->signalingClientHandle;
+    UINT64 retryDelay = KVS_ICE_FETCH_RETRY_MIN;
+
+    // Active before the request clears, so a session querying in between sees a fetch in progress
+    pClientData->iceFetchActive = TRUE;
+    pClientData->iceRefreshRequested = FALSE;
+    STATUS status = signaling_fetch_ice_config(pClient);
+    BOOL valid = signaling_has_valid_ice_config(pClient);
+    pClientData->iceFetchActive = FALSE;
+
+    // A failed HTTP call returns success and leaves no valid config. Back off either way.
+    if (STATUS_FAILED(status) || !valid) {
+        pClientData->iceFetchFailures++;
+        for (UINT32 i = 1; i < pClientData->iceFetchFailures && retryDelay < KVS_ICE_FETCH_RETRY_MAX; i++) {
+            retryDelay *= 2;
+        }
+        retryDelay = MIN(retryDelay, KVS_ICE_FETCH_RETRY_MAX);
+        pClientData->iceFetchRetryTime = GETTIME() + retryDelay;
+        ESP_LOGW(TAG, "ICE config fetch failed (0x%08" PRIx32 ", %" PRIu32 " in a row); next timed refresh in %" PRIu64 " s",
+                 status, pClientData->iceFetchFailures, retryDelay / HUNDREDS_OF_NANOS_IN_A_SECOND);
         return;
     }
+    pClientData->iceFetchFailures = 0;
+    pClientData->iceFetchRetryTime = 0;
+    ESP_LOGI(TAG, "ICE config refreshed");
+    kvs_queue_ice_apply(pClientData);
+}
 
-    // For progressive ICE, arg contains KvsSignalingClientData instead of PSignalingClient
-    KvsSignalingClientData *pClientData = (KvsSignalingClientData *)arg;
-    SIGNALING_CLIENT_HANDLE signalingClientHandle = pClientData->signalingClientHandle;
-
-    if (signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
-        STATUS status = refresh_ice_configuration((PSignalingClient)signalingClientHandle);
-        if (STATUS_FAILED(status)) {
-            ESP_LOGE(TAG, "Background ICE refresh failed: 0x%08" PRIx32, status);
-        } else {
-            ESP_LOGI(TAG, "Background ICE refresh completed successfully");
-
-            // Notify callback that new ICE servers (TURN) are now available
-            // This provides proactive updates in addition to the polling mechanism
-            if (pClientData->ice_callback_ctx.on_ice_servers_updated != NULL) {
-                UINT32 iceConfigCount = 0;
-                STATUS iceCountStatus = signalingClientGetIceConfigInfoCount(signalingClientHandle, &iceConfigCount);
-
-                if (STATUS_SUCCEEDED(iceCountStatus) && iceConfigCount > 0) {
-                    ESP_LOGI(TAG, "Progressive ICE: Notifying callback about %" PRIu32 " new ICE servers", iceConfigCount);
-                    ESP_LOGI(TAG, "Triggering peer connection ICE server update...");
-                    if (pClientData->ice_callback_ctx.on_ice_servers_updated != NULL) {
-                        WEBRTC_STATUS callbackStatus = pClientData->ice_callback_ctx.on_ice_servers_updated(
-                            pClientData->ice_callback_ctx.customData, iceConfigCount);
-
-                        if (callbackStatus == WEBRTC_STATUS_SUCCESS) {
-                            ESP_LOGD(TAG, "Progressive ICE callback completed successfully");
-                        } else {
-                            ESP_LOGW(TAG, "Progressive ICE callback returned error: 0x%08" PRIx32, (uint32_t) callbackStatus);
-                        }
-                    }
-                } else {
-                    ESP_LOGW(TAG, "Failed to get ICE config count or no servers available: status=0x%08" PRIx32 ", count=%" PRIu32,
-                             (uint32_t) iceCountStatus, (uint32_t) iceConfigCount);
-                }
-            } else {
-                ESP_LOGD(TAG, "No progressive ICE callback registered - using traditional polling mode");
-            }
-        }
+/* When the client is next due a fetch, or MAX_UINT64 when nothing is due. A request is due
+ * 30 s after the last call. With prefetch, a valid config is due at its expiry and a missing
+ * one after the backoff. */
+static UINT64 kvs_ice_next_due(KvsSignalingClientData *pClientData, PSignalingClient pClient)
+{
+    if (pClientData->iceRefreshRequested) {
+        return pClient->getIceConfigTime == 0 ? 0 : pClient->getIceConfigTime + KVS_ICE_FETCH_RETRY_MIN;
     }
+#ifdef CONFIG_KVS_ICE_CONFIG_PREFETCH
+    return signaling_has_valid_ice_config(pClient) ? pClient->iceConfigExpiration : pClientData->iceFetchRetryTime;
 #else
-    UNUSED_PARAM(arg);
-    ESP_LOGW(TAG, "Async ICE refresh is not supported in default websocket client mode");
+    return MAX_UINT64;
 #endif
 }
+
+/* Look at one client, and fetch its ICE config when it is due. Returns when it is next due. */
+static UINT64 kvs_ice_refresh_client(KvsSignalingClientData *pClientData)
+{
+    SIGNALING_CLIENT_STATE state = SIGNALING_CLIENT_STATE_UNKNOWN;
+    PSignalingClient pClient = NULL;
+    UINT64 due = MAX_UINT64;
+
+    xSemaphoreTake(s_iceRefreshRunLock, portMAX_DELAY);
+    // Check that the client is live under the run lock. Teardown unregisters first, then takes the lock.
+    if (!kvsSignalingClientIsLive(pClientData) ||
+        pClientData->signalingClientHandle == INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
+        goto Done;
+    }
+    pClient = (PSignalingClient) pClientData->signalingClientHandle;
+
+    if (pClientData->iceRefreshRequested && signaling_has_valid_ice_config(pClient)) {
+        // Fetched by another path, such as a reconnect. The session that asked still needs the servers.
+        pClientData->iceRefreshRequested = FALSE;
+        kvs_queue_ice_apply(pClientData);
+    }
+    due = kvs_ice_next_due(pClientData, pClient);
+    if (due > GETTIME()) {
+        goto Done;
+    }
+    if (!MUTEX_TRYLOCK(pClient->stateLock)) {
+        due = GETTIME() + KVS_ICE_REFRESH_BUSY_RETRY;
+        goto Done;
+    }
+    // Fetch in the steady states only. In the others a connect is in progress, and its
+    // CONNECTED edge wakes the task.
+    if (STATUS_SUCCEEDED(signalingClientGetCurrentState(pClientData->signalingClientHandle, &state)) &&
+        (state == SIGNALING_CLIENT_STATE_CONNECTED || state == SIGNALING_CLIENT_STATE_JOIN_SESSION_CONNECTED)) {
+        kvs_refresh_ice_config(pClientData);
+        due = kvs_ice_next_due(pClientData, pClient);
+    } else {
+        due = MAX_UINT64;
+    }
+    MUTEX_UNLOCK(pClient->stateLock);
+
+Done:
+    xSemaphoreGive(s_iceRefreshRunLock);
+    return due;
+}
+
+static void kvs_ice_refresh_task_fn(void *arg)
+{
+    void *clients[KVS_MAX_LIVE_CLIENTS];
+    TickType_t wait = portMAX_DELAY;
+
+    UNUSED_PARAM(arg);
+
+    for (;;) {
+        UINT64 next = MAX_UINT64;
+
+        // Wake on a request from a session, on a CONNECTED edge, or when a client is due
+        (void) ulTaskNotifyTake(pdTRUE, wait);
+
+        MUTEX_LOCK(s_liveClientsLock);
+        MEMCPY(clients, s_liveClients, SIZEOF(clients));
+        MUTEX_UNLOCK(s_liveClientsLock);
+
+        for (UINT32 i = 0; i < KVS_MAX_LIVE_CLIENTS; i++) {
+            if (clients[i] != NULL) {
+                next = MIN(next, kvs_ice_refresh_client((KvsSignalingClientData *) clients[i]));
+            }
+        }
+
+        if (next == MAX_UINT64) {
+            wait = portMAX_DELAY;
+        } else {
+            UINT64 now = GETTIME();
+            UINT64 sleep = next > now ? MIN(next - now, KVS_ICE_REFRESH_MAX_SLEEP) : 0;
+            // At least one tick, so a client that is still due cannot spin the task
+            wait = MAX((TickType_t) 1, (TickType_t) pdMS_TO_TICKS(sleep / HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
+        }
+    }
+}
+
+/* Wake the refresh task, if it runs */
+static void kvs_ice_refresh_wake(void)
+{
+    if (s_iceRefreshTask != NULL) {
+        xTaskNotifyGive(s_iceRefreshTask);
+    }
+}
+
+/* Start the refresh task once. It serves every client and never exits. */
+static STATUS kvs_ice_refresh_task_start(void)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    StaticTask_t *pTaskBuffer = NULL;
+    StackType_t *pTaskStack = NULL;
+
+    CHK(s_iceRefreshTask == NULL, retStatus);
+
+    if (s_iceRefreshRunLock == NULL) {
+        s_iceRefreshRunLock = xSemaphoreCreateMutex();
+        CHK(s_iceRefreshRunLock != NULL, STATUS_NOT_ENOUGH_MEMORY);
+    }
+
+    // The task never exits, so its buffers are never freed
+    pTaskBuffer = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
+    pTaskStack = heap_caps_malloc_prefer(KVS_ICE_REFRESH_TASK_STACK, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                         MALLOC_CAP_INTERNAL);
+    if (pTaskBuffer != NULL && pTaskStack != NULL) {
+        s_iceRefreshTask = xTaskCreateStatic(kvs_ice_refresh_task_fn, "kvs_ice_refresh", KVS_ICE_REFRESH_TASK_STACK,
+                                             NULL, KVS_ICE_REFRESH_TASK_PRIO, pTaskStack, pTaskBuffer);
+    }
+    if (s_iceRefreshTask == NULL) {
+        heap_caps_free(pTaskBuffer);
+        heap_caps_free(pTaskStack);
+        CHK(FALSE, STATUS_NOT_ENOUGH_MEMORY);
+    }
+
+CleanUp:
+    return retStatus;
+}
+#endif
 
 /**
  * @brief Convert SIGNALING_CLIENT_STATE to webrtc_signaling_state_t
@@ -701,12 +873,17 @@ static STATUS kvsStateChangedCallback(UINT64 customData, SIGNALING_CLIENT_STATE 
         if (queueStatus != ESP_OK) {
             ESP_LOGW(TAG, "Failed to queue the signaling re-send flush: %d (will retry on next send)", (int) queueStatus);
         }
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+        // An ICE refresh that waited for the connect can run now
+        kvs_ice_refresh_wake();
+#endif
     }
 
-    // Call user callback if set
-    if (pClientData->on_state_changed != NULL) {
+    // Call user callback if set. Read it once: a free that leaks the client clears it.
+    STATUS (*onStateChanged)(UINT64, SIGNALING_CLIENT_STATE) = pClientData->on_state_changed;
+    if (onStateChanged != NULL) {
         ESP_LOGD(TAG, "Calling user on_state_changed callback");
-        return pClientData->on_state_changed((UINT64)pClientData->customData, state);
+        return onStateChanged((UINT64)pClientData->customData, state);
     } else {
         ESP_LOGW(TAG, "No on_state_changed callback set - events will not be propagated!");
     }
@@ -727,11 +904,12 @@ static STATUS kvsErrorCallback(UINT64 customData, STATUS status, PCHAR errorMsg,
 
     ESP_LOGW(TAG, "KVS signaling error: 0x%08" PRIx32 " - %.*s", (uint32_t) status, (int) errorMsgLen, errorMsg);
 
-    // Call user callback if set
-    if (pClientData->on_error != NULL) {
+    // Call user callback if set. Read it once: a free that leaks the client clears it.
+    STATUS (*onError)(UINT64, STATUS, PCHAR, UINT32) = pClientData->on_error;
+    if (onError != NULL) {
         /* Convert KVS status to WEBRTC status before forwarding to user callback */
         WEBRTC_STATUS webrtcStatus = mapKvsErrorToWebrtcStatus(status);
-        return pClientData->on_error((UINT64)pClientData->customData, webrtcStatus, errorMsg, errorMsgLen);
+        return onError((UINT64)pClientData->customData, webrtcStatus, errorMsg, errorMsgLen);
     }
 
     return STATUS_SUCCESS;
@@ -794,15 +972,16 @@ static STATUS kvsMessageReceivedCallback(UINT64 customData, PReceivedSignalingMe
         CHK(FALSE, retStatus);
     }
 
-    // Call user callback if set
-    if (pClientData->on_msg_received != NULL) {
+    // Call user callback if set. Read it once: a free that leaks the client clears it.
+    STATUS (*onMsgReceived)(UINT64, webrtc_message_t*) = pClientData->on_msg_received;
+    if (onMsgReceived != NULL) {
         // Convert KVS message format to standardized WebRTC message format
         retStatus = convertKvsToWebRtcMessage(pReceivedSignalingMessage, &webRtcMessage);
         CHK_STATUS(retStatus);
 
         CallbackAdapterData *pAdapterData = (CallbackAdapterData *) pClientData->customData;
         // Call the user callback with the standardized message format
-        retStatus = pClientData->on_msg_received((UINT64) pAdapterData->originalCustomData, &webRtcMessage);
+        retStatus = onMsgReceived((UINT64) pAdapterData->originalCustomData, &webRtcMessage);
     }
 
 CleanUp:
@@ -831,6 +1010,10 @@ STATUS createKvsSignalingClient(kvs_signaling_config_t *pConfig, PVOID *ppSignal
 
     // Track this client so deferred work-queue tasks can detect teardown.
     kvsSignalingClientRegister(pClientData);
+
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    CHK_STATUS(kvs_ice_refresh_task_start());
+#endif
 
     // Copy configuration
     MEMCPY(&pClientData->config, pConfig, SIZEOF(kvs_signaling_config_t));
@@ -1392,11 +1575,32 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
 {
     STATUS retStatus = STATUS_SUCCESS;
     KvsSignalingClientData *pClientData = (KvsSignalingClientData *)pSignalingClient;
+    BOOL unregistered = FALSE;
 
     CHK(pClientData != NULL, STATUS_NULL_ARG);
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    // A free from the ICE refresh task would wait on the run lock that task holds
+    CHK(s_iceRefreshTask == NULL || xTaskGetCurrentTaskHandle() != s_iceRefreshTask, STATUS_INVALID_OPERATION);
+#endif
 
     // Stop new deferred tasks from starting on this client...
     kvsSignalingClientUnregister(pClientData);
+    unregistered = TRUE;
+
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    // ...wait for an ICE fetch that may be running on it. Set shutdown first, as freeSignaling()
+    // does, so the refresh task does not start another one.
+    if (pClientData->signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
+        ATOMIC_STORE_BOOL(&((PSignalingClient) pClientData->signalingClientHandle)->shutdown, TRUE);
+    }
+    if (s_iceRefreshRunLock != NULL) {
+        if (xSemaphoreTake(s_iceRefreshRunLock, pdMS_TO_TICKS(KVS_ICE_REFRESH_DRAIN_MS)) != pdTRUE) {
+            ESP_LOGE(TAG, "ICE refresh drain timed out; leaking signaling client to avoid use-after-free");
+            CHK(FALSE, STATUS_OPERATION_TIMED_OUT);
+        }
+        xSemaphoreGive(s_iceRefreshRunLock);
+    }
+#endif
 
     // ...then drain any in-flight one BEFORE freeing anything it may still touch.
     // A flush task that already passed its live-guard can be mid-send, holding
@@ -1460,6 +1664,13 @@ STATUS freeKvsSignalingClient(PVOID pSignalingClient)
     MEMFREE(pClientData);
 
 CleanUp:
+    if (STATUS_FAILED(retStatus) && unregistered) {
+        // Past the unregister, a failure leaks the client, and it may still run. Its owner
+        // frees the context the callbacks were given, so the client must not call them.
+        pClientData->on_msg_received = NULL;
+        pClientData->on_state_changed = NULL;
+        pClientData->on_error = NULL;
+    }
     return retStatus;
 }
 
@@ -1473,6 +1684,10 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
     UINT32 i, j, iceConfigCount, uriCount = 0;
     PIceConfigInfo pIceConfigInfo;
     PCHAR pKinesisVideoStunUrlPostFix;
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    // A copy: the refresh task can rewrite the cached config while this runs
+    PIceConfigInfo pIceConfigCopy = NULL;
+#endif
 
     CHK(pClientData != NULL && pIceConfigCount != NULL && iceServers != NULL, STATUS_NULL_ARG);
 
@@ -1509,7 +1724,12 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
              pClientData->channelInfo.pRegion, pKinesisVideoStunUrlPostFix);
 
     // Get the TURN servers from the configuration
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    // From the cache only: a missing or expired config means STUN only, never a fetch here
+    retStatus = signaling_copy_ice_config((PSignalingClient) pClientData->signalingClientHandle, 0, NULL, &iceConfigCount);
+#else
     retStatus = signalingClientGetIceConfigInfoCount(pClientData->signalingClientHandle, &iceConfigCount);
+#endif
     if (STATUS_FAILED(retStatus)) {
         ESP_LOGW(TAG, "Failed to get ice config count, proceeding anyway...");
         retStatus = STATUS_SUCCESS;
@@ -1520,7 +1740,16 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
      * candidate gathering latency. But user can also choose to use more than 1 turn server. */
     UINT32 maxTurnServer = 1;  // This can be made configurable if needed
     for (uriCount = 0, i = 0; i < maxTurnServer && i < iceConfigCount; i++) {
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+        if (pIceConfigCopy == NULL) {
+            pIceConfigCopy = (PIceConfigInfo) MEMALLOC(SIZEOF(IceConfigInfo));
+        }
+        retStatus = pIceConfigCopy == NULL ? STATUS_NOT_ENOUGH_MEMORY :
+                    signaling_copy_ice_config((PSignalingClient) pClientData->signalingClientHandle, i, pIceConfigCopy, NULL);
+        pIceConfigInfo = pIceConfigCopy;
+#else
         retStatus = signalingClientGetIceConfigInfo(pClientData->signalingClientHandle, i, &pIceConfigInfo);
+#endif
         if (STATUS_FAILED(retStatus)) {
             ESP_LOGW(TAG, "Failed to get ice config, proceeding anyway...");
             retStatus = STATUS_SUCCESS;
@@ -1557,6 +1786,9 @@ STATUS getKvsSignalingIceServers(PVOID pSignalingClient, PUINT32 pIceConfigCount
     DLOGI("Total ICE servers configured: %" PRIu32, *pIceConfigCount);
 
 CleanUp:
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    SAFE_MEMFREE(pIceConfigCopy);
+#endif
     return retStatus;
 }
 
@@ -1580,20 +1812,18 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
 {
     STATUS retStatus = STATUS_SUCCESS;
     KvsSignalingClientData *pClientData = (KvsSignalingClientData *)pSignalingClient;
-    static UINT32 uriCount = 0;
-    static PIceConfigInfo pIceConfigInfo = NULL;
-    static bool is_ice_refresh_in_progress = false;
-
-    *len = 0;
-    *have_more = false;
     app_webrtc_ice_server_t* pIceServer = NULL;
+    PIceConfigInfo pTurnConfig = NULL;
+    UINT32 turnIndex;
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    BOOL fetchPending = FALSE;
+#endif
 
     CHK(pClientData != NULL && data != NULL && len != NULL && have_more != NULL, STATUS_NULL_ARG);
+    *len = 0;
+    *have_more = false;
 
     if (index == 0) {
-        uriCount = 1; // Start with STUN server
-        is_ice_refresh_in_progress = false;
-
         // Allocate ICE server structure
         pIceServer = (app_webrtc_ice_server_t*) MEMCALLOC(1, sizeof(app_webrtc_ice_server_t));
         CHK(pIceServer != NULL, STATUS_NOT_ENOUGH_MEMORY);
@@ -1612,130 +1842,105 @@ STATUS kvsSignalingQueryServerGetByIdx(PVOID pSignalingClient, int index, bool u
         pIceServer->credential[0] = '\0';  // STUN has no credential
 
         if (useTurn && pClientData->signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
-            // Use the standardized ICE refresh check mechanism
-            bool refreshNeeded = false;
-            WEBRTC_STATUS checkStatus = kvsIsIceRefreshNeededWrapper(pClientData, &refreshNeeded);
-
-            if (checkStatus == WEBRTC_STATUS_SUCCESS && refreshNeeded) {
-                is_ice_refresh_in_progress = true;
-                DLOGI("ICE refresh needed, starting a background refresh");
-
-                // Trigger background refresh using work queue
-                // Pass pClientData instead of signalingClientHandle for progressive callback support
-                esp_err_t result = esp_work_queue_add_task(&kvs_refresh_ice_task, (void*)pClientData);
-                if (result != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to queue background ICE refresh: %d", (int) result);
-                }
-            } else if (checkStatus == WEBRTC_STATUS_SUCCESS) {
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+            if (signaling_has_valid_ice_config((PSignalingClient) pClientData->signalingClientHandle)) {
+                // Valid config: pass it to the peer connection on the work queue, off the offer path
                 DLOGI("ICE configuration is up to date, scheduling an async apply");
-                // ICE configs are still valid (not expired). Dispatch to work queue so the
-                // callback chain doesn't block the current call (offer processing path).
-                esp_err_t result = esp_work_queue_add_task(&kvs_apply_cached_ice_task, (void*)pClientData);
-                if (result != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to queue cached ICE apply task: %d", (int)result);
-                }
+                kvs_queue_ice_apply(pClientData);
+            } else if (s_iceRefreshTask != NULL) {
+                // The refresh task fetches it and applies it. Until then the TURN indexes answer
+                // "in progress".
+                DLOGI("ICE refresh needed, asking the refresh task");
+                pClientData->iceRefreshRequested = TRUE;
+                kvs_ice_refresh_wake();
             } else {
-                ESP_LOGW(TAG, "ICE refresh check failed, proceeding anyway");
+                ESP_LOGE(TAG, "ICE refresh task not running; using STUN only");
             }
+#else
+            // The TURN indexes fetch the config when there is none
+            bool refreshNeeded = false;
+            if (kvsIsIceRefreshNeededWrapper(pClientData, &refreshNeeded) == WEBRTC_STATUS_SUCCESS && !refreshNeeded) {
+                kvs_queue_ice_apply(pClientData);
+            }
+#endif
         }
 
-        DLOGI("Sending immediate STUN server: %s (refresh in progress: %s)", pIceServer->urls,
-              is_ice_refresh_in_progress ? "true" : "false");
+        DLOGI("Sending immediate STUN server: %s", pIceServer->urls);
         *have_more = true; // Always ask for more to get TURN servers
         goto CleanUp;
-
-    } else if (is_ice_refresh_in_progress) {
-        if (useTurn && pClientData->signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
-            // Check if refresh completed using standardized mechanism
-            bool refreshNeeded = false;
-            WEBRTC_STATUS checkStatus = kvsIsIceRefreshNeededWrapper(pClientData, &refreshNeeded);
-
-            if (checkStatus == WEBRTC_STATUS_SUCCESS && refreshNeeded) {
-                DLOGI("ICE refresh still in progress, asking the caller to wait");
-                *have_more = true; // Ask caller to wait for refresh completion
-                goto CleanUp;
-            } else if (checkStatus == WEBRTC_STATUS_SUCCESS) {
-                DLOGI("ICE refresh completed");
-                is_ice_refresh_in_progress = false;
-            } else {
-                ESP_LOGW(TAG, "ICE refresh check failed, assuming completed");
-                is_ice_refresh_in_progress = false;
-            }
-        }
     }
 
-    if (index == 1) {
-        if (useTurn && pClientData->signalingClientHandle != INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
-            // Final check that ICE configuration is ready using standardized mechanism
-            bool refreshNeeded = false;
-            WEBRTC_STATUS checkStatus = kvsIsIceRefreshNeededWrapper(pClientData, &refreshNeeded);
-
-            if (checkStatus != WEBRTC_STATUS_SUCCESS || refreshNeeded) {
-                ESP_LOGE(TAG, "ICE configuration still not ready for TURN servers");
-                *have_more = false;
-                goto CleanUp;
-            }
-
-            // Get ICE configuration count
-            UINT32 iceConfigCount = 0;
-            STATUS status = signalingClientGetIceConfigInfoCount(pClientData->signalingClientHandle, &iceConfigCount);
-            if (STATUS_FAILED(status)) {
-                ESP_LOGE(TAG, "Failed to get ICE config count: 0x%08" PRIx32, status);
-                *have_more = false;
-                goto CleanUp;
-            }
-
-            DLOGI("Retrieved %" PRIu32 " ICE configurations", iceConfigCount);
-
-            if (iceConfigCount > 0) {
-                // Get the first ICE config info (contains TURN servers)
-                PIceConfigInfo pIceConfigInfoPtr = NULL;
-                status = signalingClientGetIceConfigInfo(pClientData->signalingClientHandle, 0, &pIceConfigInfoPtr);
-                if (STATUS_FAILED(status) || pIceConfigInfoPtr == NULL) {
-                    ESP_LOGE(TAG, "Failed to get ICE config info: 0x%08" PRIx32, status);
-                    *have_more = false;
-                    goto CleanUp;
-                }
-
-                uriCount += pIceConfigInfoPtr->uriCount;
-                DLOGI("Total URI count (STUN + TURN): %" PRIu32, uriCount);
-
-                // Store the ICE config for subsequent requests
-                pIceConfigInfo = pIceConfigInfoPtr;
-            }
-        }
+    // Index 1 and up: the TURN servers of the first ICE config
+    if (index < 0 || !useTurn || pClientData->signalingClientHandle == INVALID_SIGNALING_CLIENT_HANDLE_VALUE) {
+        goto NoMore;
     }
 
-    // Handle TURN server requests (index >= 1)
-    if (index >= 1 && pIceConfigInfo != NULL) {
-        UINT32 turnIndex = index - 1; // Convert to 0-based TURN index
-
-        if (turnIndex < pIceConfigInfo->uriCount) {
-            // Allocate and populate TURN server
-            pIceServer = (app_webrtc_ice_server_t*)MEMCALLOC(1, sizeof(app_webrtc_ice_server_t));
-            CHK(pIceServer != NULL, STATUS_NOT_ENOUGH_MEMORY);
-            *len = sizeof(app_webrtc_ice_server_t);
-
-            STRNCPY(pIceServer->urls, pIceConfigInfo->uris[turnIndex], APP_WEBRTC_MAX_ICE_CONFIG_URI_LEN);
-            pIceServer->urls[APP_WEBRTC_MAX_ICE_CONFIG_URI_LEN - 1] = '\0';
-            STRNCPY(pIceServer->username, pIceConfigInfo->userName, APP_WEBRTC_MAX_ICE_CONFIG_USER_NAME_LEN);
-            pIceServer->username[APP_WEBRTC_MAX_ICE_CONFIG_USER_NAME_LEN - 1] = '\0';
-            STRNCPY(pIceServer->credential, pIceConfigInfo->password, APP_WEBRTC_MAX_ICE_CONFIG_CREDENTIAL_LEN);
-            pIceServer->credential[APP_WEBRTC_MAX_ICE_CONFIG_CREDENTIAL_LEN - 1] = '\0';
-
-            *have_more = (index < uriCount - 1);
-
-            DLOGI("Sending TURN server %" PRIu32 ": %s [have_more: %s]", turnIndex, pIceServer->urls,
-                  *have_more ? "true" : "false");
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    /* Each query copies the config under the ICE config lock and frees the copy. Nothing is kept
+     * between queries, so sessions that query at the same time do not share state. */
+    /* Read before the copy, not after it: a fetch that completes in between writes the config,
+     * then clears both flags, and a later read would answer "STUN only" with a valid config in
+     * the cache. */
+    fetchPending = pClientData->iceRefreshRequested || pClientData->iceFetchActive;
+    pTurnConfig = (PIceConfigInfo) MEMALLOC(SIZEOF(IceConfigInfo));
+    CHK(pTurnConfig != NULL, STATUS_NOT_ENOUGH_MEMORY);
+    if (STATUS_FAILED(signaling_copy_ice_config((PSignalingClient) pClientData->signalingClientHandle, 0, pTurnConfig,
+                                                NULL))) {
+        if (fetchPending) {
+            // An empty answer with have_more asks the caller to ask for this index again
+            DLOGI("ICE refresh still in progress, asking the caller to wait");
+            *have_more = true;
             goto CleanUp;
         }
+        ESP_LOGW(TAG, "No valid ICE configuration; using STUN only");
+        goto NoMore;
+    }
+#else
+    {
+        UINT32 iceConfigCount = 0;
+        STATUS status = signalingClientGetIceConfigInfoCount(pClientData->signalingClientHandle, &iceConfigCount);
+        if (STATUS_SUCCEEDED(status) && iceConfigCount > 0) {
+            status = signalingClientGetIceConfigInfo(pClientData->signalingClientHandle, 0, &pTurnConfig);
+        }
+        if (STATUS_FAILED(status) || iceConfigCount == 0 || pTurnConfig == NULL) {
+            ESP_LOGE(TAG, "Failed to get the ICE config: 0x%08" PRIx32, status);
+            pTurnConfig = NULL;
+            goto NoMore;
+        }
+    }
+#endif
+
+    turnIndex = (UINT32) index - 1;
+    if (turnIndex < pTurnConfig->uriCount) {
+        pIceServer = (app_webrtc_ice_server_t*) MEMCALLOC(1, sizeof(app_webrtc_ice_server_t));
+        CHK(pIceServer != NULL, STATUS_NOT_ENOUGH_MEMORY);
+        *len = sizeof(app_webrtc_ice_server_t);
+
+        STRNCPY(pIceServer->urls, pTurnConfig->uris[turnIndex], APP_WEBRTC_MAX_ICE_CONFIG_URI_LEN);
+        pIceServer->urls[APP_WEBRTC_MAX_ICE_CONFIG_URI_LEN - 1] = '\0';
+        STRNCPY(pIceServer->username, pTurnConfig->userName, APP_WEBRTC_MAX_ICE_CONFIG_USER_NAME_LEN);
+        pIceServer->username[APP_WEBRTC_MAX_ICE_CONFIG_USER_NAME_LEN - 1] = '\0';
+        STRNCPY(pIceServer->credential, pTurnConfig->password, APP_WEBRTC_MAX_ICE_CONFIG_CREDENTIAL_LEN);
+        pIceServer->credential[APP_WEBRTC_MAX_ICE_CONFIG_CREDENTIAL_LEN - 1] = '\0';
+
+        *have_more = (turnIndex + 1 < pTurnConfig->uriCount);
+
+        DLOGI("Sending TURN server %" PRIu32 ": %s [have_more: %s]", turnIndex, pIceServer->urls,
+              *have_more ? "true" : "false");
+        goto CleanUp;
     }
 
+NoMore:
     DLOGI("No more ICE servers available for index %d", index);
     *have_more = false;
 
 CleanUp:
-    *data = (uint8_t*)pIceServer;
+#ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
+    SAFE_MEMFREE(pTurnConfig);
+#endif
+    if (data != NULL) {
+        *data = (uint8_t*) pIceServer;
+    }
     return retStatus;
 }
 
@@ -2047,16 +2252,14 @@ static WEBRTC_STATUS kvsRefreshIceConfigurationWrapper(void *pSignalingClient)
     }
 
 #ifdef CONFIG_USE_ESP_WEBSOCKET_CLIENT
-    ESP_LOGI(TAG, "Triggering KVS ICE configuration refresh");
-
-    // Trigger the background refresh using the KVS signaling client
-    STATUS status = refresh_ice_configuration((PSignalingClient)pClientData->signalingClientHandle);
-    if (STATUS_FAILED(status)) {
-        ESP_LOGE(TAG, "Failed to refresh ICE configuration: 0x%08" PRIx32, (UINT32)status);
+    // Non-blocking, as app_webrtc expects: the refresh task does the fetch
+    if (s_iceRefreshTask == NULL) {
+        ESP_LOGE(TAG, "ICE refresh task not running");
         return WEBRTC_STATUS_INTERNAL_ERROR;
     }
-
-    ESP_LOGI(TAG, "ICE configuration refresh triggered successfully");
+    pClientData->iceRefreshRequested = TRUE;
+    xTaskNotifyGive(s_iceRefreshTask);
+    ESP_LOGI(TAG, "ICE configuration refresh requested");
 #else
     ESP_LOGE(TAG, "ICE refresh is not supported in default websocket client mode, skipping...");
 #endif

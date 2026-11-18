@@ -15,6 +15,11 @@
 #include "flash_wrapper.h"
 #include "esp_work_queue.h"
 
+/* Guards iceConfigs and iceConfigCount of every client. The ICE refresh task rewrites them, and
+ * sessions read them on other tasks. Held only to parse, copy or encode the config, never across
+ * a network call. Created with the first client and never freed. */
+static MUTEX s_iceConfigLock = INVALID_MUTEX_VALUE;
+
 /* NVS-based caching configuration */
 #define SIGNALING_NVS_NAMESPACE      "kvs_signaling"
 #define SIGNALING_CACHE_VERSION      "v1"   // 2 chars for future compatibility
@@ -348,6 +353,11 @@ STATUS createSignalingSync(PSignalingClientInfoInternal pClientInfo, PChannelInf
 
     pSignalingClient->stateLock = MUTEX_CREATE(TRUE);
     CHK(IS_VALID_MUTEX_VALUE(pSignalingClient->stateLock), STATUS_INVALID_OPERATION);
+
+    if (!IS_VALID_MUTEX_VALUE(s_iceConfigLock)) {
+        s_iceConfigLock = MUTEX_CREATE(FALSE);
+        CHK(IS_VALID_MUTEX_VALUE(s_iceConfigLock), STATUS_INVALID_OPERATION);
+    }
 
     pSignalingClient->messageQueueLock = MUTEX_CREATE(TRUE);
     CHK(IS_VALID_MUTEX_VALUE(pSignalingClient->messageQueueLock), STATUS_INVALID_OPERATION);
@@ -1008,6 +1018,83 @@ BOOL signaling_has_valid_ice_config(PSignalingClient pSignalingClient)
     curTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient);
 
     return (pSignalingClient->iceConfigCount > 0 && curTime <= pSignalingClient->iceConfigExpiration);
+}
+
+VOID signalingIceConfigLock(VOID)
+{
+    MUTEX_LOCK(s_iceConfigLock);
+}
+
+VOID signalingIceConfigUnlock(VOID)
+{
+    MUTEX_UNLOCK(s_iceConfigLock);
+}
+
+/*
+ * Copy one entry of the cached ICE config, under the ICE config lock. Fails when there is no
+ * valid config. Never goes on the wire. pIceConfigInfo or pIceConfigCount may be NULL.
+ */
+STATUS signaling_copy_ice_config(PSignalingClient pSignalingClient, UINT32 index, PIceConfigInfo pIceConfigInfo,
+                                 PUINT32 pIceConfigCount)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    BOOL locked = FALSE;
+
+    CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+
+    signalingIceConfigLock();
+    locked = TRUE;
+
+    CHK(signaling_has_valid_ice_config(pSignalingClient), STATUS_SIGNALING_NO_CONFIG_SPECIFIED);
+    CHK(index < pSignalingClient->iceConfigCount, STATUS_INVALID_ARG);
+    if (pIceConfigInfo != NULL) {
+        MEMCPY(pIceConfigInfo, &pSignalingClient->iceConfigs[index], SIZEOF(IceConfigInfo));
+    }
+    if (pIceConfigCount != NULL) {
+        *pIceConfigCount = pSignalingClient->iceConfigCount;
+    }
+
+CleanUp:
+    if (locked) {
+        signalingIceConfigUnlock();
+    }
+    return retStatus;
+}
+
+/*
+ * One GetIceServerConfig call, outside the state machine. The caller holds the client's
+ * stateLock: the call reads the endpoint and the credentials, and it sets `result`, which
+ * the state machine owns. `result` is put back afterwards. Expired credentials are fetched
+ * again first, as the GET_TOKEN state does. A failed HTTP call returns success and keeps
+ * a config that is still valid; see getIceConfigEsp().
+ */
+STATUS signaling_fetch_ice_config(PSignalingClient pSignalingClient)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    SIZE_T savedResult = (SIZE_T) SERVICE_CALL_RESULT_NOT_SET;
+    UINT64 curTime;
+
+    CHK(pSignalingClient != NULL, STATUS_NULL_ARG);
+    savedResult = ATOMIC_LOAD(&pSignalingClient->result);
+    CHK(!ATOMIC_LOAD_BOOL(&pSignalingClient->shutdown), STATUS_INVALID_OPERATION);
+
+    curTime = SIGNALING_GET_CURRENT_TIME(pSignalingClient);
+    if (pSignalingClient->pAwsCredentials == NULL || curTime >= pSignalingClient->pAwsCredentials->expiration) {
+        CHK(pSignalingClient->pCredentialProvider != NULL, STATUS_NULL_ARG);
+        CHK_STATUS(pSignalingClient->pCredentialProvider->getCredentialsFn(pSignalingClient->pCredentialProvider,
+                                                                           &pSignalingClient->pAwsCredentials));
+        CHK(pSignalingClient->pAwsCredentials != NULL && curTime < pSignalingClient->pAwsCredentials->expiration,
+            STATUS_SIGNALING_NO_CONFIG_SPECIFIED);
+    }
+
+    CHK_STATUS(getIceConfigEsp(pSignalingClient, curTime));
+    pSignalingClient->getIceConfigTime = curTime;
+
+CleanUp:
+    if (pSignalingClient != NULL) {
+        ATOMIC_STORE(&pSignalingClient->result, savedResult);
+    }
+    return retStatus;
 }
 
 BOOL signaling_is_ice_config_refresh_needed(PSignalingClient pSignalingClient)

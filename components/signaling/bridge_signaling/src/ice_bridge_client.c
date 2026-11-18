@@ -22,6 +22,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/timers.h"
+#include "esp_work_queue.h"
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -52,6 +54,13 @@ static void *s_servers_updated_user_data = NULL;
 static volatile bool s_async_in_progress = false;
 static volatile uint32_t s_next_index = 0;
 static volatile bool s_initialized = false;
+
+/* An empty answer with have_more means the signaling device is still fetching the ICE config.
+ * The same index is asked for again after ICE_RETRY_DELAY_MS, up to ICE_RETRY_MAX times. */
+#define ICE_RETRY_DELAY_MS 250
+#define ICE_RETRY_MAX      60
+static TimerHandle_t s_retry_timer = NULL;
+static uint32_t s_retry_count = 0;
 #endif
 
 /**
@@ -113,6 +122,18 @@ void ice_bridge_client_set_ice_server_response(const ss_ice_server_response_t *i
         }
     }
 
+    if (ice_server_response->have_more && ice_server_response->urls[0] == '\0' && s_async_in_progress) {
+        // Still fetching: ask for the same index again
+        if (s_retry_timer != NULL && s_retry_count < ICE_RETRY_MAX && xTimerStart(s_retry_timer, 0) == pdPASS) {
+            s_retry_count++;
+        } else {
+            ESP_LOGW(TAG, "ICE servers not ready after %" PRIu32 " tries; using the cached ones", s_retry_count);
+            s_async_in_progress = false;
+        }
+        return;
+    }
+    s_retry_count = 0;
+
     if (ice_server_response->have_more && s_cache_count < ICE_CACHE_MAX && s_async_in_progress) {
         s_next_index++;
         send_next_ice_request();
@@ -150,6 +171,25 @@ static void send_next_ice_request(void)
     ESP_LOGI(TAG, "Requested ICE server index %" PRIu32 " via signaling channel", s_next_index);
 }
 
+/* The retry runs on the work queue, where the answers are handled. The timer task's stack is
+ * too small for the serializer and the bridge send. */
+static void retry_ice_request_task(void *arg)
+{
+    (void)arg;
+    if (s_async_in_progress) {
+        send_next_ice_request();
+    }
+}
+
+static void retry_timer_cb(TimerHandle_t timer)
+{
+    (void)timer;
+    if (esp_work_queue_add_task(retry_ice_request_task, NULL) != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to queue the ICE request retry");
+        s_async_in_progress = false;
+    }
+}
+
 void ice_bridge_client_init(void)
 {
     if (s_initialized) {
@@ -159,6 +199,14 @@ void ice_bridge_client_init(void)
     s_cache_mutex = xSemaphoreCreateMutex();
     if (s_cache_mutex == NULL) {
         ESP_LOGE(TAG, "Failed to create cache mutex");
+        return;
+    }
+
+    s_retry_timer = xTimerCreate("ice_retry", pdMS_TO_TICKS(ICE_RETRY_DELAY_MS), pdFALSE, NULL, retry_timer_cb);
+    if (s_retry_timer == NULL) {
+        ESP_LOGE(TAG, "Failed to create the ICE retry timer");
+        vSemaphoreDelete(s_cache_mutex);
+        s_cache_mutex = NULL;
         return;
     }
 
@@ -182,6 +230,7 @@ WEBRTC_STATUS ice_bridge_client_request_ice_servers_async(void)
 
     s_async_in_progress = true;
     s_next_index = 0;
+    s_retry_count = 0;
     send_next_ice_request();
     return WEBRTC_STATUS_SUCCESS;
 #else
