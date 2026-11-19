@@ -28,3 +28,6 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # contiguous -- too fragmented for a contiguous MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL
 # block. With the player off the floor is ~66 KB free / ~31 KB contiguous and
 # hardware AES runs clean. Measured, not assumed; see test_e2e/README.md.
+
+# The P2P check reads the SDK's "Selected pair" PROFILE line. Print it at INFO.
+CONFIG_KVS_PROFILE_LOG=y

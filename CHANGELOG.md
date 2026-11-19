@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **PROFILE logs:** the new `CONFIG_KVS_PROFILE_LOG` option prints the SDK's PROFILE
+  lines (session setup timings, the selected candidate pair) at INFO. By default they
+  print at DEBUG. The e2e overlays turn it on, because the P2P check reads the
+  `Selected pair` line.
 - **WebSocket buffer:** `signaling_only`, `webrtc_classic` and `webrtc_person_detect`
   set `CONFIG_WS_BUFFER_SIZE` to 4096. The signed signaling URL with an STS session
   token is about 2.2 KB, and the 2048-byte buffer could not hold the handshake request.
