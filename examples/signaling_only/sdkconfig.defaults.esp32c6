@@ -118,13 +118,15 @@ CONFIG_ESP_HOSTED_CP_FEAT_NW_SPLIT_WIFI_AUTO_CONNECT_ON_STA_START=n
 # and the co-processor re-initialises Wi-Fi when the two differ. That drops the
 # link and the signaling session. These are the values every P4 host that pairs
 # with a C6 resolves to. The P4 allocates Wi-Fi and lwIP from PSRAM, so
-# esp_wifi_remote gives it static TX buffers only and 16 static RX buffers. The
-# streaming_only p4_eye, p4x_eye and p4_function_ev_board_v16 overlays set the
-# same RX values. The Wi-Fi IRAM options stay off, as set above.
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+# esp_wifi_remote gives it static TX buffers only. Every streaming_only overlay
+# for a C6 pair sets the same counts: 10 static RX and 12 static TX buffers. The
+# C6 has no PSRAM, and these buffers come from its internal RAM: at 16 and 16 a C6
+# that also ran an MQTT client (the RainMaker split cameras) had too little heap
+# left to forward an offer to the P4. The Wi-Fi IRAM options stay off, as set above.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
 CONFIG_ESP_WIFI_STATIC_TX_BUFFER=y
-CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=12
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=y
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=y
 CONFIG_ESP_WIFI_RX_BA_WIN=16

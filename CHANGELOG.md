@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token is about 2.2 KB, and the 2048-byte buffer could not hold the handshake request.
   Existing projects: set `CONFIG_WS_BUFFER_SIZE=4096` in `sdkconfig`, or regenerate it.
   Apps that use `kvs_signaling` with `esp_websocket_client` need the same.
+- **Split-mode Wi-Fi buffers on the C6:** `signaling_only` on the C6, and every
+  `streaming_only` overlay for a C6 pair, use 10 static RX and 12 static TX Wi-Fi
+  buffers (16 and 16 before). The C6 has no PSRAM, and these buffers live in its
+  internal RAM. With 16 and 16, a C6 that also runs an MQTT client (the RainMaker
+  split cameras) could not forward an offer to the P4 (`ESP_ERR_NO_MEM`). Both sides
+  change together, so the co-processor still sees the host's own Wi-Fi config and
+  does not re-initialise Wi-Fi. Regenerate a saved `sdkconfig` on both the P4 and the
+  C6. If only one side changes, the C6 re-initialises Wi-Fi at every host boot and
+  wake.
 - **Split-mode host sleep:** `streaming_only` deep-sleeps the host 1 s after the last
   session ends (was 10 s). A session that fails before it connects now starts the
   timer too, so the host no longer stays awake until the next viewer. The boot idle
