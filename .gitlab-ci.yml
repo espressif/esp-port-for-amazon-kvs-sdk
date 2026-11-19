@@ -71,6 +71,9 @@ default:
   - echo "Building $EXAMPLE for $TARGET $DEFAULTS_ARG"
   - idf.py $DEFAULTS_ARG set-target $TARGET
   - idf.py build
+  # A co-processor in the field cannot grow its app slot, so keep room for the next
+  # esp_hosted or IDF update. The build itself fails only when the image no longer fits.
+  - if [ $EXAMPLE == "network_adapter" ]; then python $CI_PROJECT_DIR/tools/check_app_headroom.py build 32768; fi
   - mkdir -p $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
   - cp $example_path/build/*.bin $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
   - cp $example_path/build/*.elf $CI_PROJECT_DIR/build_output/$EXAMPLE/$TARGET/
