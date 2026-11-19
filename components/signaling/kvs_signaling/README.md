@@ -60,6 +60,9 @@ REQUIRES "kvs_signaling"
 
 - **ws-on (`y`, default)** — `esp_websocket_client`; builds `port/Signaling_esp.c`
   + `port/LwsApiCalls_esp.c`, lighter on stack/memory.
+  Set `CONFIG_WS_BUFFER_SIZE=4096`. The signed signaling URL with an STS session
+  token is about 2.2 KB, and with IDF's default of 1024 signaling never connects
+  (`Error in request generation, desired request len: N, buffer size: ...`).
 - **ws-off (`n`)** — the upstream `libwebsockets` path. It needs two companion
   settings alongside the switch (set all three together):
   - `CONFIG_APP_WEBRTC_TASK_STACK_SIZE=32768` — the lws create path is stack-hungry.

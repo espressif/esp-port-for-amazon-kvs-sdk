@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **WebSocket buffer:** `signaling_only`, `webrtc_classic` and `webrtc_person_detect`
+  set `CONFIG_WS_BUFFER_SIZE` to 4096. The signed signaling URL with an STS session
+  token is about 2.2 KB, and the 2048-byte buffer could not hold the handshake request.
+  Existing projects: set `CONFIG_WS_BUFFER_SIZE=4096` in `sdkconfig`, or regenerate it.
+  Apps that use `kvs_signaling` with `esp_websocket_client` need the same.
 - **Split-mode host sleep:** `streaming_only` deep-sleeps the host 1 s after the last
   session ends (was 10 s). A session that fails before it connects now starts the
   timer too, so the host no longer stays awake until the next viewer. The boot idle
