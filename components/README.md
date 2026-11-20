@@ -16,7 +16,6 @@ This directory contains the complete ecosystem of ESP-IDF components needed for 
 |-----------|---------|--------------|----------|
 | **[signaling_serializer](signaling_serializer/)** | Message serialization | - | Custom signaling protocols |
 | **[webrtc_bridge](webrtc_bridge/)** | Bridge communication protocol | - | Split mode IPC |
-| **[network_coprocessor](network_coprocessor/)** | Network processor utilities | esp_hosted | Dual-chip networking |
 
 ### Network & Protocol Stack
 | Component | Purpose | Dependencies | Use Case |
@@ -28,7 +27,7 @@ This directory contains the complete ecosystem of ESP-IDF components needed for 
 ### Hardware & Platform Support
 | Component | Purpose | Dependencies | Use Case |
 |-----------|---------|--------------|----------|
-| **[esp_hosted](esp_hosted/)** | ESP-Hosted functionality | - | Dual-chip communication |
+| **esp_hosted** (registry `espressif/esp_hosted`) | ESP-Hosted functionality | - | Dual-chip communication |
 | **[esp_webrtc_utils](esp_webrtc_utils/)** | WebRTC utilities for ESP | - | Platform optimizations |
 
 ### Development & API Components
@@ -174,8 +173,6 @@ graph TD
 
     I[streaming_only] --> A
     I --> G
-
-    J[network_coprocessor] --> K[esp_hosted]
 ```
 
 ## 🚨 Troubleshooting Components

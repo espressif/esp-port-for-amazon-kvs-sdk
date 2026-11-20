@@ -27,9 +27,6 @@ LICENSE file inside each submodule for the full text.
                                       (BSD-3-Clause)
     components/esp_usrsctp/usrsctp/
 
-  espressif/esp-hosted-mcu            (Apache-2.0)
-    components/esp_hosted/
-
 The component manifests under components/*/idf_component.yml may also pull in
 additional Espressif components from the ESP Component Registry
 (https://components.espressif.com); each registry component carries its own

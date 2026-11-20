@@ -9,8 +9,8 @@ variables:
   GIT_SUBMODULE_STRATEGY: recursive
 
 # The runner's own submodule checkout can fail part way (its mirror fetch is
-# refused) and its retry does not recurse, which leaves nested submodules such as
-# esp_hosted's protobuf-c empty. Make every job start from a complete checkout.
+# refused) and its retry does not recurse, which can leave nested submodules
+# empty. Make every job start from a complete checkout.
 default:
   before_script:
     - git submodule sync --recursive

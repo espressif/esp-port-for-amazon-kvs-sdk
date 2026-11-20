@@ -167,7 +167,7 @@ If your project uses `idf_component.yml` to reference KVS SDK components via `pa
     version: "*"
 ```
 
-This applies to all component references: `app_webrtc`, `esp_webrtc_utils`, `kvs_webrtc`, `kvs_signaling`, `media_stream`, `network_coprocessor`, `signaling_bridge_adapter`, etc.
+This applies to all component references: `app_webrtc`, `esp_webrtc_utils`, `kvs_webrtc`, `kvs_signaling`, `media_stream`, `signaling_bridge_adapter`, etc.
 
 ### No API Changes
 
