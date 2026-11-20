@@ -61,6 +61,23 @@ HOST = (
 # a power-save run never leaves its image behind for the ordinary emu tests.
 HOST_PS = (HOST[0], HOST[1], "build_emu_ps", HOST[3] + ";sdkconfig.ci.emu_ps")
 
+# The single-chip pair: webrtc_classic runs Wi-Fi, signaling and media on the P4
+# over esp_wifi_remote, and network_adapter is a plain esp_hosted co-processor.
+CLASSIC = (
+    REPO / "examples/webrtc_classic",
+    "esp32p4",
+    "build_emu",
+    "sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.ci.e2e;sdkconfig.ci.emu",
+)
+ADAPTER = (
+    REPO / "examples/network_adapter",
+    "esp32c6",
+    "build_emu",
+    "sdkconfig.defaults;sdkconfig.defaults.esp32c6",
+)
+# The images that sign KVS requests, and so need the credentials.
+_SIGNS = (CP[0], CLASSIC[0])
+
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -127,13 +144,14 @@ def build(spec: tuple) -> tuple:
     tree costs a couple of seconds.
     """
     project, target, build_dir, defaults = spec
-    # Every co-processor build, including variants of CP (the Wi-Fi mismatch
-    # overlay of the re-init and offer-wake tests), needs the credentials.
-    if project == CP[0]:
+    # Every image that signs KVS requests needs the credentials: the split pair's
+    # co-processor, including its variants (the Wi-Fi mismatch overlay of the
+    # re-init and offer-wake tests), and webrtc_classic.
+    if project in _SIGNS:
         if _CREDS.exists():
             defaults += f";{_CREDS}"
         else:
-            print(f"emu_pair: no {_CREDS.name}; the co-processor is built without AWS "
+            print(f"emu_pair: no {_CREDS.name}; {project.name} is built without AWS "
                   f"credentials and cannot sign a signaling request")
     out = project / build_dir
     merged = out / "merged_flash.bin"
