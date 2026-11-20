@@ -253,6 +253,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ESP32 and ESP32-S3 overlays of `signaling_only`, `simple_video_server`, `esp_camera` and
+  `webrtc_classic` turn esp_hosted off with `CONFIG_ESP_HOSTED=n`. They used
+  `CONFIG_ESP_HOSTED_ENABLED`, which esp_hosted 3.x does not have, so an example with no
+  setting in its base `sdkconfig.defaults`, such as `signaling_only` on the ESP32-S3, built
+  with esp_hosted on. On the S3 its SDIO host takes GPIO 19, the USB D- pin, and the
+  USB-Serial/JTAG console stops.
 - **TURN over TLS (`turns:` servers) never worked on ESP.**
   - The ESP TLS layer (`port/Tls_esp.c`) was a stub. It never started a
     handshake, and it would have sent data in plaintext, so every TLS TURN
