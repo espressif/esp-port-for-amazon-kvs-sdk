@@ -537,7 +537,7 @@ waiting out the peer teardown; neither is done yet.
   and AWS secrets.
 - `sdkconfig.ci.e2e` turns BLE provisioning **off** — `webrtc_classic`'s own defaults
   enable it, which would park an unattended boot waiting for a phone.
-- The P2P assertion reads the SDK's `Selected pair ...` line. It is `DLOGP`, which maps
-  to `ESP_LOG_ERROR`, so it survives the KVS logger's default WARN gate with no extra
-  config — it appears as an `E (...)` line despite not being an error.
+- The P2P assertion reads the SDK's `Selected pair ...` line. It is a `DLOGP` PROFILE
+  line, which prints under the `kvs_profile` tag at DEBUG by default. The e2e overlays
+  set `CONFIG_KVS_PROFILE_LOG=y`, so it prints at INFO.
 - The C6's logs are interleaved into the P4 console with a `[SLAVE]` prefix.

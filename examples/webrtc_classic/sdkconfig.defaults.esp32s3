@@ -61,4 +61,4 @@ CONFIG_ESP_VIDEO_IF_VER_FLIP=y
 # No co-processor: native Wi-Fi. IDF turns Wi-Fi Remote on for every target, which enables
 # esp_hosted, whose constructor starts an SDIO host at boot on GPIO 19 - the S3's USB D- -
 # and kills the USB-Serial-JTAG console.
-CONFIG_ESP_HOSTED_ENABLED=n
+CONFIG_ESP_HOSTED=n

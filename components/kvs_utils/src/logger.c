@@ -93,9 +93,14 @@ VOID defaultLogPrint(UINT32 level, const PCHAR tag, const PCHAR fmt, ...)
             case LOG_LEVEL_INFO:    esp_level = ESP_LOG_INFO;    break;
             case LOG_LEVEL_WARN:    esp_level = ESP_LOG_WARN;    break;
             case LOG_LEVEL_PROFILE:
-                // PROFILE timings print on every session. Keep them at DEBUG under one tag:
+                // PROFILE timings print on every session. Keep them under one tag, at DEBUG
+                // unless CONFIG_KVS_PROFILE_LOG asks for INFO. At DEBUG,
                 // esp_log_level_set(KVS_PROFILE_LOG_TAG, ESP_LOG_DEBUG) turns them on.
+#if CONFIG_KVS_PROFILE_LOG
+                esp_level = ESP_LOG_INFO;
+#else
                 esp_level = ESP_LOG_DEBUG;
+#endif
                 esp_tag = KVS_PROFILE_LOG_TAG;
                 break;
             default:                esp_level = ESP_LOG_ERROR;   break;

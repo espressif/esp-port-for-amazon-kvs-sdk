@@ -17,4 +17,13 @@ menu "KVS Common Configuration"
             onto a different SDK tip), or if you bring your own patch
             workflow.
 
+    config KVS_PROFILE_LOG
+        bool "Print KVS PROFILE lines at INFO"
+        default n
+        help
+            The SDK's PROFILE lines (session setup timings and the selected ICE
+            candidate pair) print under the "kvs_profile" tag. They print at
+            ESP_LOG_DEBUG by default, so a default build does not show them.
+            Turn this on to print them at ESP_LOG_INFO, as the e2e tests need.
+
 endmenu

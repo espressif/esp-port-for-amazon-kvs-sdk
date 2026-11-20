@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **PROFILE logs:** the new `CONFIG_KVS_PROFILE_LOG` option prints the SDK's PROFILE
+  lines (session setup timings, the selected candidate pair) at INFO. By default they
+  print at DEBUG. The e2e overlays turn it on, because the P2P check reads the
+  `Selected pair` line.
+- **WebSocket buffer:** `signaling_only`, `webrtc_classic` and `webrtc_person_detect`
+  set `CONFIG_WS_BUFFER_SIZE` to 4096. The signed signaling URL with an STS session
+  token is about 2.2 KB, and the 2048-byte buffer could not hold the handshake request.
+  Existing projects: set `CONFIG_WS_BUFFER_SIZE=4096` in `sdkconfig`, or regenerate it.
+  Apps that use `kvs_signaling` with `esp_websocket_client` need the same.
 - **Split-mode host sleep:** `streaming_only` deep-sleeps the host 1 s after the last
   session ends (was 10 s). A session that fails before it connects now starts the
   timer too, so the host no longer stays awake until the next viewer. The boot idle
@@ -251,6 +260,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ESP32 and ESP32-S3 overlays of `signaling_only`, `simple_video_server`, `esp_camera` and
+  `webrtc_classic` turn esp_hosted off with `CONFIG_ESP_HOSTED=n`. They used
+  `CONFIG_ESP_HOSTED_ENABLED`, which esp_hosted 3.x does not have, so an example with no
+  setting in its base `sdkconfig.defaults`, such as `signaling_only` on the ESP32-S3, built
+  with esp_hosted on. On the S3 its SDIO host takes GPIO 19, the USB D- pin, and the
+  USB-Serial/JTAG console stops.
 - **TURN over TLS (`turns:` servers) never worked on ESP.**
   - The ESP TLS layer (`port/Tls_esp.c`) was a stub. It never started a
     handshake, and it would have sent data in plaintext, so every TLS TURN

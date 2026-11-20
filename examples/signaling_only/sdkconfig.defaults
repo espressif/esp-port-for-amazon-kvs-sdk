@@ -109,7 +109,9 @@ CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 #
 # Websockets
 #
-CONFIG_WS_BUFFER_SIZE=2048
+# Holds the WebSocket handshake request. The signed signaling URL carries an STS
+# session token and is about 2.2 KB, so 2048 is too small.
+CONFIG_WS_BUFFER_SIZE=4096
 CONFIG_WS_DYNAMIC_BUFFER=y
 
 # Additional WebRTC configs
