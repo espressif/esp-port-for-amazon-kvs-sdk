@@ -113,7 +113,6 @@ CONFIG_ESP_HOSTED_HOST_FEAT_POWER_SAVE_DEEP_SLEEP_ALLOWED=y
 # sdkconfig.defaults.esp32p4 (common to all P4 variants).
 
 # Wi-Fi RX buffering / IRAM optimisations (lower latency under load).
-CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
 CONFIG_WIFI_RMT_RX_BA_WIN=16
 CONFIG_WIFI_RMT_IRAM_OPT=y
 CONFIG_WIFI_RMT_RX_IRAM_OPT=y
@@ -139,4 +138,8 @@ CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=y
 # esp_wifi_init() config with its own, and re-initialises Wi-Fi when they differ.
 # The C6 has no PSRAM, so it has no cache TX buffers.
 CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=0
+# The C6 keeps its static RX and TX buffers in internal RAM, so signaling_only
+# uses 10 and 12 on it. Send the same counts.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_STATIC_TX_BUFFER_NUM=12
 CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n

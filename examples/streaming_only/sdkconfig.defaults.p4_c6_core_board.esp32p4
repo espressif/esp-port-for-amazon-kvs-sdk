@@ -39,4 +39,8 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # esp_wifi_init() config with its own, and re-initialises Wi-Fi when they differ.
 # The C6 has no PSRAM, so it has no cache TX buffers.
 CONFIG_WIFI_RMT_CACHE_TX_BUFFER_NUM=0
+# The C6 keeps its static RX and TX buffers in internal RAM, so signaling_only
+# uses 10 and 12 on it. Send the same counts.
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=10
+CONFIG_WIFI_RMT_STATIC_TX_BUFFER_NUM=12
 CONFIG_WIFI_RMT_ENTERPRISE_SUPPORT=n
