@@ -28,6 +28,10 @@ Pick the example that matches your hardware and connectivity model:
 | **[esp_camera](examples/esp_camera/)** | `apprtc_signaling + kvs_peer_connection` | ESP32-CAM modules | Browser compatibility, **no AWS account needed** |
 | **[streaming_only](examples/streaming_only/)** | `bridge_signaling + kvs_peer_connection` | ESP32-P4 (main processor) | High-performance streaming, power-optimized split mode |
 | **[signaling_only](examples/signaling_only/)** | `kvs_signaling + bridge_peer_connection` | ESP32-C6/C5 (network processor) | Always-on connectivity, paired with `streaming_only` |
+| **[network_adapter](examples/network_adapter/)** | `esp_hosted` co-processor firmware | ESP32-C6/C5 (network processor) | Wi-Fi for the P4 in dual-chip classic mode. No application logic |
+| **[webrtc_person_detect](examples/webrtc_person_detect/)** | raw-frame sink bus + `kvs_signaling + kvs_peer_connection` | ESP32-P4-EYE, ESP32-S3-EYE | Person detection, LCD preview and WebRTC from one camera |
+| **[simple_video_server](examples/simple_video_server/)** | HTTP server, no WebRTC | ESP32-P4 / S3 + camera | MJPEG stream and JPEG snapshots in a browser on the local network |
+| **[linux_test](examples/linux_test/)** | `kvs_signaling + kvs_peer_connection` | Linux / macOS host (IDF linux target) | The SDK as a KVS master with file-backed media. No hardware needed |
 | **[RainMaker camera examples](https://github.com/espressif/esp-rainmaker/tree/master/examples/camera)** | this port + RainMaker cloud | ESP32-P4 + C6/C5 | End-to-end: cloud onboarding, BLE provisioning, OTA, mobile-app pairing. Free to evaluate; path to a private deployment |
 
 Each example's README has its build-and-run steps; the shared build mechanics — clone &
@@ -37,7 +41,7 @@ submodules, ESP-IDF setup, target + board overlays, dual-chip — are in [docs/b
 
 - **Two-way audio + video** — H.264 video TX/RX and Opus mono audio TX/RX. STUN, TURN, NACK, RTCP, data channels all wired in. HW H.264 encoder on ESP32-P4; SW H.264 decoder (tinyh264) for RX.
 - **Pluggable signaling + peer-connection** — out-of-the-box AWS KVS signaling client; pick any combination (KVS signaling + KVS peer, bridge signaling + KVS peer for split mode, etc.). Custom protocols via the same interface — see the [Custom Signaling Guide](docs/custom_signaling.md).
-- **Single-chip and split-mode architectures** — same components on one ESP32-class SoC or as ESP32-P4 host + ESP32-C6 / C5 co-processor over SDIO. Split mode keeps the P4 in deep sleep while the C6 holds always-on signaling; wake the P4 when a viewer connects.
+- **Single-chip and split-mode architectures**: same components on one ESP32-class SoC or as ESP32-P4 host + ESP32-C6 / C5 co-processor over SDIO. In split mode the C6 holds always-on signaling. With the opt-in power-save overlay, the P4 deep-sleeps until a viewer connects.
 - **Smart defaults** — start from `APP_WEBRTC_CONFIG_DEFAULT()` and plug in only the interfaces you need (signaling, peer connection, video capture, etc.). See [API_USAGE.md](API_USAGE.md).
 - **Credentials** — AWS access-key, IoT Core (TLS client cert), or runtime-injected (via RainMaker claim flow) — all behind one `credential` component.
 - **ESP-IDF integration** — `idf_component.yml` manifests, Kconfig flags, BSP hooks, `esp_hosted` co-processor wiring. Platform patches against the upstream SDK auto-apply at CMake configure time (opt out via `CONFIG_KVS_AUTO_APPLY_PATCHES`).
@@ -88,7 +92,7 @@ Build with the [webrtc_classic](examples/webrtc_classic/) example. For the two-c
 
 ### Split Mode — signaling and streaming on separate chips
 
-A power-optimized dual-chip layout: the always-on Wi-Fi co-processor (`ESP32-C6` or `ESP32-C5`) holds the KVS signaling connection, and the main processor (`ESP32-P4`) wakes from deep sleep only when a viewer actually connects.
+A dual-chip layout: the always-on Wi-Fi co-processor (`ESP32-C6` or `ESP32-C5`) holds the KVS signaling connection, and the main processor (`ESP32-P4`) handles media. Power save is opt-in. With it enabled, the P4 deep-sleeps until a viewer connects (see [streaming_only](examples/streaming_only/README.md#power-save-opt-in)).
 
 Here the two pluggable blocks are split *across* the chips — Signaling on the C6, peer connection on the P4 — with the network stack itself split (lwip split, via esp_hosted):
 
@@ -112,7 +116,7 @@ Two binaries pair up:
 - [streaming_only](examples/streaming_only/) on the P4 — RTP/SCTP/SRTP + media capture and encode.
 
 Trade-offs:
-- **Lower idle power** — the P4 stays in deep sleep while no viewer is connected. The C6 alone draws ~30 mA on its WebSocket.
+- **Lower idle power (opt-in)**: with power save enabled, the P4 stays in deep sleep while no viewer is connected. The C6 alone draws ~30 mA on its WebSocket.
 - **Instant wake-up** — both chips have IP addresses already; once the P4 boots, it can RTP-stream within hundreds of milliseconds.
 - **More moving parts** — two firmware images, an OTA story for both, and an IPC contract between the two examples. See the per-example READMEs for the bring-up details.
 
@@ -123,7 +127,7 @@ You can validate either mode against the [AWS WebRTC test viewer](https://awslab
 [**docs/building.md**](docs/building.md) is the full guide — clone & submodules, SDK patch
 auto-apply, ESP-IDF v5.5+ setup, picking an example + target, board overlays (the
 `SDKCONFIG_DEFAULTS` chain), ws-on vs ws-off, console output, the ESP32-P4 + ESP32-C6 dual-chip
-setup, AWS credentials, and troubleshooting. (The Quick Start above has the short recipe.)
+setup, AWS credentials, and troubleshooting.
 
 ## Related repos
 
@@ -132,7 +136,7 @@ setup, AWS credentials, and troubleshooting. (The Quick Start above has the shor
 | [espressif/esp-rainmaker](https://github.com/espressif/esp-rainmaker) | End-to-end RainMaker camera reference on Espressif's IoT cloud. Consumes this port via `KVS_SDK_PATH`, layers cloud claim, BLE provisioning, OTA, and mobile-app pairing on top. Start here for cloud onboarding / fleet management — free to evaluate, with a path to a private RainMaker deployment for production. |
 | [awslabs/amazon-kinesis-video-streams-webrtc-sdk-c](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c) | Upstream KVS WebRTC C SDK. Tracked as a submodule + small set of [patches](patches/README.md). |
 
-**Matter Camera spec** — planned. SDP renegotiation patches 0001 / 0002 are aligned with [awslabs#2214](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2214) toward that goal.
+**Matter Camera spec**: planned. The SDP-renegotiation flow it needs is upstream as [awslabs#2214](https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c/pull/2214), in SDK 1.20.0.
 
 ## Documentation
 

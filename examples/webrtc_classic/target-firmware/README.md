@@ -32,12 +32,17 @@ These are **not** checked into the repo.
 ## Where to build them from
 
 The co-processor runs the [`network_adapter`](../../network_adapter/README.md)
-example (Wi-Fi passthrough over SDIO). Build it for the co-processor target and
-copy the outputs here (rename the app image to `app.bin`):
+example (Wi-Fi passthrough over SDIO). Build it with the pair overlay that
+matches the P4 board, and copy the outputs here (rename the app image to
+`app.bin`):
 
 ```bash
 cd ../../network_adapter
-idf.py set-target esp32c6          # or esp32c5 for p4_c5_core_board
+# p4_eye / p4x_eye:
+idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.p4_eye_pair.esp32c6' set-target esp32c6
+# p4_c5_core_board instead:
+# idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c5;sdkconfig.defaults.p4_c5_core_board.esp32c5' set-target esp32c5
+idf.py build
 
 DEST=../webrtc_classic/target-firmware
 cp build/bootloader/bootloader.bin            "$DEST/bootloader.bin"

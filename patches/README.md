@@ -30,21 +30,21 @@ Base: upstream `develop` at **awslabs#2146** (`18ec3b1`). Since 1.20.0 it adds, 
 others:
 
 - awslabs#2399: negotiated data channels with an explicit stream id;
-- #2400: `iceServersFinal`;
-- #2401: freeing the signaling client during a reconnect;
-- #2417: the lws service-loop wake after a send;
-- #2425: fetch, disconnect and delete refused while a free runs, and messages received
+- awslabs#2400: `iceServersFinal`;
+- awslabs#2401: freeing the signaling client during a reconnect;
+- awslabs#2417: the lws service-loop wake after a send;
+- awslabs#2425: fetch, disconnect and delete refused while a free runs, and messages received
   during a free dropped;
-- #2422: clock skew correction on the WSS connect, and a retry of re-signable rejections;
-- #2418: RTX retransmissions with their own TWCC sequence number;
-- #2407: the STUN cache re-arm start time; #2435: one STUN transaction ID per srflx candidate;
-- #2438: `transceiverOnFrameDropped()`; #2442: CMake 4 builds;
-- #2146: `PREFER_DYNAMIC_ALLOCS`, which heap-allocates the signaling payload, URL and JSON
+- awslabs#2422: clock skew correction on the WSS connect, and a retry of re-signable rejections;
+- awslabs#2418: RTX retransmissions with their own TWCC sequence number;
+- awslabs#2407: the STUN cache re-arm start time; awslabs#2435: one STUN transaction ID per srflx candidate;
+- awslabs#2438: `transceiverOnFrameDropped()`; awslabs#2442: CMake 4 builds;
+- awslabs#2146: `PREFER_DYNAMIC_ALLOCS`, which heap-allocates the signaling payload, URL and JSON
   buffers and the TURN channel-data buffer.
 
 All four patches apply cleanly against this base (`git am`, no fuzz). 0001's
-`LwsApiCalls.c` part sits on top of #2401's reconnect and receive-worker code and #2425's
-message drop. 0001's dynamic-allocation part is upstream as #2146, so it is dropped. The SDP-renegotiation patches were dropped earlier (that flow is upstream
+`LwsApiCalls.c` part sits on top of awslabs#2401's reconnect and receive-worker code and awslabs#2425's
+message drop. 0001's dynamic-allocation part is upstream as awslabs#2146, so it is dropped. The SDP-renegotiation patches were dropped earlier (that flow is upstream
 as awslabs#2214, in 1.20.0). 0005 is upstream as awslabs#2392 and 0004 as
 awslabs#2385, so both are dropped. 0003 was dropped as unnecessary; see its note.
 An earlier 0006, the `pSeenTransceivers` fix, is upstream as awslabs#2415. The
@@ -79,7 +79,7 @@ are unchanged.
   - **ESP-IDF-specific (stays):** ConnectionListener custom thread for
     constrained-stack platforms, mbedtls-3.x compatibility shims, robustness
     fixes in `SocketConnection.c` and `Sctp.c`, and in `LwsApiCalls.c` the
-    reconnect/receive thread stacks (on top of #2401's `startReconnectHandler()`
+    reconnect/receive thread stacks (on top of awslabs#2401's `startReconnectHandler()`
     and counted receive workers), the longer API-call timeouts and TCP keepalive,
     a length-bounded debug log of sent messages, and a one-thread signaling threadpool.
 
@@ -122,9 +122,9 @@ client's `shutdown` flag, and so does `app_webrtc_terminate()` through the signa
 `abort` op. Two sleeps ignored it: the back-off between `signalingClientFetchSync()`
 attempts (up to about 32 s with full jitter) and the GET_TOKEN state's retry sleep (up
 to 10 s). Both now sleep in 100 ms steps and stop on `shutdown`. The fetch then returns
-`STATUS_SIGNALING_FREE_IN_PROGRESS`, as for a fetch refused during a free (#2425).
+`STATUS_SIGNALING_FREE_IN_PROGRESS`, as for a fetch refused during a free (awslabs#2425).
 GET_TOKEN fetches no token, and the state machine stops at its next `shutdown` check.
-A candidate for upstream, next to #2425.
+A candidate for upstream, next to awslabs#2425.
 
 **0003: Accept already-connected TCP in `socketConnectionIsConnected`** (dropped).
 It added a `getpeername()` check after upstream's re-`connect()` probe, on the
@@ -181,9 +181,9 @@ matching PRs land:
 
 | Local patch | Removed when |
 |-------------|--------------|
-| 0001 (aligned / dynamic-allocs half) | `awslabs#2146` merges |
 | ~~0004~~ | dropped: upstream as awslabs#2385 |
 | ~~0005~~ | dropped: upstream as awslabs#2392 |
 | 0006 | the build override is accepted upstream |
+| 0010 | the shutdown check is accepted upstream |
 
 Keep this file up-to-date as patches are added, removed, or split.

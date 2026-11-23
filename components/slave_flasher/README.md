@@ -51,7 +51,7 @@ the Kconfig default addresses and pins.
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `CONFIG_SLAVE_FLASHER_ENABLE`             | `y`   | Enable in-system flashing. Turn off on kits where the co-processor has its own USB port. |
+| `CONFIG_SLAVE_FLASHER_ENABLE`             | `n`   | Enable in-system flashing. Board overlays for single-USB kits (e.g. `p4_eye`) turn it on. |
 | `CONFIG_SLAVE_FLASHER_IMAGE_SOURCE`       | SPIFFS | Image source: `slave` SPIFFS partition or embedded in the app |
 | `CONFIG_SLAVE_FLASHER_IMAGE_DIR`          | `target-firmware` | Image directory for both sources |
 | `CONFIG_SLAVE_UART_RX_PIN` / `_TX_PIN`    | 22 / 21 | Host UART pins to the target |

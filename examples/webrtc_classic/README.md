@@ -37,12 +37,19 @@ idf.py set-target esp32s3
 idf.py menuconfig                 # Wi-Fi + AWS auth (see below)
 idf.py -p <PORT> flash monitor
 
-# ESP32-P4 + C6 dual-chip: flash examples/network_adapter on the C6 first,
-# then select your P4 board overlay (chain MUST be in the same set-target call):
-idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_eye.esp32p4" \
-       set-target esp32p4
-idf.py -p <PORT> flash monitor
+# ESP32-P4 Function EV Board (C6 on its own port): flash examples/network_adapter
+# on the C6 first, then select your P4 board overlay (chain MUST be in the same
+# set-target call):
+idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_function_ev_board_v12.esp32p4" \
+       set-target esp32p4      # or p4_function_ev_board_v16
+idf.py -p <PORT> build flash monitor
 ```
+
+**ESP32-P4-EYE (single USB port):** the P4 flashes the C6 in-system. The `p4_eye` overlay
+enables the slave flasher, so the build needs the C6 images first. Build `network_adapter` with
+the `p4_eye_pair.esp32c6` overlay and copy its images into `target-firmware/`, as in
+[target-firmware/README.md](target-firmware/README.md). Then build this example with
+`sdkconfig.defaults.p4_eye.esp32p4` in place of the Function EV Board overlay above.
 
 Board overlays available here: `esp32s3`, `esp32p4`, `p4_eye.esp32p4`, `p4x_eye.esp32p4`,
 `p4_function_ev_board_v12.esp32p4`, `p4_function_ev_board_v16.esp32p4`,
@@ -94,7 +101,7 @@ int rmaker_fetch_aws_credentials(uint64_t user_data, /* ... */) {
 }
 kvs_signaling_cfg.fetch_credentials_cb = rmaker_fetch_aws_credentials;
 ```
-See the [kvs_webrtc_camera example](https://github.com/espressif/esp-rainmaker/tree/master/examples/kvs_webrtc_camera) in ESP RainMaker for a full implementation.
+See the [camera examples](https://github.com/espressif/esp-rainmaker/tree/master/examples/camera) in ESP RainMaker for a full implementation.
 
 ### View your stream
 

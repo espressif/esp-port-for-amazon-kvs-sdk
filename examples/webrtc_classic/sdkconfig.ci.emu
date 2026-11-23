@@ -37,6 +37,6 @@ CONFIG_KVS_WEBRTC_MEDIA_DIAG_LOG=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 
 # Hardware AES stays enabled, as on silicon. It only fails under an esp-emu that
-# lacks the PSRAM mode-register model (pre-master): the die is misidentified, the
-# PSRAM heap loses MALLOC_CAP_DMA, and srtp_init() fails with 0x5b000005. Build
-# esp-emu from master; the full chain is in test_e2e/README.md, "Emulator".
+# lacks the PSRAM mode-register model (before 1.0.0): the die is misidentified, the
+# PSRAM heap loses MALLOC_CAP_DMA, and srtp_init() fails with 0x5b000005.
+# Use esp-emu 1.0.0 or later; the full chain is in test_e2e/README.md, "Emulator".

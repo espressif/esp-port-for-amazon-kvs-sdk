@@ -41,7 +41,7 @@ When `APP_NETWORK_PROV_BLE` is enabled, the device starts a BLE provisioning ser
 |----------|-----------|-------|
 | ESP32, ESP32-S3 | Native BLE | Direct NimBLE stack |
 | ESP32-C6 | Native BLE | Direct NimBLE stack |
-| ESP32-P4 | Coprocessor BLE | BLE runs on C6 via esp_hosted (`CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE`) |
+| ESP32-P4 | Coprocessor BLE | The C6 runs the BT controller. The P4 runs NimBLE over hosted HCI (`CONFIG_APP_BLE_VIA_HOSTED_ON_HOST`, `CONFIG_ESP_HOSTED_HOST_FEAT_BT=y`) |
 
 On ESP32-P4, the BT controller on the C6 coprocessor is initialized before provisioning and released after completion.
 

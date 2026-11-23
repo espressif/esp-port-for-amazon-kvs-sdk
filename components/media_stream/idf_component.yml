@@ -6,8 +6,8 @@ dependencies:
     rules:
       - if: "target in [esp32]"
 
-  # Require esp_video >= 2.0.1 for the AWB subwindow zero-init fix (upstream
-  # MR !443) needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon; also auto-climbs the
+  # Require esp_video >= 2.0.1 for the upstream AWB subwindow zero-init fix
+  # needed on ESP32-P4 rev >= 3.0 / ECO5+ silicon; also auto-climbs the
   # EV-board BSP via the dep solver.
   # ~2.0.1 (>=2.0.1,<2.1.0): the solver otherwise maximizes esp_video (2.3.x)
   # and, since the BSPs are requested as '*' via bsp_selector, sacrifices the

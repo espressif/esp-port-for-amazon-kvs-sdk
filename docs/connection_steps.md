@@ -35,16 +35,16 @@ This document outlines the sequential steps that occur during the WebRTC connect
   ```json
   {
     "ChannelInfo": {
-      "ChannelARN": "arn:aws:kinesisvideo:us-east-1:995678934610:channel/demo-channel/1712136149494",
+      "ChannelARN": "arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1234567890123",
       "ChannelName": "demo-channel",
       "ChannelStatus": "ACTIVE",
       "ChannelType": "SINGLE_MASTER",
-      "CreationTime": 1.712136149494E9,
+      "CreationTime": 1.234567890123E9,
       "FullMeshConfiguration": null,
       "SingleMasterConfiguration": {
         "MessageTtlSeconds": 60
       },
-      "Version": "3Ikjs9sOSk6Q4Alisl0d"
+      "Version": "<channel-version>"
     }
   }
   ```
@@ -55,7 +55,7 @@ This document outlines the sequential steps that occur during the WebRTC connect
 - Request body:
   ```json
   {
-    "ChannelARN": "arn:aws:kinesisvideo:us-east-1:995678934610:channel/demo-channel/1712136149494",
+    "ChannelARN": "arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1234567890123",
     "SingleMasterChannelEndpointConfiguration": {
       "Protocols": ["WSS", "HTTPS"],
       "Role": "MASTER"
@@ -68,11 +68,11 @@ This document outlines the sequential steps that occur during the WebRTC connect
     "ResourceEndpointList": [
       {
         "Protocol": "HTTPS",
-        "ResourceEndpoint": "https://r-c50d6457.kinesisvideo.us-east-1.amazonaws.com"
+        "ResourceEndpoint": "https://r-<endpoint-id>.kinesisvideo.us-east-1.amazonaws.com"
       },
       {
         "Protocol": "WSS",
-        "ResourceEndpoint": "wss://m-b94e17e0.kinesisvideo.us-east-1.amazonaws.com"
+        "ResourceEndpoint": "wss://m-<endpoint-id>.kinesisvideo.us-east-1.amazonaws.com"
       }
     ]
   }
@@ -80,11 +80,11 @@ This document outlines the sequential steps that occur during the WebRTC connect
 
 ## 7. ICE Server Configuration
 - Transitions to "Get ICE Server Configuration" state
-- Sends API request to: `https://r-c50d6457.kinesisvideo.us-east-1.amazonaws.com/v1/get-ice-server-config`
+- Sends API request to: `https://r-<endpoint-id>.kinesisvideo.us-east-1.amazonaws.com/v1/get-ice-server-config`
 - Request body:
   ```json
   {
-    "ChannelARN": "arn:aws:kinesisvideo:us-east-1:995678934610:channel/demo-channel/1712136149494",
+    "ChannelARN": "arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1234567890123",
     "ClientId": "ProducerMaster",
     "Service": "TURN"
   }
@@ -94,24 +94,24 @@ This document outlines the sequential steps that occur during the WebRTC connect
   {
     "IceServerList": [
       {
-        "Password": "nhgUYYY0TKW5knkHAU92JI9whmOO058qbmxRvyIY2Rg=",
+        "Password": "<turn-password-1>",
         "Ttl": 300,
         "Uris": [
-          "turn:13-217-27-141.t-99577840.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
-          "turns:13-217-27-141.t-99577840.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
-          "turns:13-217-27-141.t-99577840.kinesisvideo.us-east-1.amazonaws.com:443?transport=tcp"
+          "turn:<turn-host-1>.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
+          "turns:<turn-host-1>.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
+          "turns:<turn-host-1>.kinesisvideo.us-east-1.amazonaws.com:443?transport=tcp"
         ],
-        "Username": "1743506463:djE6YXJuOmF3czpraW5lc2lzdmlkZW86dXMtZWFzdC0xOjk5NTY3ODkzNDYxMDpjaGFubmVsL2RlbW8tY2hhbm5lbC8xNzEyMTM2MTQ5NDk0"
+        "Username": "<turn-username>"
       },
       {
-        "Password": "O1ABsajTCFta+wj/9tTp8yF5aOFoiG6k/sWL3F+QT6w=",
+        "Password": "<turn-password-2>",
         "Ttl": 300,
         "Uris": [
-          "turn:54-159-217-207.t-99577840.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
-          "turns:54-159-217-207.t-99577840.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
-          "turns:54-159-217-207.t-99577840.kinesisvideo.us-east-1.amazonaws.com:443?transport=tcp"
+          "turn:<turn-host-2>.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
+          "turns:<turn-host-2>.kinesisvideo.us-east-1.amazonaws.com:443?transport=udp",
+          "turns:<turn-host-2>.kinesisvideo.us-east-1.amazonaws.com:443?transport=tcp"
         ],
-        "Username": "1743506463:djE6YXJuOmF3czpraW5lc2lzdmlkZW86dXMtZWFzdC0xOjk5NTY3ODkzNDYxMDpjaGFubmVsL2RlbW8tY2hhbm5lbC8xNzEyMTM2MTQ5NDk0"
+        "Username": "<turn-username>"
       }
     ]
   }
@@ -119,8 +119,8 @@ This document outlines the sequential steps that occur during the WebRTC connect
 
 ## 8. Signaling Connection
 - Transitions to "Ready" state once all configurations are obtained
-- Begins connection to the WSS endpoint: `wss://m-b94e17e0.kinesisvideo.us-east-1.amazonaws.com`
-- Fully qualified URL example: `wss://m-07e4d66a.kinesisvideo.us-east-1.amazonaws.com?X-Amz-ChannelARN=arn:aws:kinesisvideo:us-east-1:995678934610:channel/demo-channel/1689337250341`
+- Begins connection to the WSS endpoint: `wss://m-<endpoint-id>.kinesisvideo.us-east-1.amazonaws.com`
+- Fully qualified URL example: `wss://m-<endpoint-id>.kinesisvideo.us-east-1.amazonaws.com?X-Amz-ChannelARN=arn:aws:kinesisvideo:us-east-1:123456789012:channel/demo-channel/1234567890123`
 - Successfully establishes WebSocket connection
 - Transitions to "Connected" state when the connection is established
 

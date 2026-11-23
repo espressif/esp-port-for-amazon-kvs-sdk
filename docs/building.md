@@ -21,7 +21,14 @@ notes.
 Clone with submodules (the upstream WebRTC SDK is a submodule):
 
 ```bash
-git clone --recursive <git url>
+git clone --recursive https://github.com/espressif/esp-port-for-amazon-kvs-sdk.git
+```
+
+To build against a release instead of `main`, clone its tag. Releases are listed in
+[CHANGELOG.md](../CHANGELOG.md).
+
+```bash
+git clone --recursive --branch v1.0.0-rc1 https://github.com/espressif/esp-port-for-amazon-kvs-sdk.git
 ```
 
 If you already cloned without `--recursive`:
@@ -80,10 +87,14 @@ idf.py menuconfig              # Wi-Fi, AWS, board options
 idf.py build flash monitor
 ```
 
-Both dual-chip flows flash the **C6 first**, then build the P4 app **with the board-overlay
+Both dual-chip flows prepare the **C6 first**, then build the P4 app **with the board-overlay
 chain** — a bare `set-target esp32p4` is not enough (see
 [Board overlays](#board-overlays-sdkconfig_defaults-chain)). They differ in *what* runs on each
 chip. C6 flashing/wiring details are in [Dual-chip setup](#dual-chip-setup-esp32-p4--esp32-c6).
+
+The recipes below are for the ESP32-P4 Function EV Board, where the C6 is flashed over its own
+port. On a single-USB-port kit such as the P4-EYE, the P4 flashes the C6 instead. See
+[Single-USB-port kits](#single-usb-port-kits-p4-eye).
 
 ### Dual-chip — classic (C6 as network adapter)
 
@@ -91,17 +102,17 @@ The P4 runs the entire WebRTC stack; the C6 is just a transparent Wi-Fi NIC runn
 `network_adapter`.
 
 ```bash
-# 1) C6 — network adapter:
+# 1) C6: network adapter (the default C6 build matches the Function EV Board):
 cd examples/network_adapter
 idf.py set-target esp32c6
-idf.py -p <C6_PORT> flash
+idf.py -p <C6_PORT> build flash
 
-# 2) P4 — the classic app, overlay chain in the SAME set-target call:
+# 2) P4: the classic app, overlay chain in the SAME set-target call:
 cd ../webrtc_classic
-idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_eye.esp32p4" \
-       set-target esp32p4
+idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_function_ev_board_v12.esp32p4" \
+       set-target esp32p4      # or p4_function_ev_board_v16
 idf.py menuconfig              # Wi-Fi, AWS
-idf.py build flash monitor
+idf.py -p <P4_PORT> build flash monitor
 ```
 
 ### Dual-chip — split mode (C6 signaling + P4 streaming)
@@ -110,16 +121,17 @@ Two cooperating firmwares: the C6 runs `signaling_only` (holds the KVS signaling
 runs `streaming_only` (media). See [Deployment Modes → Split Mode](../README.md#deployment-modes).
 
 ```bash
-# 1) C6 — signaling:
+# 1) C6: signaling:
 cd examples/signaling_only
 idf.py set-target esp32c6
-idf.py -p <C6_PORT> flash monitor   # set Wi-Fi + AWS creds in menuconfig first
+idf.py menuconfig                    # Wi-Fi + AWS settings
+idf.py -p <C6_PORT> build flash monitor
 
-# 2) P4 — streaming, overlay chain in the SAME set-target call:
+# 2) P4: streaming, overlay chain in the SAME set-target call:
 cd ../streaming_only
-idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_eye.esp32p4" \
-       set-target esp32p4
-idf.py build flash monitor
+idf.py -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32p4;sdkconfig.defaults.p4_function_ev_board_v12.esp32p4" \
+       set-target esp32p4      # or p4_function_ev_board_v16
+idf.py -p <P4_PORT> build flash monitor
 ```
 
 ## Board overlays (SDKCONFIG_DEFAULTS chain)
@@ -176,15 +188,36 @@ C6 first. Boards without an onboard C6 UART need an ESP-Prog (or similar):
 | EN  | EN   |
 | GND | GND  |
 
-In `network_adapter`'s menuconfig (**Example Configuration**) set `ESP_WIFI_SSID`,
-`ESP_WIFI_PASSWORD`, `AWS_KVS_CHANNEL_NAME`, `AWS_DEFAULT_REGION`.
+`network_adapter` has no app settings. Set `ESP_WIFI_SSID` and `ESP_WIFI_PASSWORD` (menu
+**App Common Configs**), and `AWS_KVS_CHANNEL_NAME` and `AWS_DEFAULT_REGION` (menu **AWS
+Security Credentials**), on the P4 app.
 
-**Single-USB-port kits (e.g. P4-EYE):** enable `CONFIG_SLAVE_FLASHER_ENABLE` so the P4
-flashes the C6 over the internal UART (no separate C6 port / ESP-Prog needed).
+### Single-USB-port kits (P4-EYE)
+
+The P4-EYE has one USB port, so the P4 flashes the C6 over the internal UART. No separate C6
+port or ESP-Prog is needed. The `p4_eye` overlays set `CONFIG_SLAVE_FLASHER_ENABLE=y`, and the
+P4 build then needs the C6 images in the example's `target-firmware/` directory:
+
+1. Build the C6 firmware with the P4-EYE pair overlay. Use `network_adapter` for classic mode,
+   or `signaling_only` for split mode. `signaling_only` holds the Wi-Fi and AWS settings, so
+   run its menuconfig before the build:
+
+   ```bash
+   cd examples/network_adapter      # or examples/signaling_only
+   idf.py -D 'SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.p4_eye_pair.esp32c6' set-target esp32c6
+   idf.py menuconfig                # signaling_only only: Wi-Fi + AWS settings
+   idf.py build
+   ```
+
+2. Copy `bootloader.bin`, `partition-table.bin` and the app image (as `app.bin`) into the P4
+   example's `target-firmware/`. Each example's `target-firmware/README.md` has the exact
+   commands.
+3. Build and flash the P4 example with the `p4_eye.esp32p4` overlay. The P4 programs the C6
+   at boot.
 
 ## AWS credentials
 
-Credentials go through the shared `credential` component (`aws_credentials_get()`):
+Credentials go through the shared `credential` component:
 
 - **IoT Core (default)** — `IOT_CORE_ENABLE_CREDENTIALS` on. Configure under **AWS
   Security Credentials**; place certs in

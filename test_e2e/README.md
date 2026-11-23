@@ -217,9 +217,12 @@ with no board attached. Two ways in:
 
 ### What runs, and on which esp-emu
 
-With an esp-emu that carries `security/esp-emulator!211` (merged: the DAT1 interrupt and
-GPIO pad-sensing fix) and `security/esp-emulator!214` (the C6 SLC FIFO and RX DMA
-restart fix), the `webrtc_classic` + `network_adapter` pair:
+Use esp-emu 1.0.0 or later, from the [esp-emulator releases](https://github.com/espressif/esp-emulator/releases). It has two fixes this pair needs:
+
+- the SDIO DAT1 interrupt and GPIO pad-sensing fix
+- the C6 SLC FIFO and RX DMA restart fix
+
+With both, the `webrtc_classic` + `network_adapter` pair:
 
 - bridges: the C6 enumerates over SDIO and RPCs round-trip in both directions
 - joins Wi-Fi through the emulated C6 and reaches AWS through `--net user`, the
@@ -229,10 +232,9 @@ restart fix), the `webrtc_classic` + `network_adapter` pair:
 - delivers video to the viewer with `CONFIG_MEDIA_STREAM_CAPTURE_FROM_FILE=y`: the first
   decoded frame arrives about 12 s after the viewer starts
 
-Without `security/esp-emulator!214`, host→slave data over the bridge stalls after 20
-packets (the C6's RX queue depth): the host runs out of credits and drops every later
-packet as `no SDIO write buffers on slave device`, so signaling stops part-way. Use an
-esp-emu that has both MRs.
+Without the C6 SLC RX DMA fix, host→slave data over the bridge stalls after 20
+packets (the C6's RX queue depth). The host runs out of credits and drops every later
+packet as `no SDIO write buffers on slave device`, so signaling stops part-way.
 
 `pytest_e2e_emu.py` asserts each stage up to the device answering the offer, one test per
 stage, so a failure names the stage that broke. Media is reported, not asserted: with no
@@ -532,9 +534,8 @@ waiting out the peer teardown; neither is done yet.
 
 ## Notes
 
-- There is no hardware runner in CI (every `.gitlab-ci.yml` job is `tags: [build]`), so
-  this is a local test for now. Wiring it into CI needs a runner with a board, internet,
-  and AWS secrets.
+- CI has no hardware runner, so this is a local test for now. Wiring it into CI needs a
+  runner with a board, internet, and AWS secrets.
 - `sdkconfig.ci.e2e` turns BLE provisioning **off** — `webrtc_classic`'s own defaults
   enable it, which would park an unattended boot waiting for a phone.
 - The P2P assertion reads the SDK's `Selected pair ...` line. It is a `DLOGP` PROFILE

@@ -11,11 +11,6 @@
 #
 # Mirrors the p4_eye_pair convention.
 #
-# REQUIRES esp_hosted_mcu slave-side Tab5 support (feature/tab5_slave_support,
-# MR !272) — the ESP32P4_TAB5_C6_BOARD slave board option. Until that MR is
-# merged and in the esp_hosted release these examples use, this board symbol is
-# unresolved and the C6 will not enumerate over SDIO on the Tab5.
-#
 
 #
 # Flash layout: the Tab5's C6 keeps the layout it already has (partition table
