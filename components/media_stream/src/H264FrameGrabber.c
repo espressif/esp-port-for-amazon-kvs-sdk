@@ -17,7 +17,6 @@
 #include "esp_timer.h"
 
 #include "esp_heap_caps.h"
-#include "webrtc_mem_utils.h"
 
 #include "sdkconfig.h"
 

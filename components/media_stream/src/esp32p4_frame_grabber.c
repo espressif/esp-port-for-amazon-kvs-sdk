@@ -47,6 +47,7 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 #include "esp_dma_utils.h"
 #include "video_rate_ctrl_priv.h"
@@ -80,7 +81,6 @@ _Static_assert(VIDEO_FOURCC_O_UYY_E_VYY != V4L2_PIX_FMT_YUV420,
 #include "driver/sdmmc_host.h"
 #endif
 
-#include "webrtc_mem_utils.h"
 #include <stdatomic.h>
 #include "video_capture.h"
 #include "video_sink_priv.h"
@@ -339,7 +339,10 @@ static esp_err_t camera_init(void)
                                                     ISP_COLOR_RAW8, ISP_COLOR_YUV420);
     if(bsp_camera_new(&camera_cfg, &isp_cfg, NULL) != ESP_OK) {
         ESP_LOGE(TAG, "camera initialization failed");
-        webrtc_mem_utils_print_stats(TAG);
+        ESP_LOGI(TAG, "Free heap: internal %u (largest block %u), SPIRAM %u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         return ESP_FAIL;
     }
     ESP_ERROR_CHECK(bsp_camera_register_trans_done_callback(camera_trans_done));

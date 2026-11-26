@@ -15,7 +15,6 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_opus_enc.h"
-#include "webrtc_mem_utils.h"
 
 #include "OpusFrameGrabber.h"
 
@@ -522,7 +521,10 @@ void *opus_encoder_init_internal(audio_capture_config_t *config)
     s_enc_data.encoder_initialized = true;
 
     ESP_LOGD(TAG, "Opus encoder initialized as singleton (stopped, use start() to begin)");
-    webrtc_mem_utils_print_stats(TAG);
+    ESP_LOGI(TAG, "Free heap: internal %u (largest block %u), SPIRAM %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     return s_enc_data.encoder_handle;
 
