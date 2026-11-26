@@ -1,8 +1,2 @@
 description: esp_utils
 version: "0.8.0"
-
-dependencies:
-  espressif/mqtt:
-    matches:
-      - if: "idf_version >5.3"
-        version: "~1"

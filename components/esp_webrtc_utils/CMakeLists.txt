@@ -1,6 +1,6 @@
 # Base list — compiles on every target; target-specific files/deps appended below.
 set(srcs "src/message_utils.c" "src/webrtc_mem_utils.c" "src/esp_work_queue.c" "src/message_queue.c")
-set(requires esp_common freertos nvs_flash pthread)
+set(requires esp_common esp_event freertos nvs_flash pthread)
 
 if(${IDF_TARGET} STREQUAL "linux")
     # Linux target: libc-backed flash_wrapper, plus esp_timer_get_time() and the
@@ -9,7 +9,7 @@ if(${IDF_TARGET} STREQUAL "linux")
     list(APPEND requires esp_timer)
 else()
     list(APPEND srcs "src/esp_cli.c" "src/wifi_cli.c" "src/flash_wrapper.c")
-    list(APPEND requires esp_wifi console mqtt esp_timer esp_driver_uart esp_driver_usb_serial_jtag)
+    list(APPEND requires esp_wifi console esp_timer esp_driver_uart esp_driver_usb_serial_jtag)
 endif()
 
 idf_component_register(SRCS "${srcs}"

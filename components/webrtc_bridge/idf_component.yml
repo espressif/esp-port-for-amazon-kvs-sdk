@@ -6,6 +6,10 @@ dependencies:
     path: ../esp_webrtc_utils
     version: "*"
 
+  # CMakeLists.txt requires mqtt; IDF 6 no longer ships it built in.
+  espressif/mqtt:
+    version: "~1"
+
   # Both roles take their peer-data API from this one component; the role is a
   # Kconfig choice. Linux stays excluded — esp_hosted lists no linux target.
   espressif/esp_hosted:
