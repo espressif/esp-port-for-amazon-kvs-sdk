@@ -38,7 +38,7 @@
 #include "app_webrtc.h"
 #include "kvs_signaling.h"
 #include "kvs_peer_connection.h"
-#include "esp_webrtc_time.h"
+#include "app_time.h"
 #include "esp_work_queue.h"
 #include "media_stream.h"
 #include "video_capture.h"
@@ -616,7 +616,7 @@ void app_main(void)
     app_storage_init();
 
     /* AWS SigV4 rejects a device whose clock is wrong, so this has to succeed before signaling. */
-    esp_webrtc_time_sntp_time_sync_and_wait();
+    app_time_sync_and_wait();
 
     media_stream_video_capture_t *video_capture = media_stream_get_video_capture_if();
 

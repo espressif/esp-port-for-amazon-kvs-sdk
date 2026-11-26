@@ -1,18 +1,2 @@
 description: esp_utils
 version: "0.8.0"
-
-dependencies:
-  espressif/esp_hosted:
-    # Any 3.1.x from 3.1.0. The examples pin the exact version.
-    version: "~3.1.0"
-    rules:
-      - if: "target in [esp32p4]"
-  webrtc_bridge:
-    path: ../webrtc_bridge
-    version: "*"
-    rules:
-      - if: "target in [esp32p4]"
-  espressif/mqtt:
-    matches:
-      - if: "idf_version >5.3"
-        version: "~1"

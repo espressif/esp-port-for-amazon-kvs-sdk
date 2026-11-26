@@ -27,7 +27,7 @@ It exercises the SDK's full signaling and media path without hardware.
 | Channel name    | Kconfig (`CONFIG_AWS_KVS_CHANNEL_NAME`) | env var (`KVS_CHANNEL_NAME`) |
 | WiFi / BLE prov | `app_wifi_prov` + provisioning flow | host networking stack |
 | NVS init        | `nvs_flash_init` | not needed (creds are env) |
-| SNTP time sync  | `esp_webrtc_time_sntp_*` | host clock |
+| SNTP time sync  | `app_time_sync_*` (app_common) | host clock |
 | Media capture   | camera + mic drivers | file-backed sample frames |
 | Signaling stack | `esp_websocket_client` (default) | `libwebsockets` (`CONFIG_USE_ESP_WEBSOCKET_CLIENT=n`) |
 | Termination     | runs until reset | `TEST_DURATION_SEC` countdown or Ctrl+C |

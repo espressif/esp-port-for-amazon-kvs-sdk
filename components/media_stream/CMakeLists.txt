@@ -6,7 +6,7 @@ if(IDF_TARGET STREQUAL "linux")
     idf_component_register(
         SRCS "src/video_rate_ctrl.c" "src/video_sink.c" "src/linux_stubs.c"
         INCLUDE_DIRS "include"
-        REQUIRES esp_webrtc_utils esp_timer pthread)
+        REQUIRES esp_timer pthread)
     return()
 endif()
 
@@ -48,7 +48,7 @@ endif()
 
 # The drivers its own sources include. A board BSP brings them; esp_bsp_devkit
 # (a board esp-bsp does not carry) does not.
-set(priv_reqs pthread esp_driver_i2s esp_driver_i2c esp_driver_gpio)
+set(priv_reqs pthread esp_timer esp_driver_i2s esp_driver_i2c esp_driver_gpio)
 if(CONFIG_MEDIA_STREAM_ENABLE_VIDEO_PLAYER)
     list(APPEND priv_reqs espressif__esp_h264)
 endif()

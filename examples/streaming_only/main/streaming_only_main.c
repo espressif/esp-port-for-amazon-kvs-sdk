@@ -28,7 +28,7 @@
 #include "signaling_serializer.h"
 #include "webrtc_bridge.h"
 #include "webrtc_bridge_signaling.h"
-// ice_bridge_client and esp_webrtc_time are initialized internally by bridge_signaling
+// ice_bridge_client is initialized internally by bridge_signaling
 #include "bridge_cmd_defs.h"
 #include "esp_work_queue.h"
 #include "app_webrtc.h"
@@ -752,9 +752,12 @@ void app_main(void)
     hosted_recovery_start(on_hosted_teardown, on_hosted_restore);
 
     /* ice_bridge_client_init() is handled internally by bridge_signaling
-     * during app_webrtc_init(). Time sync response handler (esp_webrtc_time)
-     * self-registers on first use.
-     * Initialize bridge command framework and register example-specific handlers. */
+     * during app_webrtc_init().
+     * Initialize bridge command framework and register example-specific handlers.
+     * WebRTC here needs no wall-clock time. If the app does (to timestamp
+     * recordings, say), call app_time_sync_from_coprocessor() (app_common,
+     * app_time.h) after bridge_cmd_init(): it takes the co-processor's SNTP time
+     * over the bridge. */
     if (bridge_cmd_init() == ESP_OK) {
         bridge_cmd_register_handler(BRIDGE_CMD_GET_RESOLUTION, handle_get_resolution);
         bridge_cmd_register_handler(BRIDGE_CMD_GET_SNAPSHOT, handle_get_snapshot);

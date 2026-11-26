@@ -89,9 +89,5 @@ dependencies:
     rules:
       - if: "target not in [esp32c5, esp32c6, linux]"
 
-  esp_webrtc_utils:
-    path: ../esp_webrtc_utils
-    version: "*"
-
 description: Media stream component
 version: "0.1.0"

@@ -12,8 +12,8 @@ dependencies:
     path: ../kvs_utils
     version: '*'
 
-  webrtc_bridge:
-    path: ../webrtc_bridge
+  esp_webrtc_utils:
+    path: ../esp_webrtc_utils
     version: '*'
 
   state_machine:
