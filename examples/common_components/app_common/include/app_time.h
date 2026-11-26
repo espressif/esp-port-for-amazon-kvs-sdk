@@ -1,10 +1,13 @@
 /*
- * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #pragma once
+
+#include "sdkconfig.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -27,14 +30,30 @@ void app_time_sync_and_wait(void);
  */
 void app_time_sync_no_wait(void);
 
-#if defined(CONFIG_ESP_WEBRTC_BRIDGE_HOSTED) && CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
+#if CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
 /**
- * @brief Register bridge_cmd response handler for GET_TIME (receive time from C6)
+ * @brief Set the system time from the co-processor, over the webrtc_bridge.
  *
- * Call after bridge_cmd_init() on streaming_only (P4) so time responses from
- * signaling_only (C6) are received. Idempotent - safe to call multiple times.
+ * For the streaming host of a split pair (the P4 in streaming_only), which has
+ * no SNTP of its own. The co-processor syncs over SNTP and answers
+ * BRIDGE_CMD_GET_TIME. The result is corrected for half the round trip.
+ *
+ * Not called by default: WebRTC on the host does not need wall-clock time.
+ * Call it when the host does, for example to timestamp recordings:
+ *
+ * @code
+ * bridge_cmd_init();
+ * app_time_sync_from_coprocessor();
+ * @endcode
+ *
+ * Built only when the project includes webrtc_bridge with the hosted bridge.
+ * Blocks for up to about 35 s: 5 tries, each a 5 s timeout plus 2 s apart.
+ *
+ * @return ESP_OK when the time is set, ESP_ERR_TIMEOUT when the co-processor
+ *         gives no valid time, ESP_FAIL when the response handler cannot be
+ *         registered.
  */
-void app_time_register_bridge_cmd_handlers(void);
+esp_err_t app_time_sync_from_coprocessor(void);
 #endif
 
 #ifdef __cplusplus

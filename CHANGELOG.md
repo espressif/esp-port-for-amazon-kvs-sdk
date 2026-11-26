@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `app_time.h`. `esp_webrtc_time_sntp_time_sync_and_wait()` and `_no_wait()` are now
   `app_time_sync_and_wait()` and `app_time_sync_no_wait()`.
 - `esp_webrtc_utils` no longer depends on `webrtc_bridge` or esp_hosted.
+- The P4 co-processor time client is now an opt-in call,
+  `app_time_sync_from_coprocessor()`, built when the project has `webrtc_bridge`. It
+  replaces `esp_webrtc_time_register_bridge_cmd_handlers()` and the `GET_TIME` request
+  inside time sync. No example calls it; `streaming_only` shows where to.
+- `app_time` drops the code for IDF older than 5.0. The minimum supported IDF is 5.3.
 
 ## [1.0.0-rc1] - 2026-11-23
 

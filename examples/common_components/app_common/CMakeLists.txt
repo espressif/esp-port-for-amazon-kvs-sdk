@@ -6,6 +6,10 @@ idf_component_register(SRCS "${srcs}"
                        REQUIRES ${requires}
                        INCLUDE_DIRS "include")
 
+# app_time_sync_from_coprocessor() talks over webrtc_bridge. Link it only when the
+# project already has it (the split examples), so other builds do not pull it in.
+idf_component_optional_requires(PRIVATE webrtc_bridge)
+
 # Create a SPIFFS image from the contents of the 'spiffs_image' directory
 # that fits the partition named 'storage'. FLASH_IN_PROJECT indicates that
 # the generated image should be flashed when the entire project is flashed to
