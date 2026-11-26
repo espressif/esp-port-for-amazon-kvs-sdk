@@ -30,7 +30,7 @@
 #include "eh_cp.h"
 #endif
 
-#include "esp_webrtc_time.h"
+#include "app_time.h"
 #include "app_webrtc.h"
 #include "esp_work_queue.h"
 #include "bridge_peer_connection.h"
@@ -232,7 +232,7 @@ void app_main(void)
     app_storage_init();
 
     // Perform the time sync
-    esp_webrtc_time_sntp_time_sync_and_wait();
+    app_time_sync_and_wait();
 
     /* Init early (before app_webrtc's 32 KB default) to keep this shared task
      * small on the C6. Measured peak on the signaling path is ~4 KB; 6 KB

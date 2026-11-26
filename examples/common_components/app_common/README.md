@@ -1,6 +1,6 @@
 # App Common
 
-Shared component used by all examples. Provides Wi-Fi initialization, SPIFFS/SD card storage setup, and common configuration options via `idf.py menuconfig`.
+Shared component used by all examples. Provides Wi-Fi initialization, SPIFFS/SD card storage setup, SNTP time sync, and common configuration options via `idf.py menuconfig`.
 
 ## Configuration Options
 
@@ -23,6 +23,14 @@ Available under `idf.py menuconfig`:
 - `IOT_CORE_ENABLE_CREDENTIALS` - Use IoT Core credentials (default: enabled)
 - IoT Core endpoint, certificate paths, role alias, and thing name
 - Direct AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) when IoT Core is disabled
+
+## Time sync
+
+`app_time.h` sets the system time over SNTP. KVS signing and TLS need the wall clock.
+
+- `app_time_sync_and_wait()`: start SNTP and wait until the time is set. It moves to the
+  next server after three failed tries.
+- `app_time_sync_no_wait()`: start SNTP and return at once.
 
 ## WiFi Provisioning
 

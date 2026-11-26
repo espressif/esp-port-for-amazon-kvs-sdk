@@ -17,7 +17,7 @@ extern "C"
  * This function will initialize the SNTP client and start the time synchronization process.
  * It will wait for the time to be set before returning.
  */
-void esp_webrtc_time_sntp_time_sync_and_wait();
+void app_time_sync_and_wait(void);
 
 /**
  * @brief Sync time with SNTP server without waiting for the time to be set.
@@ -25,7 +25,7 @@ void esp_webrtc_time_sntp_time_sync_and_wait();
  * This function will initialize the SNTP client and start the time synchronization process.
  * However, it will not wait for the time to be set.
  */
-void esp_webrtc_time_sntp_time_sync_no_wait();
+void app_time_sync_no_wait(void);
 
 #if defined(CONFIG_ESP_WEBRTC_BRIDGE_HOSTED) && CONFIG_ESP_WEBRTC_BRIDGE_HOSTED
 /**
@@ -34,7 +34,7 @@ void esp_webrtc_time_sntp_time_sync_no_wait();
  * Call after bridge_cmd_init() on streaming_only (P4) so time responses from
  * signaling_only (C6) are received. Idempotent - safe to call multiple times.
  */
-void esp_webrtc_time_register_bridge_cmd_handlers(void);
+void app_time_register_bridge_cmd_handlers(void);
 #endif
 
 #ifdef __cplusplus

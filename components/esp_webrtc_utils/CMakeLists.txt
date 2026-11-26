@@ -8,11 +8,8 @@ if(${IDF_TARGET} STREQUAL "linux")
     list(APPEND srcs "src/flash_wrapper_linux.c" "src/esp_timer_linux_compat.c")
     list(APPEND requires esp_timer)
 else()
-    list(APPEND srcs "src/esp_cli.c" "src/wifi_cli.c" "src/esp_webrtc_time.c" "src/flash_wrapper.c")
+    list(APPEND srcs "src/esp_cli.c" "src/wifi_cli.c" "src/flash_wrapper.c")
     list(APPEND requires esp_wifi console mqtt esp_timer esp_driver_uart esp_driver_usb_serial_jtag)
-    if(ENABLE_STREAMING_ONLY)
-        list(APPEND requires webrtc_bridge)
-    endif()
 endif()
 
 idf_component_register(SRCS "${srcs}"

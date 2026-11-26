@@ -26,7 +26,7 @@
 #include "bridge_cmd_defs.h"
 #endif
 
-static const char *TAG = "esp_webrtc_time";
+static const char *TAG = "app_time";
 static bool time_sync_done = false;
 
 void time_sync_notification_cb(struct timeval *tv)
@@ -88,7 +88,7 @@ static bool ensure_time_handler_registered(void)
     return true;
 }
 
-void esp_webrtc_time_register_bridge_cmd_handlers(void)
+void app_time_register_bridge_cmd_handlers(void)
 {
     if (s_time_handler_registered) {
         return;
@@ -181,7 +181,7 @@ static void initialize_sntp(void)
 #endif
 }
 
-void esp_webrtc_time_sntp_time_sync_no_wait()
+void app_time_sync_no_wait(void)
 {
     if (time_sync_done){
         ESP_LOGI(TAG, "Time sync already done");
@@ -191,7 +191,7 @@ void esp_webrtc_time_sntp_time_sync_no_wait()
     initialize_sntp();
 }
 
-void esp_webrtc_time_sntp_time_sync_and_wait()
+void app_time_sync_and_wait(void)
 {
     if (time_sync_done){
         ESP_LOGI(TAG, "Time sync already done");

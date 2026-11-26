@@ -1,4 +1,4 @@
-set(srcs "src/app_storage.c" "src/app_wifi_prov.c")
+set(srcs "src/app_storage.c" "src/app_wifi_prov.c" "src/app_time.c")
 
 set(requires fatfs spiffs esp_wifi esp_netif esp_event nvs_flash)
 

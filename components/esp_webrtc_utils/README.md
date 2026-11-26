@@ -57,18 +57,6 @@ outgoing messages and by `kvs_media` for its video intake:
   - `message_queue_get_next()` / `message_queue_get_next_wait()`: take the oldest message
   - `message_queue_cleanup()` / `message_queue_deinit()`: purge, or tear down
 
-## ESP WebRTC Time
-
-Utilities for time synchronization, essential for WebRTC operations:
-
-- **Features**:
-  - SNTP time synchronization
-  - Blocking and non-blocking time sync options
-
-- **Key Functions**:
-  - `esp_webrtc_time_sntp_time_sync_and_wait()`: Sync time and wait for completion
-  - `esp_webrtc_time_sntp_time_sync_no_wait()`: Start time sync without waiting
-
 ## Message Utilities
 
 Utilities for handling message buffers, especially for WebSocket communications:
@@ -108,18 +96,6 @@ esp_work_queue_start();
 
 // Queue a task
 esp_work_queue_add_task(my_work_function, "Task data");
-```
-
-### Time Synchronization Example
-
-```c
-// Synchronize time and wait for completion
-esp_webrtc_time_sntp_time_sync_and_wait();
-
-// Get current time
-time_t now;
-time(&now);
-printf("Current time: %s", ctime(&now));
 ```
 
 ### Message Buffer Example

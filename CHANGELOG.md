@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- SNTP time sync moved from `esp_webrtc_utils` to the examples' `app_common`, as
+  `app_time.h`. `esp_webrtc_time_sntp_time_sync_and_wait()` and `_no_wait()` are now
+  `app_time_sync_and_wait()` and `app_time_sync_no_wait()`.
+- `esp_webrtc_utils` no longer depends on `webrtc_bridge` or esp_hosted.
+
 ## [1.0.0-rc1] - 2026-11-23
 
 ### Repository structure
